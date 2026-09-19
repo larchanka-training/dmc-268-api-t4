@@ -619,7 +619,7 @@ Webhook endpoints находятся в API Layer.
 GitHub ───────┐
               │
 GitLab ───────┼──► Webhook Handler
-              │          │
+                         │
 Stripe ───────┘          ▼
                   Signature Validation
                           │
@@ -649,12 +649,10 @@ Webhook flow:
 ``` text
 User
  │
- ├── Identity
- │
- └── Membership
+ └──── Identity
           │
           ▼
-        Client
+       Account
           │
      ┌────┼───────────────┐
      ▼    ▼               ▼
@@ -693,11 +691,7 @@ Identity
 └── User
 ```
 
-### Membership
-
-Связывает User и Client и определяет роль пользователя внутри Client.
-
-### Client
+### Account
 
 Хранит:
 
@@ -711,7 +705,7 @@ Identity
 
 Хранит:
 
--   Client;
+-   Account;
 -   plan;
 -   status;
 -   limits;
