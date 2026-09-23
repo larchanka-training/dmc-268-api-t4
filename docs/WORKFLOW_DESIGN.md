@@ -109,6 +109,10 @@ flowchart TD
         TOK --> DIFF["Fetch PR files / compare base...head"]
         DIFF --> GATE{"Still the newest job
         for this PR?"}
+        W <-->|"symbol lookup
+        for context"| RAG[("RAG
+        code symbol index
+        (design pending)")]
         GATE -->|No| SUP["SUPERSEDED (no LLM spend)"]
         GATE -->|Yes| LLM["LLM review engine"]
         LLM --> DEDUP["Fingerprint findings,
