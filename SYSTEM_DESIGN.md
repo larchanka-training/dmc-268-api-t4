@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-AI Code Review Platform --- SaaS-платформа для автоматизированного code
+AI Code Review Platform --- платформа для автоматизированного code
 review изменений в GitHub и GitLab.
 
 Основные пользовательские сценарии:
@@ -22,16 +22,17 @@ review изменений в GitHub и GitLab.
 
 ## 2. Architecture Overview
 
-Архитектура строится вокруг трёх основных application containers:
+Архитектура основных application containers:
 
 ``` text
+┌──────────────────────┐      ┌──────────────────────┐
+│    Web Frontend      │      │    GitHub / GitLab   │
+│ React + TypeScript   │      │        Stripe        │
+└──────────┬───────────┘      └──────────┬───────────┘
+      REST │    ┌────────────────────────┘ Webhook
+           ▼    ▼
 ┌──────────────────────┐
-│    Web Frontend      │
-│ React + TypeScript   │
-└──────────┬───────────┘
-           │ HTTPS / REST
-           ▼
-┌──────────────────────┐
+│       Webhook        │
 │     API / Backend    │
 │    Modular Monolith  │
 └──────────┬───────────┘
@@ -48,11 +49,15 @@ review изменений в GitHub и GitLab.
 └──────────────────────┘
 ```
 
-Infrastructure:
+**Technology:** 
+-   Frontend --- React + TypeScript;
+-   Backend --- Python + FastAPI;
 
+
+**Infrastructure:** 
 -   PostgreSQL --- primary persistent storage;
--   Queue --- review jobs with Redis;
--   AWS --- базовая cloud infrastructure.
+-   Queue --- review jobs with PostgreSQL;
+-   VDS --- infrastructure.
 
 Внешние системы:
 
@@ -92,7 +97,7 @@ Infrastructure:
                 │  Stripe  │
                 └──────────┘
 
-                         AWS
+                         VDS
                 ┌─────────────────────┐
                 │ PostgreSQL          │
                 │ Queue               │
@@ -102,23 +107,6 @@ Infrastructure:
 ## 4. Container Architecture
 
 ### 4.1 Web Frontend
-
-**Technology:** React + TypeScript
-
-Responsibilities:
-
--   application shell;
--   navigation;
--   dashboard;
--   reviews;
--   repositories;
--   integrations;
--   billing;
--   settings;
--   admin UI;
--   client-side state;
--   API communication;
--   authentication state.
 
 Основные frontend components:
 
@@ -988,7 +976,7 @@ Application data и asynchronous jobs имеют
 Базовая deployment-модель:
 
 ``` text
-                         AWS
+                         VDS
                           │
              ┌────────────┴────────────┐
              │                         │
@@ -999,7 +987,7 @@ Application data и asynchronous jobs имеют
                                       │
                              ┌────────┼────────┐
                              ▼                 ▼  
-                        PostgreSQL           Queue     
+                        PostgreSQL      Queue with Postgre
                                                │
                                                ▼
                                         Review Worker
