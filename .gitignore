@@ -6,6 +6,9 @@ env/
 venv/
 .env
 .pytest_cache/
+.idea/
+/.opencode/
+/openspec/
 
 # Credentials — the GitHub App private key downloads as a .pem and cannot be
 # re-downloaded, only regenerated. Never commit it.
