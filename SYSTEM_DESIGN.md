@@ -7,101 +7,123 @@ review изменений в GitHub и GitLab.
 
 Основные пользовательские сценарии:
 
--   вход через GitHub или GitLab OAuth;
--   подключение GitHub/GitLab repositories;
--   получение события Pull/Merge Request;
--   запуск code review по триггеру;
--   сбор diff и необходимый контекст;
--   отправляет контекст через LLM Provider Interface;
--   анализирует изменения;
--   валидирует результаты;
--   публикует summary и inline comments обратно в GitHub/GitLab;
--   управление Client, участниками, repositories и настройками;
--   управление subscription и оплатой через Stripe.
--   предоставление web-интерфейса для управления участниками, repositories, а также subscription и оплатой через Stripe.
+-   вход через GitHub OAuth (GitLab OAuth --- Phase 2);
+-   подключение repositories через GitHub PAT (GitLab --- Phase 2);
+-   обработка событий Pull Request (Merge Request --- Phase 2);
+-   запуск code review по webhook-триггеру или по запросу из
+    web-интерфейса;
+-   сбор diff и необходимого контекста;
+-   анализ изменений через LLM Provider Interface;
+-   валидация результатов;
+-   публикация summary и inline comments обратно в GitHub;
+-   управление Organization, участниками, repositories и настройками;
+-   управление subscription и оплатой через Stripe;
+-   web-интерфейс для управления участниками, repositories,
+    subscription и оплатой.
+
+### Scope
+
+MVP:
+
+-   GitHub OAuth;
+-   подключение repositories через PAT;
+-   роли owner/member;
+-   LLM providers: OpenAI, Anthropic;
+-   Stripe subscriptions;
+-   очередь поверх PostgreSQL;
+-   развертывание на одном VDS.
+
+Phase 2 (паттерны закладываются в дизайн, реализация отложена):
+
+-   GitLab: OAuth, adapter, Merge Requests;
+-   GitHub App installation flow;
+-   роль Platform Admin;
+-   BYOK-ключи LLM; дополнительные LLM providers (Gemini, Custom);
+-   metered overage billing (`billing_events` пишутся с первого дня).
 
 ## 2. Architecture Overview
 
 Архитектура основных application containers:
 
 ``` text
-┌──────────────────────┐      ┌──────────────────────┐
-│    Web Frontend      │      │    GitHub / GitLab   │
-│ React + TypeScript   │      │        Stripe        │
-└──────────┬───────────┘      └──────────┬───────────┘
-      REST │    ┌────────────────────────┘ Webhook
-           ▼    ▼
 ┌──────────────────────┐
-│       Webhook        │
-│     API / Backend    │
-│    Modular Monolith  │
-└──────────┬───────────┘
+│    Web Frontend      │      ┌──────────────────────┐
+│ React + TypeScript   │      │  GitHub / GitLab /   │
+└──────────┬───────────┘      │       Stripe         │
+           │ REST             └──────────┬───────────┘
+           ▼                         webhooks
+┌──────────────────────────────────────────┐
+│               API / Backend              │
+│              Modular Monolith            │
+└──────────┬───────────────────────────────┘
            │ Review Job
            ▼
 ┌──────────────────────┐
 │      Job Queue       │
+│    (PostgreSQL)      │
 └──────────┬───────────┘
            ▼
 ┌──────────────────────┐
 │    Review Worker     │
-│ Context → LLM →      │
-│ Validation → Publish │
+│ Preflight → Context  │
+│ → LLM → Validation   │
+│ → Publish            │
 └──────────────────────┘
 ```
 
-**Technology:** 
+**Technology:**
 -   Frontend --- React + TypeScript;
--   Backend --- Python + FastAPI;
+-   Backend --- Python + FastAPI.
 
 
-**Infrastructure:** 
+**Infrastructure:**
 -   PostgreSQL --- primary persistent storage;
--   Queue --- review jobs with PostgreSQL;
+-   Queue --- review jobs поверх PostgreSQL (procrastinate);
 -   VDS --- infrastructure.
 
 Внешние системы:
 
 -   GitHub;
--   GitLab;
+-   GitLab (Phase 2);
 -   Stripe;
 -   LLM Providers.
 
 ## 3. System Context
 
 ``` text
-                         ┌───────────────────┐
-                         │       User        │
-                         │ Developer / Admin │
-                         └─────────┬─────────┘
-                                   │ HTTPS
-                                   ▼
-                         ┌───────────────────┐
-                         │   Client Portal   │
-                         │ React + TypeScript│
-                         └─────────┬─────────┘
-                                   │
-                                   ▼
-              ┌────────────────────────────────────┐
-              │      AI Code Review Platform       │
-              └──────┬─────────┬──────────┬────────┘
-                     │         │          │
-                     │         │          │
-              ┌──────▼───┐ ┌──▼──────┐ ┌─▼──────────┐
-              │ GitHub   │ │ GitLab  │ │ LLM        │
-              │          │ │         │ │ Providers  │
-              └──────────┘ └─────────┘ └────────────┘
-                     │
-                     │ Subscription / Checkout
-                     ▼
-                ┌──────────┐
-                │  Stripe  │
-                └──────────┘
+                          ┌───────────────────┐
+                          │       User        │
+                          │  Owner / Member   │
+                          └─────────┬─────────┘
+                                    │ HTTPS
+                                    ▼
+                          ┌───────────────────┐
+                          │   Web Frontend    │
+                          │ React + TypeScript│
+                          └─────────┬─────────┘
+                                    │
+                                    ▼
+               ┌────────────────────────────────────┐
+               │      AI Code Review Platform       │
+               └──────┬─────────┬──────────┬────────┘
+                      │         │          │
+                      │         │          │
+               ┌──────▼───┐ ┌──▼──────┐ ┌─▼──────────┐
+               │ GitHub   │ │ GitLab  │ │ LLM        │
+               │          │ │         │ │ Providers  │
+               └──────────┘ └─────────┘ └────────────┘
+                      │
+                      │ Subscription / Checkout
+                      ▼
+                 ┌──────────┐
+                 │  Stripe  │
+                 └──────────┘
 
-                         VDS
-                ┌─────────────────────┐
-                │ PostgreSQL          │
-                │ Queue               │
-                └─────────────────────┘
+                          VDS
+                 ┌─────────────────────┐
+                 │ PostgreSQL          │
+                 │ Queue               │
+                 └─────────────────────┘
 ```
 
 ## 4. Container Architecture
@@ -117,7 +139,7 @@ Web Frontend
 │   ├── Header
 │   ├── Navigation
 │   ├── Global Search
-│   └── User / Client Context
+│   └── User / Organization Context
 │
 ├── Dashboard
 ├── Review UI
@@ -135,7 +157,7 @@ Frontend Services
 │
 ├── API Client
 ├── Auth State
-├── Client Context
+├── Organization Context
 ├── Review State
 └── Query Cache
 ```
@@ -153,7 +175,7 @@ API / Backend
 │
 ├── API Layer
 ├── Auth Module
-├── Client Module
+├── Organization Module
 ├── Billing Module
 ├── Integration Module
 ├── Review Module
@@ -185,8 +207,8 @@ Components:
 
 Поддерживаются:
 
--   GitHub OAuth;
--   GitLab OAuth.
+-   GitHub OAuth (MVP);
+-   GitLab OAuth (Phase 2).
 
 Модель identity:
 
@@ -195,19 +217,19 @@ User
  │
  ├── Identity → GitHub
  │
- └── Identity → GitLab
+ └── Identity → GitLab (Phase 2)
 ```
 
-#### Client Module
+#### Organization Module
 
-Client является отдельной бизнес-сущностью.
+Organization является отдельной бизнес-сущностью (тенантом платформы).
 
 Components:
 
--   Client Service;
+-   Organization Service;
 -   Membership Service;
 -   Role / Authorization Service;
--   Client Repository;
+-   Organization Repository;
 -   Membership Repository.
 
 Модель:
@@ -219,16 +241,20 @@ User
 Membership
  │
  ▼
-Client
+Organization
  ├── Repositories
  ├── Subscription
  ├── Settings
  └── Usage
 ```
 
-`Platform Admin` имеет platform-wide permissions.
+`Platform Admin` (Phase 2) имеет platform-wide permissions.
 
-`Client Admin` управляет своим Client.
+`Owner` управляет своей Organization: участники, подписка, billing,
+настройки.
+
+`Member` имеет доступ к repositories, ревью и параметрам ревьюера, но
+не управляет участниками и подпиской.
 
 #### Billing Module
 
@@ -262,7 +288,7 @@ Subscription Service
 PostgreSQL
 ```
 
-Subscription принадлежит Client.
+Subscription принадлежит Organization.
 
 Основные данные:
 
@@ -285,9 +311,9 @@ Components:
 
 -   Integration Service;
 -   GitHub Adapter;
--   GitLab Adapter;
+-   GitLab Adapter (Phase 2);
 -   Repository Service;
--   Pull Request / Merge Request Service;
+-   Pull Request Service (Merge Request Service --- Phase 2);
 -   Webhook Handler;
 -   Credential Service;
 -   Integration Repository.
@@ -305,6 +331,10 @@ Adapter    Adapter
    ▼         ▼
 GitHub API GitLab API
 ```
+
+Подключение repositories выполняется через GitHub PAT
+(user-configured access token); GitHub App installation flow ---
+Phase 2.
 
 Credentials хранятся отдельно от основной User model и в необходимом
 scope.
@@ -338,7 +368,7 @@ Review Service
           Create Review
                │
                ▼
-        Publish Review Job
+         Publish Review Job
 ```
 
 Backend не выполняет длительный AI analysis в request lifecycle.
@@ -357,6 +387,12 @@ Review API
 Review Worker
 ```
 
+Queue реализована поверх PostgreSQL (procrastinate): enqueue job'а и
+запись ревью выполняются в одной транзакции --- нет потерянных и
+фантомных job'ов при сбое между записью и enqueue. Транспорт очереди
+скрыт за тонким слоем enqueue/chain; при необходимости замена не
+затрагивает domain logic.
+
 Job содержит идентификатор review и необходимый execution context для
 worker.
 
@@ -369,6 +405,7 @@ Review Worker
 │
 ├── Review Job Handler
 ├── Review Context Builder
+├── Preflight Checker
 ├── Prompt Builder
 ├── LLM Gateway
 ├── Review Analyzer
@@ -399,6 +436,9 @@ Review Job Handler
 Context Builder
       │
       ▼
+Preflight
+      │
+      ▼
 Prompt Builder
       │
       ▼
@@ -412,6 +452,9 @@ Result Validator
       │
       ▼
 Review Publisher
+      │
+      ▼
+Billing Event (usage)
       │
       ▼
 GitHub / GitLab
@@ -459,7 +502,21 @@ PR / MR
 При подготовке контекста учитываются binary/generated/ignored files и
 token/context budget.
 
-### 5.2 Prompt Builder
+### 5.2 Preflight
+
+Preflight выполняется после сборки контекста и до вызова LLM:
+
+-   оценка token budget --- размер контекста против лимитов выбранной
+    модели;
+-   проверка квоты подписки --- лимит ревью за текущий billing period;
+-   supersede-проверка --- прогон не был помечен SUPERSEDED новым
+    push'ем в тот же PR.
+
+При превышении бюджета контекст усекается (truncation/downgrade); при
+исчерпании квоты прогон завершается отказом с понятной ошибкой, billing
+event не создаётся.
+
+### 5.3 Prompt Builder
 
 Prompt Builder объединяет:
 
@@ -481,7 +538,7 @@ Output Schema
    LLM Request
 ```
 
-### 5.3 LLM Gateway
+### 5.4 LLM Gateway
 
 LLM Gateway предоставляет provider-independent interface.
 
@@ -491,15 +548,18 @@ Review Analyzer
       ▼
 LLM Gateway
       │
- ┌────┼─────────────┐
- ▼    ▼             ▼
-OpenAI Anthropic   Gemini
-Adapter  Adapter   Adapter
+  ┌───┴──────────┬─────────┐
+  ▼              ▼         ▼
+OpenAI      Anthropic   Gemini
+Adapter      Adapter   Adapter
 ```
+
+MVP подключает OpenAI и Anthropic; Gemini и Custom adapters ---
+Phase 2.
 
 Domain/application logic не зависит от конкретного LLM provider.
 
-### 5.4 Review Analyzer
+### 5.5 Review Analyzer
 
 Анализ выполняется по основным категориям:
 
@@ -512,7 +572,7 @@ Domain/application logic не зависит от конкретного LLM pro
 
 Результат --- структурированный набор findings и review summary.
 
-### 5.5 Result Validator
+### 5.6 Result Validator
 
 До публикации результаты проходят postprocessing:
 
@@ -541,7 +601,7 @@ Noise Filtering
 Publishable Findings
 ```
 
-### 5.6 Review Publisher
+### 5.7 Review Publisher
 
 Publisher преобразует validated findings в формат code-hosting provider.
 
@@ -562,6 +622,10 @@ Review Publisher
 GitHub     GitLab
 PR Review  MR Discussions
 ```
+
+Публикация идемпотентна: уникальный ключ прогона в external id
+комментария + upsert статуса --- повторная доставка job'а не создаёт
+дубликаты комментариев.
 
 ## 6. Review Lifecycle
 
@@ -590,14 +654,39 @@ Failure path:
 RUNNING / VALIDATING / PUBLISHING
               │
               ▼
-            FAILED
+            error
               │
-        ┌─────┴─────┐
-        ▼           ▼
-    Retryable   Non-retryable
+       ┌──────┴──────┐
+       ▼             ▼
+   Retryable     Non-retryable
+       │             │
+       ▼             ▼
+ retry стадии     FAILED
+ (до N попыток)  (terminal)
+       │
+       │ попытки исчерпаны
+       ▼
+    FAILED
+   (terminal)
 ```
 
-Review сохраняет execution metadata, status, findings и errors.
+Supersede path --- при новом push в тот же PR/MR активные прогоны
+помечаются SUPERSEDED в той же транзакции, что и enqueue нового
+ревью:
+
+``` text
+QUEUED / RUNNING / VALIDATING / PUBLISHING
+              │
+              ▼
+     SUPERSEDED (terminal)
+```
+
+Стадия пайплайна выполняется как отдельный job; стадии идемпотентны,
+ретраи выполняются на уровне стадии (retry-политика очереди), а не
+всего прогона.
+
+Review сохраняет execution metadata, status (включая SUPERSEDED),
+findings и errors.
 
 ## 7. Webhook Architecture
 
@@ -609,26 +698,31 @@ GitHub ───────┐
 GitLab ───────┼──► Webhook Handler
                          │
 Stripe ───────┘          ▼
-                  Signature Validation
-                          │
-                          ▼
-                     Event Parser
-                          │
-                          ▼
-                     Event Router
-                    ┌─────┼─────┐
-                    ▼     ▼     ▼
-              Integration Billing Review
+              Signature Validation
+                         │
+                         ▼
+                 Delivery Dedup
+                         │
+                         ▼
+                   Event Parser
+                         │
+                         ▼
+                  Event Router
+                 ┌─────┼─────┐
+                 ▼     ▼     ▼
+           Integration Billing Review
 ```
 
 Webhook flow:
 
 1.  receive event;
 2.  validate signature;
-3.  parse provider event;
-4.  route event;
-5.  execute соответствующий application service;
-6.  при необходимости создать asynchronous job.
+3.  dedup по delivery ID --- повторные доставки безопасны
+    (idempotent handling);
+4.  parse provider event;
+5.  route event;
+6.  execute соответствующий application service;
+7.  при необходимости создать asynchronous job.
 
 ## 8. Data Model
 
@@ -637,24 +731,25 @@ Webhook flow:
 ``` text
 User
  │
- └──── Identity
-          │
-          ▼
-       Account
-          │
-     ┌────┼───────────────┐
-     ▼    ▼               ▼
-Repository Subscription  Usage
-     │
-     ▼
-  Pull Request /
-  Merge Request
-     │
-     ▼
-   Review
-     │
-     ▼
-  Findings
+ ├── Identity → GitHub (GitLab --- Phase 2)
+ │
+ └── Membership
+        │
+        ▼
+   Organization
+        │
+   ┌────┼───────────────┐
+   ▼    ▼               ▼
+Repository Subscription Usage
+   │
+   ▼
+Pull Request / Merge Request
+   │
+   ▼
+Review
+   │
+   ▼
+Findings
 ```
 
 Ключевые сущности:
@@ -679,12 +774,24 @@ Identity
 └── User
 ```
 
-### Account
+### Membership
 
-Хранит:
+Связывает User с Organization:
 
--   subscription;
+``` text
+Membership
+├── User
+├── Organization
+└── role (owner / member)
+```
+
+### Organization
+
+Тенант платформы. Хранит:
+
+-   memberships;
 -   repositories;
+-   subscription;
 -   settings;
 -   usage;
 -   integration relationships.
@@ -693,7 +800,7 @@ Identity
 
 Хранит:
 
--   Account;
+-   Organization;
 -   plan;
 -   status;
 -   limits;
@@ -702,12 +809,27 @@ Identity
 
 ### Integration
 
-Представляет подключение GitHub или GitLab к Client.
+Представляет подключение GitHub (GitLab --- Phase 2) к Organization:
+
+``` text
+Integration
+├── provider
+├── credentials (PAT, encrypted at rest)
+└── Organization
+```
 
 ### Repository
 
 Представляет подключённый repository и его provider-specific
 identifiers/configuration.
+
+### Pull Request / Merge Request
+
+Хранит:
+
+-   repository;
+-   provider-specific PR/MR identifiers;
+-   author, head SHA, metadata.
 
 ### Review
 
@@ -734,6 +856,14 @@ identifiers/configuration.
 -   suggestion;
 -   validation metadata.
 
+### Usage
+
+Хранит:
+
+-   Organization;
+-   счётчик ревью за текущий billing period;
+-   billing events (основа для будущего metered overage billing).
+
 ## 9. Authorization Model
 
 Authorization выполняется на Backend.
@@ -744,20 +874,15 @@ Authorization выполняется на Backend.
 Platform
    │
    ▼
-Platform Admin
-   │
-   ├── platform-wide access
+Platform Admin (Phase 2) --- platform-wide access
    │
    ▼
-Client
+Organization
    │
-   ▼
-Client Admin
+   ├── Owner  --- организация, участники, подписка, billing, настройки
    │
-   └── Client-scoped management
-   │
-   ▼
-Developer
+   └── Member --- repositories, ревью, параметры ревьюера
+                  (без управления участниками и подпиской)
 ```
 
 Для review request проверяются:
@@ -766,7 +891,7 @@ Developer
 Authenticated User
         │
         ▼
-Client Membership
+Organization Membership
         │
         ▼
 Required Role
@@ -795,7 +920,9 @@ decision принимается Backend.
 -   LLM provider credentials;
 -   application secrets.
 
-Secrets хранятся в базе данных в зашифрованном виде на этапе MVP.
+Secrets хранятся в базе данных в зашифрованном виде на этапе MVP:
+application-level шифрование (AES-GCM, библиотека cryptography); ключ
+шифрования хранится вне базы (environment / secrets manager).
 
 Provider credentials не смешиваются с User domain data.
 
@@ -811,7 +938,7 @@ PostgreSQL является primary database.
 PostgreSQL
 │
 ├── Users / Identities
-├── Clients / Memberships
+├── Organizations / Memberships
 ├── Subscriptions
 ├── Integrations
 ├── Repositories
@@ -820,7 +947,9 @@ PostgreSQL
 └── Usage / Execution Metadata
 ```
 
-Object Storage тоже храним в PostgreSQL на этапе MVP.
+Отдельный object storage на этапе MVP не используется: артефакты
+прогона (context snapshot, raw LLM response) хранятся в PostgreSQL.
+Вынос в S3-совместимый storage --- post-MVP.
 
 ## 12. External Integrations
 
@@ -835,9 +964,9 @@ Object Storage тоже храним в PostgreSQL на этапе MVP.
 -   comments/reviews;
 -   webhooks.
 
-### GitLab
+### GitLab (Phase 2)
 
-Используется для:
+Adapter-паттерн закладывается в дизайн. Используется для:
 
 -   OAuth;
 -   repository access;
@@ -865,10 +994,13 @@ Review Worker
       ▼
 LLM Gateway Interface
       │
- ┌────┼────────┬─────────┐
- ▼    ▼        ▼         ▼
+  ┌───┼────────┬─────────┐
+  ▼   ▼        ▼         ▼
 OpenAI Anthropic Gemini Custom
 ```
+
+MVP: OpenAI, Anthropic (platform-wide ключи). Gemini, Custom adapters
+и BYOK --- Phase 2.
 
 ## 13. End-to-End Review Flow
 
@@ -897,11 +1029,13 @@ OpenAI Anthropic Gemini Custom
    │
    ├── fetch PR/MR
    ├── build context
+   ├── preflight (token budget, quota, supersede)
    ├── build prompt
    ├── call LLM
    ├── analyze
    ├── validate
-   └── publish
+   ├── publish
+   └── record billing event
    │
    ▼
 7. GitHub / GitLab
@@ -930,12 +1064,16 @@ GitHub/GitLab и LLM providers подключаются через adapters/inte
 
 ### Async review execution
 
-Review выполняется через Queue (Redis) + Worker, чтобы длительная AI processing
-не была частью обычного HTTP request lifecycle.
+Review выполняется через Queue поверх PostgreSQL (procrastinate) +
+Worker, чтобы длительная AI processing не была частью обычного HTTP
+request lifecycle. Enqueue job'а и запись ревью выполняются в одной
+транзакции; стадии пайплайна идемпотентны, ретраи --- на уровне
+стадии. Транспорт очереди скрыт за тонким слоем и может быть заменён
+без изменения domain logic.
 
-### Client-scoped tenancy
+### Organization-scoped tenancy
 
-Client является основной бизнес-границей для:
+Organization является основной бизнес-границей для:
 
 -   repositories;
 -   subscription;
@@ -955,6 +1093,8 @@ Review quality строится через последовательность:
 ``` text
 Context
   ↓
+Preflight
+  ↓
 Prompt
   ↓
 LLM
@@ -966,85 +1106,102 @@ Validation
 Publishing
 ```
 
-### Infrastructure separation
+### Process separation
 
-Application data и asynchronous jobs имеют
-отдельные infrastructure responsibilities.
+API и Review Worker --- отдельные процессы с независимым
+масштабированием, использующие один PostgreSQL (данные + очередь).
+Application data и asynchronous jobs разделяются логически, а не
+отдельной инфраструктурой, на этапе MVP.
 
-## 15. Deployment View
+## 15. Observability
 
-Базовая deployment-модель:
+Базовые возможности на этапе MVP:
+
+-   structured logging с correlation по review id сквозь все стадии
+    пайплайна;
+-   метрики стадий: длительность, количество ретраев, токены и
+    стоимость LLM-вызовов;
+-   статусы, ошибки и execution metadata ревью доступны через API и
+    web-интерфейс;
+-   логи и метрики процессов на хосте VDS; выделенная
+    observability-инфраструктура --- post-MVP.
+
+## 16. Deployment View
+
+Базовая deployment-модель MVP --- single-host VDS: PostgreSQL, API
+Backend и Review Worker работают на одном хосте как отдельные
+процессы; Web Frontend раздаётся как static files.
 
 ``` text
-                         VDS
-                          │
-             ┌────────────┴────────────┐
-             │                         │
-             ▼                         ▼
-      ┌──────────────┐         ┌──────────────┐
-      │ Web Frontend │         │ API Backend  │
-      └──────────────┘         └──────┬───────┘
-                                      │
-                             ┌────────┼────────┐
-                             ▼                 ▼  
-                        PostgreSQL      Queue with Postgre
-                                               │
-                                               ▼
-                                        Review Worker
-                                               │
-                                       ┌───────┴────────┐
-                                       ▼                ▼
-                                  GitHub/GitLab      LLM Provider
+                        VDS
+ ┌─────────────────────────────────────────────┐
+ │ ┌──────────────┐     ┌──────────────┐       │
+ │ │ Web Frontend │     │ API Backend  │       │
+ │ └──────────────┘     └──────┬───────┘       │
+ │                             │               │
+ │                      ┌──────▼───────┐       │
+ │                      │  PostgreSQL  │       │
+ │                      │(data + queue)│       │
+ │                      └──────▲───────┘       │
+ │                       ┌─────┴───────┐       │
+ │                       │Review Worker│       │
+ │                       └─────┬───────┘       │
+ └─────────────────────────────┼───────────────┘
+                               │
+                     ┌─────────┴──────────┐
+                     ▼                    ▼
+               GitHub/GitLab         LLM Provider
 ```
 
-AWS является инфраструктурной базой; конкретная production orchestration
-technology определяется на этапе deployment design.
+Масштабирование на несколько хостов и выбор production orchestration
+technology --- этап post-MVP.
 
-## 16. Architectural Summary
+## 17. Architectural Summary
 
 Итоговая модель:
 
 ``` text
-                         USER
+                          USER
+                            │
+                            ▼
+                   ┌─────────────────┐
+                   │  Web Frontend   │
+                   │ React/TypeScript│
+                   └────────┬────────┘
+                            │
+                            ▼
+                   ┌─────────────────┐
+                   │  API / Backend  │
+                   │ Modular Monolith│
+                   │                 │
+                   │ Auth            │
+                   │ Organization    │
+                   │ Billing         │
+                   │ Integration     │
+                   │ Review          │
+                   └───────┬─────────┘
                            │
                            ▼
-                  ┌─────────────────┐
-                  │  Web Frontend   │
-                  │ React/TypeScript│
-                  └────────┬────────┘
+                     ┌───────────┐
+                     │   Queue   │
+                     └─────┬─────┘
                            │
                            ▼
-                  ┌─────────────────┐
-                  │  API / Backend  │
-                  │ Modular Monolith│
-                  │                 │
-                  │ Auth            │
-                  │ Client          │
-                  │ Billing         │
-                  │ Integration     │
-                  │ Review          │
-                  └───────┬─────────┘
-                          │
-                          ▼
-                    ┌───────────┐
-                    │   Queue   │
-                    └─────┬─────┘
-                          │
-                          ▼
-                  ┌─────────────────┐
-                  │ Review Worker   │
-                  │                 │
-                  │ Context Builder │
-                  │ Prompt Builder  │
-                  │ LLM Gateway     │
-                  │ Analyzer        │
-                  │ Validator       │
-                  │ Publisher       │
-                  └───────┬─────────┘
-                          │
-             ┌────────────┼────────────┐
-             ▼            ▼            ▼
-          GitHub       GitLab       LLM APIs
+                   ┌─────────────────┐
+                   │ Review Worker   │
+                   │                 │
+                   │ Preflight       │
+                   │ Context Builder │
+                   │ Prompt Builder  │
+                   │ LLM Gateway     │
+                   │ Analyzer        │
+                   │ Validator       │
+                   │ Publisher       │
+                   └───────┬─────────┘
+                           │
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+           GitHub       GitLab       LLM APIs
 ```
 
 Это является базовой system design specification для MVP AI Code Review
