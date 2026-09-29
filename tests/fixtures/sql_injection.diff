@@ -1,0 +1,25 @@
+diff --git a/app/users.py b/app/users.py
+index 3f2a1c4..9b7e0d2 100644
+--- a/app/users.py
++++ b/app/users.py
+@@ -1,13 +1,20 @@
+ import sqlite3
+ 
+ from fastapi import FastAPI
+ 
+ app = FastAPI()
+ DB_PATH = "app.db"
+ 
+ 
+ def get_connection() -> sqlite3.Connection:
+     return sqlite3.connect(DB_PATH)
++
++
++@app.get("/users")
++def list_users(sort: str = "name"):
++    conn = get_connection()
++    rows = conn.execute(f"SELECT id, name, email FROM users ORDER BY {sort}").fetchall()
++    return [{"id": r[0], "name": r[1], "email": r[2]} for r in rows]
+ 
+ 
+ @app.get("/health")
