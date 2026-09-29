@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/larchanka-training/dmc-268-api-t4/docs/schemas/llm-output.schema.json",
+  "title": "LLM review output",
+  "description": "The single JSON object a model must return for one review. Validated in adapters/llm/schema.py before anything is posted; anything that fails validation is dropped, never published. Mirrors the frontend type src/modules/runs/domain/finding.ts in dmc-268-ui-t4. The schema is strict: a finding that does not match it is dropped. The parser is deliberately more tolerant in one direction only - it ignores keys it does not know (Pydantic extra=\"ignore\"), so a model that adds a field loses the field rather than the finding.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "findings"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "maxLength": 4000,
+      "description": "Overall assessment of the change, posted as the review summary. May be empty when the model has nothing to add."
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 50,
+      "description": "Concrete defects, each anchored to a line of the diff. An empty array is a valid review: it means the change looks fine.",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "line",
+        "side",
+        "severity",
+        "category",
+        "message"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Repository-relative path of the file the finding is about, exactly as it appears in the diff."
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Line number on the chosen side of the diff. A position outside the diff is dropped in post-processing."
+        },
+        "side": {
+          "$ref": "#/$defs/side"
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "category": {
+          "$ref": "#/$defs/category"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "description": "What is wrong and why it matters, in the reviewer's voice. Markdown is allowed; it is posted as comment text and never executed."
+        },
+        "suggestion": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/suggestion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A concrete replacement, when one can be stated exactly. Omitted or null otherwise."
+        }
+      }
+    },
+    "suggestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "before",
+        "after"
+      ],
+      "properties": {
+        "before": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "string"
+          },
+          "description": "The lines to be replaced, as they appear in the file."
+        },
+        "after": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "string"
+          },
+          "description": "The lines that should take their place."
+        }
+      }
+    },
+    "side": {
+      "type": "string",
+      "enum": [
+        "old",
+        "new"
+      ],
+      "description": "Which side of the diff the line belongs to: 'old' is the pre-image, 'new' the post-image. Provider-neutral on purpose; the GitHub adapter maps old/new to LEFT/RIGHT at the edge."
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "critical",
+        "high",
+        "medium",
+        "low"
+      ],
+      "description": "How much the finding matters. Also the value min_severity filters on."
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "security",
+        "correctness",
+        "concurrency",
+        "performance",
+        "maintainability"
+      ],
+      "description": "What kind of problem this is."
+    }
+  },
+  "examples": [
+    {
+      "summary": "Retries were added around the provider call. Two issues are worth a look: the retry loop keeps the database transaction open, and the backoff has no upper bound.",
+      "findings": [
+        {
+          "path": "src/payment_service.rb",
+          "line": 142,
+          "side": "new",
+          "severity": "high",
+          "category": "correctness",
+          "message": "The transaction stays open while the provider is retried. A slow provider holds the row locks for the whole backoff window, which can stall unrelated payments.",
+          "suggestion": {
+            "before": [
+              "    with_transaction do",
+              "      charge_with_retries(account, amount)",
+              "    end"
+            ],
+            "after": [
+              "    charge_with_retries(account, amount)",
+              "    with_transaction do",
+              "      record_settlement(account, amount)",
+              "    end"
+            ]
+          }
+        },
+        {
+          "path": "src/payment_service.rb",
+          "line": 158,
+          "side": "new",
+          "severity": "medium",
+          "category": "performance",
+          "message": "The backoff doubles without an upper bound, so the fifth attempt waits over a minute. Cap the delay and the number of attempts.",
+          "suggestion": null
+        }
+      ]
+    }
+  ]
+}
