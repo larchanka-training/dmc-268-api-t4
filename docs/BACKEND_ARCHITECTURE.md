@@ -82,6 +82,8 @@ entities:
   - ApiKey
 
 related_docs:
+  - path: ./PIPELINE_SPEC.md
+    covers: contracts between API, worker and dashboard; job states, retries, errors, LLM output
   - path: ./WORKFLOW_DESIGN.md
     covers: runtime behaviour, event filters, queue protocol, idempotency, failure handling
   - path: ./component-architecture-and-ER-model.md

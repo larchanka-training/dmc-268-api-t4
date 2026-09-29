@@ -1,0 +1,1045 @@
+openapi: 3.1.0
+
+info:
+  title: PR Review Bot API
+  version: 1.0.0
+  description: |
+    REST surface consumed by the dashboard (`dmc-268-ui-t4`) and by the forges and Stripe
+    through webhooks. Behaviour is specified in
+    [PIPELINE_SPEC.md](./PIPELINE_SPEC.md); this file fixes the shapes.
+
+    Rules that hold for every endpoint below:
+
+    - every request is scoped to the caller's account; there is no account id in any path,
+      so there is nothing to enumerate;
+    - list endpoints paginate with a cursor over `(created_at, id)` and return
+      `{ items, next_cursor }`;
+    - errors share one shape (`Error`) and carry a machine-readable `code`;
+    - `status`, `step` and `error_kind` are closed sets: a client renders an unknown value
+      as its raw string rather than failing.
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://{host}/api/v1
+    variables:
+      host:
+        default: review.example.com
+
+tags:
+  - name: auth
+    description: Forge OAuth login, session and linked identities
+  - name: account
+    description: The caller's account and its forge installations
+  - name: jobs
+    description: Review jobs, their findings and the diff context behind them
+  - name: billing
+    description: Plans, subscription and usage against quota
+  - name: config
+    description: Review policy per scope, bounded by the plan ceiling
+  - name: webhooks
+    description: Inbound, signature-verified; never called by the dashboard
+
+security:
+  - sessionCookie: []
+
+paths:
+  /auth/{provider}/start:
+    get:
+      tags: [auth]
+      summary: Begin forge OAuth
+      description: |
+        Redirects to the forge. Generates a single-use `state` and a PKCE verifier, both
+        stored server-side with a short TTL. `return_to` is validated against an allowlist
+        and never echoed back unchecked.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/provider"
+        - name: return_to
+          in: query
+          required: false
+          schema: { type: string }
+          description: Path inside the dashboard to land on after login.
+      responses:
+        "302":
+          description: Redirect to the forge authorization page.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /auth/{provider}/callback:
+    get:
+      tags: [auth]
+      summary: Finish forge OAuth
+      description: |
+        Verifies `state`, exchanges the code, resolves or creates the identity and opens a
+        server-side session. The user's forge token is read once for the profile and then
+        discarded. Sets an `HttpOnly`, `Secure`, `SameSite=Lax` session cookie.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/provider"
+        - name: code
+          in: query
+          required: true
+          schema: { type: string }
+        - name: state
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "302":
+          description: Redirect into the dashboard, session cookie set.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: End the session
+      description: Deletes the session server-side, so the cookie cannot be replayed.
+      responses:
+        "204":
+          description: Session deleted.
+
+  /me:
+    get:
+      tags: [auth]
+      summary: The signed-in user
+      description: |
+        The user, their linked forge identities and the accounts they can reach. The
+        dashboard uses this both for the account switcher and to decide whether to show
+        the install prompt.
+      responses:
+        "200":
+          description: The current session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /me/identities/{provider}:
+    post:
+      tags: [auth]
+      summary: Link a second forge login
+      description: |
+        Starts an OAuth flow that attaches a new identity to the current user. Requires an
+        active session: identities are never linked by matching email addresses.
+      parameters:
+        - $ref: "#/components/parameters/provider"
+      responses:
+        "302":
+          description: Redirect to the forge authorization page.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: That forge identity already belongs to another user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /me/identities/{identity_id}:
+    delete:
+      tags: [auth]
+      summary: Unlink a forge login
+      description: Refused for the last identity, which would orphan the account.
+      parameters:
+        - name: identity_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204":
+          description: Identity unlinked.
+        "409":
+          description: This is the only identity left.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /account:
+    get:
+      tags: [account]
+      summary: The caller's account
+      responses:
+        "200":
+          description: Account details.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Account" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /installations:
+    get:
+      tags: [account]
+      summary: Forge integrations and their health
+      description: |
+        Health comes from the periodic credential check, not from the last review, so a
+        revoked GitLab token is visible before a review fails on it.
+      responses:
+        "200":
+          description: One entry per connected forge.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Installation" }
+
+  /installations/{installation_id}:
+    delete:
+      tags: [account]
+      summary: Disconnect an integration
+      description: Revokes and purges the stored credential, and cancels that installation's active jobs.
+      parameters:
+        - name: installation_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204":
+          description: Integration removed.
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /jobs:
+    get:
+      tags: [jobs]
+      summary: Review jobs, newest first
+      description: |
+        One list serves both panels of the dashboard: `status=active` returns the jobs
+        still in flight, which the console polls every few seconds while any exist, and the
+        unfiltered list is the history. Jobs older than `job_retention_days` (30) are
+        purged, so the history has a floor.
+      parameters:
+        - name: status
+          in: query
+          description: |
+            `active` is shorthand for QUEUED, PROCESSING and RETRYING. Any single status
+            may also be given.
+          schema:
+            type: string
+            enum: [active, QUEUED, PROCESSING, RETRYING, COMPLETED, FAILED, SUPERSEDED, SKIPPED]
+        - name: repository
+          in: query
+          schema: { type: string }
+          description: Full name, for example `acme/payments`.
+        - name: author
+          in: query
+          schema: { type: string }
+          description: Login of the pull request author.
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: q
+          in: query
+          schema: { type: string }
+          description: Free text over the pull request title and number.
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: A page of jobs.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Job" }
+                  next_cursor:
+                    type: [string, "null"]
+                    description: Pass back as `cursor`; null when the history ends.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /jobs/{job_id}:
+    get:
+      tags: [jobs]
+      summary: One job with its steps and findings
+      parameters:
+        - $ref: "#/components/parameters/job_id"
+      responses:
+        "200":
+          description: The job, its pipeline steps and the findings it published.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobDetail" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /jobs/{job_id}/rerun:
+    post:
+      tags: [jobs]
+      summary: Review this pull request again
+      description: |
+        Creates a **new** job for the same pull request and returns it; a terminal job is
+        never resurrected. The new job re-reads current configuration and re-checks quota,
+        so a re-run can legitimately end `SKIPPED`.
+      parameters:
+        - $ref: "#/components/parameters/job_id"
+      responses:
+        "202":
+          description: A new job was queued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "403":
+          description: The subscription or quota does not allow another review.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /jobs/{job_id}/findings/{finding_id}/context:
+    get:
+      tags: [jobs]
+      summary: The diff around a finding
+      description: |
+        Fetched from the forge on demand and **not stored**: raw diffs are a stated
+        non-goal. Needs a live installation and a reachable commit, so it can answer `409`
+        for an old job — the dashboard then falls back to `path:line` with a link to the
+        forge.
+      parameters:
+        - $ref: "#/components/parameters/job_id"
+        - name: finding_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: context_lines
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 50, default: 3 }
+          description: Unchanged lines to include on each side of the hunk.
+      responses:
+        "200":
+          description: Hunks around the finding.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FindingContext" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The commit or the installation is gone; context cannot be rebuilt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /jobs/{job_id}/file-lines:
+    get:
+      tags: [jobs]
+      summary: A range of lines from a reviewed file
+      description: |
+        Serves the "unfold context" control of the diff viewer. Same sourcing and the same
+        `409` as the endpoint above; the range is clamped to the file.
+      parameters:
+        - $ref: "#/components/parameters/job_id"
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+        - name: from
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: to
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: The requested lines, in new-file numbering.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileLines" }
+        "409":
+          description: The commit or the installation is gone.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /usage:
+    get:
+      tags: [billing]
+      summary: This period's usage against quota
+      description: |
+        Quota counts **distinct pull requests** in the billing period, not reviews: a pull
+        request reviewed nine times consumes one unit.
+      responses:
+        "200":
+          description: Usage for the current period.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Usage" }
+
+  /subscription:
+    get:
+      tags: [billing]
+      summary: The account's subscription
+      description: |
+        A Free account has no subscription row; the endpoint then returns the Free plan
+        with `status: null`, so the dashboard has no special case for "no body".
+      responses:
+        "200":
+          description: Subscription state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Subscription" }
+
+  /plans:
+    get:
+      tags: [billing]
+      summary: Purchasable plans
+      description: |
+        Feeds the public pricing page and the plan picker. Prices come from `plan_prices`,
+        so changing one is data rather than a deploy. Readable without a session.
+      security: []
+      responses:
+        "200":
+          description: Plans in display order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Plan" }
+
+  /billing/checkout-session:
+    post:
+      tags: [billing]
+      summary: Start a Stripe checkout
+      description: |
+        Returns a Stripe-hosted URL to redirect to. Card data never reaches our
+        infrastructure, which is what keeps PCI scope at SAQ-A.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan]
+              properties:
+                plan:
+                  type: string
+                  enum: [pro, max]
+                return_path:
+                  type: string
+                  description: Dashboard path to return to; validated against an allowlist.
+      responses:
+        "200":
+          description: Redirect target.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostedPageUrl" }
+        "403":
+          description: The caller may not change billing for this account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /billing/portal-session:
+    post:
+      tags: [billing]
+      summary: Open the Stripe customer portal
+      description: Card changes, invoices and cancellation all happen there, not here.
+      responses:
+        "200":
+          description: Redirect target.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostedPageUrl" }
+        "409":
+          description: The account has no Stripe customer yet.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /config/{scope}/{scope_id}:
+    get:
+      tags: [config]
+      summary: Effective configuration for a scope
+      description: |
+        Returns the resolved values and, for each, where it came from. Plan entitlements
+        are a ceiling: a scope may lower a limit, never raise it.
+      parameters:
+        - $ref: "#/components/parameters/scope"
+        - $ref: "#/components/parameters/scope_id"
+      responses:
+        "200":
+          description: Resolved configuration.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResolvedConfig" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [config]
+      summary: Replace the overrides for a scope
+      description: |
+        Validated against the plan ceiling; a value above it is rejected with
+        `config_above_ceiling` rather than silently clamped.
+      parameters:
+        - $ref: "#/components/parameters/scope"
+        - $ref: "#/components/parameters/scope_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: Override keys and values; keys absent here are inherited.
+      responses:
+        "200":
+          description: Stored, with the new effective configuration.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResolvedConfig" }
+        "422":
+          description: A value is invalid or above the plan ceiling.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /webhooks/github:
+    post:
+      tags: [webhooks]
+      summary: GitHub webhook
+      description: |
+        Verified by HMAC-SHA256 over the raw body. Accepted deliveries do no network I/O:
+        the handler supersedes, inserts and notifies inside one transaction, so `202`
+        arrives well inside the delivery timeout. A duplicate delivery id inserts nothing.
+      security: []
+      parameters:
+        - name: X-Hub-Signature-256
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-GitHub-Delivery
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-GitHub-Event
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "202":
+          description: Accepted; a job may or may not have been created.
+        "401":
+          description: Signature verification failed.
+
+  /webhooks/gitlab:
+    post:
+      tags: [webhooks]
+      summary: GitLab webhook
+      description: |
+        Verified by comparing `X-Gitlab-Token`. GitLab signs nothing, so the token is a
+        bearer secret and TLS is the only integrity guarantee. GitLab also disables a hook
+        that keeps failing, so a 5xx here costs the review itself.
+      security: []
+      parameters:
+        - name: X-Gitlab-Token
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-Gitlab-Event
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "202":
+          description: Accepted.
+        "401":
+          description: Token mismatch.
+
+  /webhooks/stripe:
+    post:
+      tags: [webhooks]
+      summary: Stripe webhook
+      description: |
+        Verified by HMAC over `timestamp.body`, rejected outside a five-minute tolerance.
+        Events arrive unordered, so every subscription write compares the event's `created`
+        against the stored value and drops the older one.
+      security: []
+      parameters:
+        - name: Stripe-Signature
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Handled, or deliberately ignored.
+        "400":
+          description: Signature or timestamp rejected.
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: session
+      description: |
+        Server-side session, `HttpOnly` `Secure` `SameSite=Lax`. Revocation is immediate
+        because the session lives in the database, not in the token.
+    apiKey:
+      type: http
+      scheme: bearer
+      description: For scripts and CI. Stored only as a hash, indexed by prefix.
+
+  parameters:
+    provider:
+      name: provider
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [github, gitlab]
+    job_id:
+      name: job_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+      description: Opaque cursor from the previous page's `next_cursor`.
+    limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+    scope:
+      name: scope
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [GLOBAL, INSTALLATION, REPO]
+    scope_id:
+      name: scope_id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Installation id or repository id; `-` for the GLOBAL scope.
+
+  responses:
+    Unauthorized:
+      description: No session, or the session expired.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: |
+        No such object **in this account**. A job belonging to another account answers 404
+        rather than 403, so the response cannot be used to probe for existence.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: |
+                Machine-readable, closed set, for example `unauthorized`, `not_found`,
+                `quota_exhausted`, `config_above_ceiling`, `context_unavailable`.
+            message:
+              type: string
+              description: One sentence, safe to show to the user; secrets are redacted.
+            details:
+              type: object
+              additionalProperties: true
+
+    Me:
+      type: object
+      required: [user, identities, accounts, current_account_id]
+      properties:
+        user:
+          type: object
+          required: [id, name]
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            email: { type: [string, "null"], format: email }
+            is_platform_admin:
+              type: boolean
+              default: false
+              description: Reserved for the Phase 2 admin area; false for every customer.
+        identities:
+          type: array
+          items: { $ref: "#/components/schemas/Identity" }
+        accounts:
+          type: array
+          items: { $ref: "#/components/schemas/AccountRef" }
+        current_account_id: { type: string, format: uuid }
+
+    Identity:
+      type: object
+      required: [id, provider, username]
+      properties:
+        id: { type: string, format: uuid }
+        provider: { type: string, enum: [github, gitlab] }
+        username: { type: string }
+        avatar_url: { type: [string, "null"], format: uri }
+
+    AccountRef:
+      type: object
+      required: [id, name, role]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        role:
+          type: string
+          enum: [owner]
+          description: One role today; the field exists so adding roles stays a data change.
+
+    Account:
+      allOf:
+        - $ref: "#/components/schemas/AccountRef"
+        - type: object
+          required: [status, created_at]
+          properties:
+            status: { type: string, enum: [active, suspended, closed] }
+            created_at: { type: string, format: date-time }
+
+    Installation:
+      type: object
+      required: [id, provider, account_login, status, repository_count]
+      properties:
+        id: { type: string, format: uuid }
+        provider: { type: string, enum: [github, gitlab] }
+        account_login:
+          type: string
+          description: Owner on the forge, for example `acme` or `acme/platform`.
+        status:
+          type: string
+          enum: [healthy, credential_expiring, credential_revoked, suspended, removed]
+        repository_count: { type: integer, minimum: 0 }
+        credential_expires_at: { type: [string, "null"], format: date-time }
+        checked_at:
+          type: [string, "null"]
+          format: date-time
+          description: Last credential health check, not the last review.
+
+    PullRequestRef:
+      type: object
+      required: [provider, repo_full_name, number, title, author, head_ref, base_ref, head_sha, url]
+      description: |
+        Stored on the job from the webhook payload, so the list needs no forge round-trip.
+      properties:
+        provider: { type: string, enum: [github, gitlab] }
+        repo_full_name: { type: string, example: acme/payments }
+        number: { type: integer, minimum: 1 }
+        title: { type: string }
+        author: { type: string, description: Login on the forge. }
+        head_ref: { type: string }
+        base_ref: { type: string }
+        head_sha: { type: string }
+        url: { type: string, format: uri }
+
+    JobStatus:
+      type: string
+      enum: [QUEUED, PROCESSING, RETRYING, COMPLETED, FAILED, SUPERSEDED, SKIPPED]
+
+    Job:
+      type: object
+      required: [id, pull_request, status, created_at, finding_count]
+      properties:
+        id: { type: string, format: uuid }
+        pull_request: { $ref: "#/components/schemas/PullRequestRef" }
+        status: { $ref: "#/components/schemas/JobStatus" }
+        trigger:
+          type: string
+          enum: [webhook, command, rerun]
+          description: What created this job.
+        created_at: { type: string, format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        finding_count:
+          type: integer
+          minimum: 0
+          description: Findings actually published, after filtering and deduplication.
+        error_kind:
+          type: [string, "null"]
+          description: Set on FAILED and SKIPPED; the vocabulary is in PIPELINE_SPEC.md §5.
+        retry_count: { type: integer, minimum: 0 }
+        next_attempt_at:
+          type: [string, "null"]
+          format: date-time
+          description: Set while RETRYING, so the console can say when the retry is due.
+
+    JobDetail:
+      allOf:
+        - $ref: "#/components/schemas/Job"
+        - type: object
+          required: [steps, findings]
+          properties:
+            summary:
+              type: [string, "null"]
+              description: The summary comment posted on the pull request.
+            error_log:
+              type: [string, "null"]
+              description: Redacted diagnostic text; shown only to the owning account.
+            external_check_url:
+              type: [string, "null"]
+              format: uri
+              description: The GitHub Check Run or the GitLab note holding the summary.
+            steps:
+              type: array
+              items: { $ref: "#/components/schemas/JobStep" }
+            findings:
+              type: array
+              items: { $ref: "#/components/schemas/Finding" }
+
+    JobStep:
+      type: object
+      required: [step, status, started_at]
+      properties:
+        step:
+          type: string
+          enum:
+            [CLAIMED, AUTH, FETCH_DIFF, BUILD_CONTEXT, REDACT, GATE, LLM_CALL, POSTPROCESS, POST_FEEDBACK, METER]
+        status: { type: string, enum: [RUNNING, OK, FAILED, SKIPPED] }
+        attempt: { type: integer, minimum: 0 }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        error_kind: { type: [string, "null"] }
+        metrics:
+          type: object
+          additionalProperties: true
+          description: |
+            Counts and digests only — never diff text, prompt or model reply. For example
+            `{"model": "...", "input_tokens": 41233, "files": 18, "findings_dropped": 2}`.
+
+    Finding:
+      type: object
+      required: [id, path, line, side, severity, category, message, published_at]
+      description: |
+        A published review comment. Mirrors `finding.ts` in the dashboard and the LLM output
+        schema; `severity` and `category` are persisted (PIPELINE_SPEC.md D4).
+      properties:
+        id: { type: string, format: uuid }
+        path: { type: string }
+        line: { type: integer, minimum: 1 }
+        start_line:
+          type: [integer, "null"]
+          minimum: 1
+          description: Set for a multi-line comment; `line` is then the last line.
+        side: { $ref: "#/components/schemas/DiffSide" }
+        severity: { type: string, enum: [critical, high, medium, low] }
+        category:
+          type: string
+          enum: [security, correctness, concurrency, performance, maintainability]
+        message: { type: string, description: Markdown, as posted on the pull request. }
+        suggestion:
+          oneOf:
+            - $ref: "#/components/schemas/Suggestion"
+            - type: "null"
+        published_at: { type: string, format: date-time }
+        external_url:
+          type: string
+          format: uri
+          description: The comment on the forge, assembled server-side (PIPELINE_SPEC.md D5).
+
+    Suggestion:
+      type: object
+      required: [before, after]
+      properties:
+        before:
+          type: array
+          items: { type: string }
+        after:
+          type: array
+          items: { type: string }
+
+    DiffSide:
+      type: string
+      enum: [old, new]
+      description: |
+        `old` is the pre-image, `new` the post-image. Provider-neutral; the GitHub adapter
+        maps to LEFT/RIGHT at the edge (PIPELINE_SPEC.md D3).
+
+    FindingContext:
+      type: object
+      required: [path, status, hunks, file_line_count]
+      description: Rebuilt from the forge on request; nothing here is stored.
+      properties:
+        path: { type: string }
+        old_path: { type: [string, "null"] }
+        status: { type: string, enum: [added, modified, removed, renamed] }
+        file_line_count:
+          type: integer
+          minimum: 0
+          description: Lines in the file at the reviewed revision; bounds how far context unfolds.
+        hunks:
+          type: array
+          items: { $ref: "#/components/schemas/DiffHunk" }
+
+    DiffHunk:
+      type: object
+      required: [id, old_start, old_lines, new_start, new_lines, lines]
+      properties:
+        id: { type: string }
+        old_start: { type: integer, minimum: 0 }
+        old_lines: { type: integer, minimum: 0 }
+        new_start: { type: integer, minimum: 0 }
+        new_lines: { type: integer, minimum: 0 }
+        header:
+          type: [string, "null"]
+          description: Text after `@@`, usually the enclosing function.
+        lines:
+          type: array
+          items: { $ref: "#/components/schemas/DiffLine" }
+
+    DiffLine:
+      type: object
+      required: [type, old_line, new_line, content]
+      properties:
+        type: { type: string, enum: [context, added, removed] }
+        old_line: { type: [integer, "null"], minimum: 1 }
+        new_line: { type: [integer, "null"], minimum: 1 }
+        content: { type: string }
+
+    FileLines:
+      type: object
+      required: [path, from, lines]
+      properties:
+        path: { type: string }
+        from:
+          type: integer
+          minimum: 1
+          description: New-file number of the first returned line.
+        lines:
+          type: array
+          items: { type: string }
+
+    Usage:
+      type: object
+      required: [period_start, period_end, pull_requests_used, pull_requests_included, reviews_run]
+      properties:
+        period_start: { type: string, format: date-time }
+        period_end: { type: string, format: date-time }
+        pull_requests_used:
+          type: integer
+          minimum: 0
+          description: Distinct pull requests reviewed this period.
+        pull_requests_included: { type: integer, minimum: 0 }
+        reviews_run:
+          type: integer
+          minimum: 0
+          description: Total reviews, including repeats, which do not consume quota.
+        repositories_connected: { type: integer, minimum: 0 }
+        repositories_included: { type: [integer, "null"], minimum: 0, description: Null means unlimited. }
+
+    SubscriptionStatus:
+      type: string
+      enum: [TRIALING, ACTIVE, GRACE, SUSPENDED, CANCELLED]
+      description: |
+        Our own set, not Stripe's. Reviews run in TRIALING, ACTIVE and GRACE, and stop in
+        SUSPENDED and CANCELLED.
+
+    Subscription:
+      type: object
+      required: [plan, status]
+      properties:
+        plan: { type: string, enum: [free, pro, max] }
+        status:
+          oneOf:
+            - $ref: "#/components/schemas/SubscriptionStatus"
+            - type: "null"
+          description: Null on Free, which has no Stripe subscription at all.
+        current_period_end: { type: [string, "null"], format: date-time }
+        grace_until:
+          type: [string, "null"]
+          format: date-time
+          description: Set in GRACE; the date reviews stop unless payment succeeds.
+        cancel_at_period_end: { type: boolean, default: false }
+
+    Plan:
+      type: object
+      required: [id, name, price_cents, currency, pull_requests_included]
+      properties:
+        id: { type: string, enum: [free, pro, max] }
+        name: { type: string }
+        price_cents: { type: integer, minimum: 0 }
+        currency: { type: string, example: usd }
+        interval: { type: string, enum: [month, year], default: month }
+        pull_requests_included: { type: integer, minimum: 0 }
+        repositories_included: { type: [integer, "null"], minimum: 0 }
+        highlighted: { type: boolean, default: false }
+
+    ResolvedConfig:
+      type: object
+      required: [scope, values]
+      properties:
+        scope: { type: string, enum: [GLOBAL, INSTALLATION, REPO] }
+        scope_id: { type: [string, "null"] }
+        digest:
+          type: string
+          description: Content address of the resolved configuration, as recorded on jobs.
+        values:
+          type: object
+          additionalProperties: true
+          description: Effective values after the cascade.
+        sources:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [GLOBAL, INSTALLATION, REPO, PLAN_CEILING, DEFAULT]
+          description: Where each effective value came from, so the UI can show inheritance.
+
+    HostedPageUrl:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Stripe-hosted page to redirect to; short-lived.
