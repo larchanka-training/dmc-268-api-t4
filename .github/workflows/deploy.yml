@@ -179,19 +179,36 @@ jobs:
             exit 1
           fi
 
+      - name: Smoke test from the internet
+        run: |
+          set -uo pipefail
+          for attempt in $(seq 1 5); do
+            if body=$(curl -fsS --max-time 10 "http://$DEPLOY_HOST/api/health" 2>/dev/null); then
+              echo "external health: $body"
+              echo "- \`GET /api/health\` from the runner over the internet: \`$body\`" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "**Deploy failed:** /api/health is not reachable from the internet on port 80" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::/api/health is not reachable from the internet on port 80"
+          exit 1
+
       - name: Check exposed ports
         run: |
           set -euo pipefail
-          ports=$(ssh deploy-target "ss -Htln" \
-            | awk '{print $4}' \
-            | grep -v -E '^(127\.|\[::1\]|::1)' \
-            | sed -E 's/.*:([0-9]+)$/\1/' | sort -nu | tr '\n' ' ')
-          echo "listening on non-loopback addresses: $ports"
-          echo "- ports listening outside loopback: \`$ports\`" >> "$GITHUB_STEP_SUMMARY"
-          unexpected=$(printf '%s\n' $ports | grep -v -x -E '22|80' || true)
+          # Netid State Recv-Q Send-Q Local:Port Peer:Port; loopback and link-local are not reachable from outside.
+          exposed=$(ssh deploy-target "ss -Htuln" \
+            | awk '{print $1, $5}' \
+            | grep -v -E ' (127\.|\[::1\]|::1|\[fe80:|fe80:)' \
+            | grep -v -E '%lo:' \
+            | sed -E 's/^(tcp|udp) .*:([0-9]+)$/\1\/\2/' | sort -u | tr '\n' ' ')
+          echo "listening outside loopback: $exposed"
+          echo "- listening outside loopback: \`$exposed\`" >> "$GITHUB_STEP_SUMMARY"
+          unexpected=$(printf '%s\n' $exposed | grep -v -x -E 'tcp/22|tcp/80' || true)
           if [ -n "$unexpected" ]; then
-            echo "**Unexpected exposed ports:** $unexpected" >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::unexpected exposed ports: $unexpected"
+            echo "**Unexpected exposed ports:** $(echo $unexpected)" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::unexpected exposed ports: $(echo $unexpected)"
             exit 1
           fi
 
