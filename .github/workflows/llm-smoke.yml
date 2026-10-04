@@ -1,9 +1,6 @@
 name: LLM smoke
 
 on:
-  push:
-    branches: [devops/backend-cd] # TEMP: removed before the merge
-    paths: [.github/workflows/llm-smoke.yml]
   workflow_dispatch:
 
 permissions:
