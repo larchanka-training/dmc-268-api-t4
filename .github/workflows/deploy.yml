@@ -135,6 +135,7 @@ jobs:
             env_line POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
             env_line LLM_PRIMARY_API_KEYS "$LLM_PRIMARY_API_KEYS"
             env_line LLM_PRIMARY_BASE_URL "$LLM_PRIMARY_BASE_URL"
+            env_line LLM_TIMEOUT_SECONDS 300
             if [ -n "$LLM_PRIMARY_MODEL" ]; then env_line LLM_PRIMARY_MODEL "$LLM_PRIMARY_MODEL"; fi
           } | ssh deploy-target "umask 077 && cat > $APP_DIR/.env.new && mv $APP_DIR/.env.new $APP_DIR/.env"
 
