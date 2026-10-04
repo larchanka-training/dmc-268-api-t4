@@ -1,0 +1,128 @@
+name: VPS bootstrap
+
+on:
+  push:
+    branches: [devops/bootstrap]
+    paths: [ops/bootstrap.sh, .github/workflows/bootstrap.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vps-admin
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check inputs
+        env:
+          HAS_HOST: ${{ secrets.DEPLOY_HOST != '' }}
+          HAS_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS != '' }}
+          HAS_DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY != '' }}
+          HAS_ROOT_USER: ${{ secrets.VPS_DMC268_U != '' }}
+          HAS_ROOT_PASSWORD: ${{ secrets.VPS_DMC268_P != '' }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ "$HAS_HOST" = true ] || missing+=(secrets.DEPLOY_HOST)
+          [ "$HAS_KNOWN_HOSTS" = true ] || missing+=(secrets.DEPLOY_KNOWN_HOSTS)
+          [ "$HAS_DEPLOY_KEY" = true ] || missing+=(secrets.DEPLOY_SSH_KEY)
+          [ "$HAS_ROOT_USER" = true ] || missing+=(secrets.VPS_DMC268_U)
+          [ "$HAS_ROOT_PASSWORD" = true ] || missing+=(secrets.VPS_DMC268_P)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "**Bootstrap not started:** missing ${missing[*]}" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::missing ${missing[*]}"
+            exit 1
+          fi
+          pubkey=$(cat ops/deploy_key.pub)
+          if ! [[ "$pubkey" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+=*(\ [A-Za-z0-9._@-]+)?$ ]]; then
+            echo "**Bootstrap not started:** ops/deploy_key.pub is not a single ssh-ed25519 key" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Pin host key
+        env:
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Install sshpass
+        run: sudo apt-get install -y sshpass
+
+      - name: Run bootstrap as root
+        env:
+          SSHPASS: ${{ secrets.VPS_DMC268_P }}
+          ROOT_USER: ${{ secrets.VPS_DMC268_U }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          # GitHub runs steps with bash -e; failures are classified below, so -e is off.
+          set +e -uo pipefail
+          pubkey=$(cat ops/deploy_key.pub)
+          err_file="$RUNNER_TEMP/ssh.err"
+          sshpass -e ssh -p 22 \
+            -o ConnectTimeout=15 \
+            -o StrictHostKeyChecking=yes \
+            -o PreferredAuthentications=password \
+            -o PubkeyAuthentication=no \
+            -o NumberOfPasswordPrompts=1 \
+            -o LogLevel=ERROR \
+            "$ROOT_USER@$DEPLOY_HOST" "DEPLOY_PUBKEY='$pubkey' bash -s" \
+            < ops/bootstrap.sh 2>"$err_file" | tee "$RUNNER_TEMP/bootstrap.out"
+          status=${PIPESTATUS[0]}
+          cat "$err_file" >&2
+          if [ "$status" -ne 0 ]; then
+            err=$(cat "$err_file")
+            case "$status:$err" in
+              5:*|*"Permission denied"*) reason="permission denied for the root login (no retry)" ;;
+              6:*|*"Host key verification failed"*) reason="host key does not match DEPLOY_KNOWN_HOSTS" ;;
+              *"timed out"*) reason="timeout: SSH connection timed out" ;;
+              *"Connection refused"*) reason="connection refused on port 22" ;;
+              *"bootstrap:"*) reason="bootstrap script failed: $(grep -m1 'bootstrap:' <<<"$err")" ;;
+              *) reason="exit $status, see the step log" ;;
+            esac
+            echo "**Bootstrap failed:** $reason" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$reason"
+            exit 1
+          fi
+          {
+            echo "## Bootstrap"
+            echo '```text'
+            sed -n '/^--- bootstrap result/,$p' "$RUNNER_TEMP/bootstrap.out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify deploy login by key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          set -uo pipefail
+          eval "$(ssh-agent -s)" >/dev/null
+          trap 'ssh-agent -k >/dev/null' EXIT
+          printf '%s\n' "$DEPLOY_SSH_KEY" | ssh-add -q -
+          if out=$(ssh -p 22 \
+            -o ConnectTimeout=15 \
+            -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes \
+            -o LogLevel=ERROR \
+            "deploy@$DEPLOY_HOST" 'id; docker ps' 2>&1); then
+            printf '%s\n' "$out"
+            {
+              echo "## Deploy login by key: OK"
+              echo '```text'
+              printf '%s\n' "$out"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Deploy login by key failed:** $(printf '%s' "$out" | head -n 1)" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::deploy login by key failed"
+            exit 1
+          fi

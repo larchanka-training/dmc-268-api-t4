@@ -1,0 +1,77 @@
+name: LLM smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: llm-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    # A 300 s LLM timeout plus one corrective retry can take ~10 minutes on its own.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet .
+
+      - name: Review the SQL injection fixture with the live key
+        env:
+          LLM_PRIMARY_API_KEYS: ${{ secrets.AI_DMC268_T4 }}
+          LLM_PRIMARY_BASE_URL: ${{ vars.AI_DMC268_URL }}
+          LLM_PRIMARY_MODEL: ${{ vars.LLM_PRIMARY_MODEL }}
+          LLM_TIMEOUT_SECONDS: "300"
+        run: |
+          # GitHub runs steps with bash -e; failures are classified below, so -e is off.
+          set +e -uo pipefail
+          result="$RUNNER_TEMP/review.json"
+          errors="$RUNNER_TEMP/smoke.err"
+          # stdout holds the model's findings text: keep it out of the public log and summary.
+          .venv/bin/python -m adapters.llm.smoke tests/fixtures/sql_injection.diff \
+            --title "Add a sortable users list" >"$result" 2>"$errors"
+          status=$?
+          # stderr: gateway INFO/WARNING lines (provider, model, duration, counts) or the error.
+          cat "$errors"
+          if [ "$status" -ne 0 ]; then
+            reason=$(grep -m1 -E '^(configuration error|review failed|cannot read)' "$errors" || echo "smoke exited with $status")
+            {
+              echo "## LLM smoke: failed"
+              echo '```text'
+              printf '%s\n' "$reason"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$reason"
+            exit 1
+          fi
+          .venv/bin/python - "$result" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import collections
+          import json
+          import sys
+
+          result = json.load(open(sys.argv[1], encoding="utf-8"))
+          findings = result["findings"]
+          print("## LLM smoke")
+          print(f"- provider: `{result['provider']}`")
+          print(f"- model: `{result['model']}`")
+          print(f"- findings: **{len(findings)}**")
+          if findings:
+              print()
+              print("| severity | category | count |")
+              print("|---|---|---|")
+              counts = collections.Counter((f["severity"], f["category"]) for f in findings)
+              for (severity, category), count in sorted(counts.items()):
+                  print(f"| {severity} | {category} | {count} |")
+          PY
+          count=$(.venv/bin/python -c "import json,sys; print(len(json.load(open(sys.argv[1]))['findings']))" "$result")
+          if [ "$count" -eq 0 ]; then
+            echo "::error::the model returned no findings for a diff with a SQL injection"
+            exit 1
+          fi
