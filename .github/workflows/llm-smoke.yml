@@ -13,7 +13,8 @@ concurrency:
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # A 300 s LLM timeout plus one corrective retry can take ~10 minutes on its own.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -27,6 +28,7 @@ jobs:
           LLM_PRIMARY_API_KEYS: ${{ secrets.AI_DMC268_T4 }}
           LLM_PRIMARY_BASE_URL: ${{ vars.AI_DMC268_URL }}
           LLM_PRIMARY_MODEL: ${{ vars.LLM_PRIMARY_MODEL }}
+          LLM_TIMEOUT_SECONDS: "300"
         run: |
           # GitHub runs steps with bash -e; failures are classified below, so -e is off.
           set +e -uo pipefail
