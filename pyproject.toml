@@ -1,8 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "dmc-268-api-t4"
 version = "0.1.0"
 description = "FastAPI backend for DMC-268 Team 4"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.110.0",
-    "uvicorn>=0.28.0"
+    "uvicorn>=0.28.0",
+    "pydantic>=2.7",
+    "httpx>=0.27",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[tool.setuptools.packages.find]
+include = ["domain*", "adapters*"]
+
+[tool.setuptools.package-data]
+"adapters.llm" = ["prompts/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

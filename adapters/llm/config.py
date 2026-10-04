@@ -1,0 +1,139 @@
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+
+from domain.errors import LLMConfigurationError
+
+DEFAULT_PRIMARY_NAME = "eurouter"
+DEFAULT_PRIMARY_BASE_URL = "https://api.eurouter.ai/api/v1"
+DEFAULT_FALLBACK_NAME = "ollama"
+DEFAULT_FALLBACK_BASE_URL = "http://localhost:11434/v1"
+DEFAULT_TIMEOUT_SECONDS = 120.0
+DEFAULT_TEMPERATURE = 0.0
+MAX_TEMPERATURE = 2.0
+
+_TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
+_FALSE_VALUES = frozenset({"false", "0", "no", "off"})
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSettings:
+    name: str
+    base_url: str
+    model: str
+    api_keys: tuple[str, ...] = field(default=(), repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class LLMSettings:
+    primary: ProviderSettings
+    fallback: ProviderSettings | None
+    timeout_seconds: float
+    temperature: float
+    json_mode: bool
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "LLMSettings":
+        return _EnvReader(os.environ if env is None else env).read_settings()
+
+
+def parse_api_keys(raw: str) -> tuple[str, ...]:
+    """Split a comma-separated key list, dropping blanks and repeats but keeping order."""
+    keys = (part.strip() for part in raw.split(","))
+    return tuple(dict.fromkeys(key for key in keys if key))
+
+
+class _EnvReader:
+    def __init__(self, env: Mapping[str, str]) -> None:
+        self._env = env
+
+    def read_settings(self) -> LLMSettings:
+        fallback_enabled = self._bool("LLM_FALLBACK_ENABLED", default=False)
+        required = ["LLM_PRIMARY_API_KEYS", "LLM_PRIMARY_MODEL"]
+        if fallback_enabled:
+            required.append("LLM_FALLBACK_MODEL")
+        missing = [name for name in required if not self._text(name)]
+        if missing:
+            raise LLMConfigurationError(
+                "missing required environment variable(s): " + ", ".join(missing)
+            )
+
+        primary_keys = parse_api_keys(self._text("LLM_PRIMARY_API_KEYS"))
+        if not primary_keys:
+            raise LLMConfigurationError(
+                "LLM_PRIMARY_API_KEYS must contain at least one non-empty key"
+            )
+
+        primary = ProviderSettings(
+            name=self._text("LLM_PRIMARY_NAME") or DEFAULT_PRIMARY_NAME,
+            base_url=self._url("LLM_PRIMARY_BASE_URL", DEFAULT_PRIMARY_BASE_URL),
+            model=self._text("LLM_PRIMARY_MODEL"),
+            api_keys=primary_keys,
+        )
+        fallback = None
+        if fallback_enabled:
+            fallback = ProviderSettings(
+                name=self._text("LLM_FALLBACK_NAME") or DEFAULT_FALLBACK_NAME,
+                base_url=self._url("LLM_FALLBACK_BASE_URL", DEFAULT_FALLBACK_BASE_URL),
+                model=self._text("LLM_FALLBACK_MODEL"),
+            )
+            if fallback.name == primary.name:
+                raise LLMConfigurationError(
+                    "LLM_FALLBACK_NAME must differ from LLM_PRIMARY_NAME "
+                    f"(both are '{primary.name}')"
+                )
+
+        return LLMSettings(
+            primary=primary,
+            fallback=fallback,
+            timeout_seconds=self._float(
+                "LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS, minimum=0.0, exclusive=True
+            ),
+            temperature=self._float(
+                "LLM_TEMPERATURE", DEFAULT_TEMPERATURE, minimum=0.0, maximum=MAX_TEMPERATURE
+            ),
+            json_mode=self._bool("LLM_JSON_MODE", default=True),
+        )
+
+    def _text(self, name: str) -> str:
+        return self._env.get(name, "").strip()
+
+    def _url(self, name: str, default: str) -> str:
+        url = (self._text(name) or default).rstrip("/")
+        if not url.startswith(("http://", "https://")):
+            raise LLMConfigurationError(f"{name} must be an http(s) URL, got '{url}'")
+        return url
+
+    def _bool(self, name: str, *, default: bool) -> bool:
+        raw = self._text(name).lower()
+        if not raw:
+            return default
+        if raw in _TRUE_VALUES:
+            return True
+        if raw in _FALSE_VALUES:
+            return False
+        raise LLMConfigurationError(f"{name} must be true or false, got '{raw}'")
+
+    def _float(
+        self,
+        name: str,
+        default: float,
+        *,
+        minimum: float,
+        maximum: float | None = None,
+        exclusive: bool = False,
+    ) -> float:
+        raw = self._text(name)
+        if not raw:
+            return default
+        try:
+            value = float(raw)
+        except ValueError:
+            raise LLMConfigurationError(f"{name} must be a number, got '{raw}'") from None
+        below_minimum = value <= minimum if exclusive else value < minimum
+        if below_minimum or (maximum is not None and value > maximum):
+            bound = f"> {minimum}" if exclusive else f">= {minimum}"
+            if maximum is not None:
+                bound += f" and <= {maximum}"
+            raise LLMConfigurationError(f"{name} must be {bound}, got {value}")
+        return value
