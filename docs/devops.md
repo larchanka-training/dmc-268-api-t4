@@ -38,6 +38,7 @@ VPS (Debian 13), /opt/dmc268, docker compose project "dmc268"
 | `deploy/compose.yml` | стек на сервере: api, postgres, redis, caddy |
 | `deploy/Caddyfile` | `:80`, `/api/*` → api, остальное → статика фронтенда |
 | `.github/workflows/ci.yml` | на PR и push в main: ruff, mypy, pytest; сборка образа, `/health` в контейнере, проверка `compose.yml` |
+| `.github/workflows/llm-smoke.yml` | вручную (`workflow_dispatch`): смоук LLM Gateway с живым ключом на `tests/fixtures/sql_injection.diff`; в Summary только provider, model и счётчики severity/category, текст модели в лог не попадает |
 | `.github/workflows/deploy.yml` | на push в main и вручную: сборка → GHCR → деплой → smoke → проверка портов |
 | `ops/bootstrap.sh`, `.github/workflows/bootstrap.yml` | однократная подготовка сервера root-ом: Docker, `rsync` (для деплоя фронтенда), пользователь `deploy`, `/opt/dmc268`, LLMNR/mDNS выключены. Запускается вручную (`workflow_dispatch`) или push в ветку `devops/bootstrap`, но не push в `main` |
 | `ops/deploy_key.pub` | публичный ключ CI для пользователя `deploy` |
@@ -54,7 +55,7 @@ VPS (Debian 13), /opt/dmc268, docker compose project "dmc268"
 | `POSTGRES_PASSWORD` | repo secret | api | пароль PostgreSQL, сгенерирован `openssl rand -hex 24` |
 | `AI_DMC268_T4` | org secret | api | ключи Eurouter → `LLM_PRIMARY_API_KEYS` |
 | `AI_DMC268_URL` | org variable | api | → `LLM_PRIMARY_BASE_URL` |
-| `LLM_PRIMARY_MODEL` | repo variable | api | id модели Eurouter (`claude-sonnet-4-6`). Если переменную удалить, строка в `.env` не пишется, deploy выдаёт warning |
+| `LLM_PRIMARY_MODEL` | repo variable | api | id модели Eurouter, сейчас `glm-5.2` (см. «Открытые вопросы»). Если переменную удалить, строка в `.env` не пишется, deploy выдаёт warning |
 | `VPS_DMC268_U`, `VPS_DMC268_P` | org secret | — | root-вход по паролю, используется только в `bootstrap.yml` |
 | `GITHUB_TOKEN` | автоматически | api | push образа в GHCR; на сервере `docker login` → pull → `docker logout` |
 
@@ -161,3 +162,11 @@ gh workflow run deploy.yml -R larchanka-training/dmc-268-api-t4 --ref main -f im
 3. **Root-вход по паролю на сервере.** Он открыт, а пароль лежит в секретах организации.
    Предложение владельцу: закрыть вход по паролю (`PermitRootLogin prohibit-password`),
    поставить fail2ban.
+4. **Модели Anthropic в Eurouter недоступны с ключом команды.** Для `claude-sonnet-4-6`,
+   `anthropic/claude-sonnet-4-6` и `claude-haiku-4.5` Eurouter отвечает `400
+   invalid_request_error: No providers available for model … with given preferences`, даже на
+   запрос из одного `model` + `messages`. Модели других провайдеров (`mistral-small-4`,
+   `glm-5.2`) с тем же ключом работают. Вероятная причина — настройки маршрутизации
+   аккаунта или ключа, исключающие AWS Bedrock (единственный провайдер Claude в Eurouter).
+   Пока используется `glm-5.2`; вернуть Claude — правка настроек у владельца ключа и
+   смена repo variable `LLM_PRIMARY_MODEL`, без изменений кода.
