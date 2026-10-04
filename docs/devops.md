@@ -29,13 +29,12 @@ VPS (Debian 13), /opt/dmc268, docker compose project "dmc268"
     └─ всё остальное → /srv = /opt/dmc268/frontend, SPA fallback на /index.html
   api      ghcr…/dmc-268-api-t4:${IMAGE_TAG}   uvicorn main:app, порт не публикуется
   postgres postgres:17-alpine, volume pgdata, порт не публикуется
-  redis    redis:7-alpine, volume redisdata, порт не публикуется
 ```
 
 | Файл | Назначение |
 |---|---|
 | `Dockerfile`, `.dockerignore` | образ бэкенда: `python:3.13-slim`, `pip install .`, non-root uid 10001 |
-| `deploy/compose.yml` | стек на сервере: api, postgres, redis, caddy |
+| `deploy/compose.yml` | стек на сервере: api, postgres, caddy |
 | `deploy/Caddyfile` | `:80`, `/api/*` → api, остальное → статика фронтенда |
 | `.github/workflows/ci.yml` | на PR и push в main: ruff, mypy, pytest; сборка образа, `/health` в контейнере, проверка `compose.yml` |
 | `.github/workflows/llm-smoke.yml` | вручную (`workflow_dispatch`): смоук LLM Gateway с живым ключом на `tests/fixtures/sql_injection.diff`; в Summary только provider, model и счётчики severity/category, текст модели в лог не попадает |
@@ -113,8 +112,7 @@ gh workflow run deploy.yml -R larchanka-training/dmc-268-api-t4 --ref main -f im
 2. **Ветки `develop` нет**, деплой идёт только по push в `main`.
 3. **Воркера в compose нет**, пока нет кода (см. «Как добавить воркер»). Это остаток DoD
    карточки #14.
-4. **Redis поднимается** по карточке спринта, хотя по `docs/WORKFLOW_DESIGN.md` §1 очередь
-   живёт в PostgreSQL. Приложение Redis пока не использует (см. «Открытые вопросы»).
+4. **Очередь в PostgreSQL, Redis не используется** (решение команды, 2026-10-04).
 5. **IP в workflow берётся из secret `DEPLOY_HOST`**, а не из `vars.VPS_DMC268_IP_T4`:
    переменная не маскируется и уже однажды попала в публичный лог.
    `DEPLOY_KNOWN_HOSTS` тоже secret, потому что строка known_hosts содержит IP.
@@ -157,17 +155,14 @@ gh workflow run deploy.yml -R larchanka-training/dmc-268-api-t4 --ref main -f im
 
 ## Открытые вопросы
 
-1. **Redis или очередь в PostgreSQL.** Карточка спринта требует Redis, а
-   `docs/WORKFLOW_DESIGN.md` §1 и `docs/BACKEND_ARCHITECTURE.md` объявляют PostgreSQL
-   очередью «without Redis». Redis сейчас запущен, но не используется.
-2. **Домен и HTTPS.** Без домена Caddy не может получить сертификат, и всё идёт по HTTP:
+1. **Домен и HTTPS.** Без домена Caddy не может получить сертификат, и всё идёт по HTTP:
    cookie сессий и OAuth-callback в таком виде использовать нельзя. Нужен домен
    (A-запись на сервер), после чего в Caddyfile `:80` меняется на имя хоста, а в compose
    добавляется `443:443`.
-3. **Root-вход по паролю на сервере.** Он открыт, а пароль лежит в секретах организации.
+2. **Root-вход по паролю на сервере.** Он открыт, а пароль лежит в секретах организации.
    Предложение владельцу: закрыть вход по паролю (`PermitRootLogin prohibit-password`),
    поставить fail2ban.
-4. **Модели Anthropic в Eurouter недоступны с ключом команды.** Для `claude-sonnet-4-6`,
+3. **Модели Anthropic в Eurouter недоступны с ключом команды.** Для `claude-sonnet-4-6`,
    `anthropic/claude-sonnet-4-6` и `claude-haiku-4.5` Eurouter отвечает `400
    invalid_request_error: No providers available for model … with given preferences`, даже на
    запрос из одного `model` + `messages`. Модели других провайдеров (`mistral-small-4`,

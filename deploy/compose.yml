@@ -1,5 +1,5 @@
 # Production stack on the team 4 VPS, deployed to /opt/dmc268 by .github/workflows/deploy.yml.
-# Only Caddy publishes a port; api, postgres and redis are reachable on the compose network only.
+# Only Caddy publishes a port; api and postgres are reachable on the compose network only.
 name: dmc268
 
 services:
@@ -29,17 +29,6 @@ services:
       timeout: 5s
       retries: 5
 
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    volumes:
-      - redisdata:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   caddy:
     image: caddy:2
     restart: unless-stopped
@@ -55,6 +44,5 @@ services:
 
 volumes:
   pgdata:
-  redisdata:
   caddy_data:
   caddy_config:
