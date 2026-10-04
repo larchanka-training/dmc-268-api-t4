@@ -39,8 +39,8 @@ VPS (Debian 13), /opt/dmc268, docker compose project "dmc268"
 | `deploy/Caddyfile` | `:80`, `/api/*` → api, остальное → статика фронтенда |
 | `.github/workflows/ci.yml` | на PR и push в main: ruff, mypy, pytest; сборка образа, `/health` в контейнере, проверка `compose.yml` |
 | `.github/workflows/deploy.yml` | на push в main и вручную: сборка → GHCR → деплой → smoke → проверка портов |
-| `ops/bootstrap.sh`, `.github/workflows/bootstrap.yml` (ветка `devops/bootstrap`) | однократная подготовка сервера root-ом: Docker, пользователь `deploy`, `/opt/dmc268` |
-| `ops/deploy_key.pub` (ветка `devops/bootstrap`) | публичный ключ CI для пользователя `deploy` |
+| `ops/bootstrap.sh`, `.github/workflows/bootstrap.yml` | однократная подготовка сервера root-ом: Docker, пользователь `deploy`, `/opt/dmc268`, LLMNR/mDNS выключены. Запускается вручную (`workflow_dispatch`) или push в ветку `devops/bootstrap`, но не push в `main` |
+| `ops/deploy_key.pub` | публичный ключ CI для пользователя `deploy` |
 
 ## Секреты и переменные
 
@@ -54,7 +54,7 @@ VPS (Debian 13), /opt/dmc268, docker compose project "dmc268"
 | `POSTGRES_PASSWORD` | repo secret | api | пароль PostgreSQL, сгенерирован `openssl rand -hex 24` |
 | `AI_DMC268_T4` | org secret | api | ключи Eurouter → `LLM_PRIMARY_API_KEYS` |
 | `AI_DMC268_URL` | org variable | api | → `LLM_PRIMARY_BASE_URL` |
-| `LLM_PRIMARY_MODEL` | repo variable | api | id модели Eurouter. **Пока не задана**: строка в `.env` не пишется, deploy выдаёт warning |
+| `LLM_PRIMARY_MODEL` | repo variable | api | id модели Eurouter (`claude-sonnet-4-6`). Если переменную удалить, строка в `.env` не пишется, deploy выдаёт warning |
 | `VPS_DMC268_U`, `VPS_DMC268_P` | org secret | — | root-вход по паролю, используется только в `bootstrap.yml` |
 | `GITHUB_TOKEN` | автоматически | api | push образа в GHCR; на сервере `docker login` → pull → `docker logout` |
 
@@ -133,10 +133,6 @@ gh workflow run deploy.yml -R larchanka-training/dmc-268-api-t4 --ref main -f im
     деплой падает. Если понадобится 443 (HTTPS), его нужно разрешить в шаге «Check exposed
     ports». Дополнительно `/api/health` запрашивается с раннера через интернет, так что
     проверяется и доступность порта 80 снаружи, а не только `localhost` на сервере.
-15. **LLMNR и mDNS выключены на сервере.** `systemd-resolved` слушал `5355/tcp` на всех
-    интерфейсах. `ops/bootstrap.sh` кладёт drop-in
-    `/etc/systemd/resolved.conf.d/90-dmc268-no-multicast.conf` (`LLMNR=no`,
-    `MulticastDNS=no`) и перезапускает службу, только если drop-in изменился.
 11. **PostgreSQL получает только свои переменные** через интерполяцию compose, а не весь
     `.env`: ключам LLM в контейнере БД делать нечего. api получает `.env` целиком.
 12. **`main.py` копируется в образ отдельно.** Он не входит в пакеты setuptools
@@ -145,6 +141,13 @@ gh workflow run deploy.yml -R larchanka-training/dmc-268-api-t4 --ref main -f im
     разрешённых actions; `requires-python >= 3.12` совпадает с Python на `ubuntu-latest`.
 14. **Пользователь `deploy` в группе `docker`**, то есть фактически имеет права root на
     сервере. Это осознанная цена деплоя без sudo; ключ лежит только в secret `DEPLOY_SSH_KEY`.
+15. **LLMNR и mDNS выключены на сервере.** `systemd-resolved` слушал `5355/tcp` на всех
+    интерфейсах. `ops/bootstrap.sh` кладёт drop-in
+    `/etc/systemd/resolved.conf.d/90-dmc268-no-multicast.conf` (`LLMNR=no`,
+    `MulticastDNS=no`) и перезапускает службу, только если drop-in изменился.
+16. **Bootstrap не запускается от push в `main`.** Он меняет сервер с правами root, поэтому
+    срабатывает только вручную (`workflow_dispatch`) или от push в ветку `devops/bootstrap`.
+    Повторный прогон безопасен: скрипт идемпотентный.
 
 ## Открытые вопросы
 
@@ -158,5 +161,3 @@ gh workflow run deploy.yml -R larchanka-training/dmc-268-api-t4 --ref main -f im
 3. **Root-вход по паролю на сервере.** Он открыт, а пароль лежит в секретах организации.
    Предложение владельцу: закрыть вход по паролю (`PermitRootLogin prohibit-password`),
    поставить fail2ban.
-4. **Модель Eurouter.** `LLM_PRIMARY_MODEL` не выбрана. Пока она не задана как repo
-   variable, `.env` не содержит модели, а смоук Gateway (`llm-smoke.yml`) не пройдёт.
