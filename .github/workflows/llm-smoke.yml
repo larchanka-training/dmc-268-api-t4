@@ -25,6 +25,39 @@ jobs:
           python3 -m venv .venv
           .venv/bin/pip install --quiet .
 
+      # TEMP: one-off diagnosis of the Eurouter 400, removed right after the run.
+      - name: Diagnose Eurouter model routing
+        env:
+          LLM_KEYS: ${{ secrets.AI_DMC268_T4 }}
+          BASE_URL: ${{ vars.AI_DMC268_URL }}
+        run: |
+          set +e -uo pipefail
+          key=$(printf '%s' "${LLM_KEYS%%,*}" | tr -d '[:space:]')
+          base="${BASE_URL:-https://api.eurouter.ai/api/v1}"
+          base="${base%/}"
+          auth() { printf 'header = "Authorization: Bearer %s"\n' "$key"; }
+          other=$(auth | curl -sS --max-time 20 -K - "$base/models" \
+            | python3 -c "import json,sys; ids=[m['id'] for m in json.load(sys.stdin).get('data', [])]; print(next((i for i in ids if 'mistral-small' in i), next((i for i in ids if 'mistral' in i), 'mistral-small')))" 2>/dev/null)
+          echo "non-Anthropic model picked from the catalog: ${other:-mistral-small}"
+          probe() {
+            local label="$1" model="$2" extra="$3" body response code message
+            body=$(python3 -c "import json,sys; b={'model': sys.argv[1], 'messages': [{'role': 'user', 'content': 'ping'}], 'max_tokens': 5}; b.update(json.loads(sys.argv[2])); print(json.dumps(b))" "$model" "$extra")
+            response=$(auth | curl -sS --max-time 30 -K - -H 'Content-Type: application/json' \
+              -o "$RUNNER_TEMP/probe.json" -w '%{http_code}' -d "$body" "$base/chat/completions")
+            code=$response
+            message=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); e=d.get('error') or {}; print((e.get('message') if isinstance(e, dict) else str(e)) or 'ok')" "$RUNNER_TEMP/probe.json" 2>/dev/null || echo "unparseable body")
+            printf '| %s | `%s` | %s | %s | %s |\n' "$label" "$model" "${extra}" "$code" "${message:0:160}" | tee -a "$RUNNER_TEMP/diag.md"
+          }
+          printf '| # | model | extra params | HTTP | error.message |\n|---|---|---|---|---|\n' > "$RUNNER_TEMP/diag.md"
+          probe 1 claude-sonnet-4-6 '{}'
+          probe 2 claude-sonnet-4-6 '{"temperature": 0}'
+          probe 3 claude-sonnet-4-6 '{"temperature": 0, "response_format": {"type": "json_object"}}'
+          probe 4 anthropic/claude-sonnet-4-6 '{}'
+          probe 5 claude-haiku-4.5 '{}'
+          probe 6 "${other:-mistral-small}" '{}'
+          { echo "## Eurouter diagnosis"; cat "$RUNNER_TEMP/diag.md"; } >> "$GITHUB_STEP_SUMMARY"
+          rm -f "$RUNNER_TEMP/probe.json"
+
       - name: Review the SQL injection fixture with the live key
         env:
           LLM_PRIMARY_API_KEYS: ${{ secrets.AI_DMC268_T4 }}
