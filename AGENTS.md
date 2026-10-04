@@ -65,9 +65,8 @@ mypy domain adapters
 ## Open questions
 
 Documents disagree here. Do not pick a side in code; ask the team.
-1. **Queue:** procrastinate over PostgreSQL ([SYSTEM_DESIGN.md §4.3](SYSTEM_DESIGN.md)) vs
-   own job table with `SKIP LOCKED`, no Redis ([docs/WORKFLOW_DESIGN.md §1](docs/WORKFLOW_DESIGN.md));
-   the sprint 2 card mentions Redis.
+1. **Queue (resolved):** PostgreSQL, as in [docs/WORKFLOW_DESIGN.md §1](docs/WORKFLOW_DESIGN.md)
+   (team decision, 2026-10-04).
 2. **LLM providers:** OpenAI and Anthropic ([SYSTEM_DESIGN.md §5.4](SYSTEM_DESIGN.md)) vs
    Eurouter + Ollama behind one OpenAI-compatible adapter ([docs/llm-gateway.md](docs/llm-gateway.md), PR #8).
 3. **Severity:** not persisted ([docs/configuration.md §3](docs/configuration.md)) vs stored on
