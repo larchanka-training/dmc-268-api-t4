@@ -10,6 +10,7 @@ readonly DOCKER_KEYRING=/etc/apt/keyrings/docker.asc
 readonly DOCKER_SOURCE=/etc/apt/sources.list.d/docker.list
 readonly DOCKER_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
 readonly APT=(apt-get -o DPkg::Lock::Timeout=300 -y -qq)
+readonly RESOLVED_DROPIN=/etc/systemd/resolved.conf.d/90-dmc268-no-multicast.conf
 
 fail() {
   echo "bootstrap: $*" >&2
@@ -73,6 +74,25 @@ setup_deploy_user() {
   chmod 600 "$ssh_dir/authorized_keys"
 }
 
+# LLMNR (5355) and mDNS (5353) resolve names on a local network; on an internet-facing
+# server they only widen the attack surface.
+disable_multicast_name_resolution() {
+  if ! systemctl cat systemd-resolved.service >/dev/null 2>&1; then
+    echo "systemd-resolved not installed, nothing to disable"
+    return
+  fi
+  local wanted
+  wanted=$'[Resolve]\nLLMNR=no\nMulticastDNS=no'
+  if [ "$(cat "$RESOLVED_DROPIN" 2>/dev/null)" != "$wanted" ]; then
+    install -d -m 755 "$(dirname "$RESOLVED_DROPIN")"
+    printf '%s\n' "$wanted" > "$RESOLVED_DROPIN"
+    systemctl try-restart systemd-resolved
+    echo "LLMNR and mDNS disabled"
+  else
+    echo "LLMNR and mDNS already disabled"
+  fi
+}
+
 create_app_dirs() {
   install -d -m 755 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$APP_DIR" "$APP_DIR/frontend"
 }
@@ -84,6 +104,7 @@ print_summary() {
   echo "docker service: $(systemctl is-active docker)"
   id "$DEPLOY_USER"
   stat -c '%A %U:%G %n' "$APP_DIR" "$APP_DIR/frontend"
+  echo "resolved: $(resolvectl status 2>/dev/null | grep -m1 -E '^\s*Protocols:' | sed 's/^ *//' || echo n/a)"
 }
 
 main() {
@@ -92,6 +113,7 @@ main() {
   systemctl enable --now docker
   setup_deploy_user
   create_app_dirs
+  disable_multicast_name_resolution
   print_summary
 }
 
