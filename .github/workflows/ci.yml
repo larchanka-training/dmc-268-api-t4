@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, devops/backend-cd] # TEMP: devops/backend-cd is removed before the PR
+    branches: [main]
 
 permissions:
   contents: read
