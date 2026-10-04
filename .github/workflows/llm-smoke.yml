@@ -31,7 +31,8 @@ jobs:
           LLM_PRIMARY_BASE_URL: ${{ vars.AI_DMC268_URL }}
           LLM_PRIMARY_MODEL: ${{ vars.LLM_PRIMARY_MODEL }}
         run: |
-          set -uo pipefail
+          # GitHub runs steps with bash -e; failures are classified below, so -e is off.
+          set +e -uo pipefail
           result="$RUNNER_TEMP/review.json"
           errors="$RUNNER_TEMP/smoke.err"
           # stdout holds the model's findings text: keep it out of the public log and summary.
