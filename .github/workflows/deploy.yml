@@ -1,0 +1,200 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main, devops/backend-cd] # TEMP: devops/backend-cd is removed before the PR
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Existing image tag (commit sha) to roll back to; empty builds the current commit"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/larchanka-training/dmc-268-api-t4
+  APP_DIR: /opt/dmc268
+
+jobs:
+  build:
+    if: inputs.image_tag == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ github.ref == 'refs/heads/main' && format('{0}:latest', env.IMAGE) || '' }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  deploy:
+    needs: build
+    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check inputs
+        env:
+          HAS_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS != '' }}
+          HAS_DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY != '' }}
+          HAS_POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD != '' }}
+          HAS_LLM_KEYS: ${{ secrets.AI_DMC268_T4 != '' }}
+          HAS_LLM_URL: ${{ vars.AI_DMC268_URL != '' }}
+          HAS_LLM_MODEL: ${{ vars.LLM_PRIMARY_MODEL != '' }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "$DEPLOY_HOST" ] || missing+=(secrets.DEPLOY_HOST)
+          [ "$HAS_KNOWN_HOSTS" = true ] || missing+=(secrets.DEPLOY_KNOWN_HOSTS)
+          [ "$HAS_DEPLOY_KEY" = true ] || missing+=(secrets.DEPLOY_SSH_KEY)
+          [ "$HAS_POSTGRES_PASSWORD" = true ] || missing+=(secrets.POSTGRES_PASSWORD)
+          [ "$HAS_LLM_KEYS" = true ] || missing+=(secrets.AI_DMC268_T4)
+          [ "$HAS_LLM_URL" = true ] || missing+=(vars.AI_DMC268_URL)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "**Deploy not started:** missing ${missing[*]}" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::missing ${missing[*]}"
+            exit 1
+          fi
+          if ! [[ "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "**Deploy not started:** image tag must be a full 40-character commit sha" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if [ "$HAS_LLM_MODEL" != true ]; then
+            echo "::warning::vars.LLM_PRIMARY_MODEL is not set: .env gets no LLM_PRIMARY_MODEL (Eurouter model not chosen)"
+          fi
+
+      - name: Set up SSH
+        env:
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          printf 'Host deploy-target\n  HostName %s\n  User deploy\n  Port 22\n  StrictHostKeyChecking yes\n  BatchMode yes\n  ConnectTimeout 15\n  LogLevel ERROR\n' "$DEPLOY_HOST" > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          agent_sock="$RUNNER_TEMP/ssh-agent.sock"
+          eval "$(ssh-agent -s -a "$agent_sock")" >/dev/null
+          printf '%s\n' "$DEPLOY_SSH_KEY" | ssh-add -q -
+          echo "SSH_AUTH_SOCK=$agent_sock" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          if ! out=$(ssh deploy-target true 2>&1); then
+            case "$out" in
+              *"Permission denied"*) reason="permission denied for deploy (check DEPLOY_SSH_KEY)" ;;
+              *"Host key verification failed"*) reason="host key does not match DEPLOY_KNOWN_HOSTS" ;;
+              *"timed out"*) reason="timeout: SSH connection timed out" ;;
+              *"Connection refused"*) reason="connection refused on port 22" ;;
+              *) reason="ssh failed: $(printf '%s' "$out" | head -n 1)" ;;
+            esac
+            echo "**Deploy failed:** $reason" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$reason"
+            exit 1
+          fi
+
+      - name: Upload compose files
+        run: scp -q deploy/compose.yml deploy/Caddyfile "deploy-target:$APP_DIR/"
+
+      - name: Write runtime .env
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          LLM_PRIMARY_API_KEYS: ${{ secrets.AI_DMC268_T4 }}
+          LLM_PRIMARY_BASE_URL: ${{ vars.AI_DMC268_URL }}
+          LLM_PRIMARY_MODEL: ${{ vars.LLM_PRIMARY_MODEL }}
+        run: |
+          set -euo pipefail
+          env_line() { printf '%s=%s\n' "$1" "$(printf '%s' "$2" | tr -d '\r\n')"; }
+          {
+            env_line IMAGE_TAG "$IMAGE_TAG"
+            env_line POSTGRES_USER dmc
+            env_line POSTGRES_DB dmc268
+            env_line POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
+            env_line LLM_PRIMARY_API_KEYS "$LLM_PRIMARY_API_KEYS"
+            env_line LLM_PRIMARY_BASE_URL "$LLM_PRIMARY_BASE_URL"
+            if [ -n "$LLM_PRIMARY_MODEL" ]; then env_line LLM_PRIMARY_MODEL "$LLM_PRIMARY_MODEL"; fi
+          } | ssh deploy-target "umask 077 && cat > $APP_DIR/.env.new && mv $APP_DIR/.env.new $APP_DIR/.env"
+
+      - name: Pull and start
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$GHCR_TOKEN" | ssh deploy-target "set -euo pipefail
+            cd $APP_DIR
+            trap 'docker logout ghcr.io >/dev/null 2>&1' EXIT
+            docker login ghcr.io --username '${{ github.actor }}' --password-stdin >/dev/null
+            docker compose config --quiet
+            docker compose pull --quiet
+            docker compose up --detach --remove-orphans
+            docker image prune --force >/dev/null
+            docker compose ps --format 'table {{.Service}}\t{{.Status}}'"
+
+      - name: Smoke test through Caddy
+        run: |
+          set -uo pipefail
+          if body=$(ssh deploy-target 'for attempt in $(seq 1 10); do
+                curl -fsS http://localhost/api/health && exit 0
+                sleep 3
+              done
+              exit 1'); then
+            echo "health: $body"
+            {
+              echo "## Deploy"
+              echo "- image: \`${IMAGE}:${IMAGE_TAG}\`"
+              echo "- \`GET /api/health\` through Caddy: \`$body\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            logs=$(ssh deploy-target "cd $APP_DIR && docker compose logs --no-color --tail 50 api" 2>&1)
+            printf '%s\n' "$logs"
+            {
+              echo "**Deploy failed:** /api/health did not answer through Caddy after 10 attempts"
+              echo '```text'
+              printf '%s\n' "$logs"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Check exposed ports
+        run: |
+          set -euo pipefail
+          ports=$(ssh deploy-target "ss -Htln" \
+            | awk '{print $4}' \
+            | grep -v -E '^(127\.|\[::1\]|::1)' \
+            | sed -E 's/.*:([0-9]+)$/\1/' | sort -nu | tr '\n' ' ')
+          echo "listening on non-loopback addresses: $ports"
+          echo "- ports listening outside loopback: \`$ports\`" >> "$GITHUB_STEP_SUMMARY"
+          unexpected=$(printf '%s\n' $ports | grep -v -x -E '22|80' || true)
+          if [ -n "$unexpected" ]; then
+            echo "**Unexpected exposed ports:** $unexpected" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::unexpected exposed ports: $unexpected"
+            exit 1
+          fi
+
+      - name: Stop SSH agent
+        if: always()
+        run: ssh-agent -k >/dev/null 2>&1 || true
