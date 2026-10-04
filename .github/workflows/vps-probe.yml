@@ -1,0 +1,154 @@
+name: VPS probe (read-only)
+
+on:
+  push:
+    branches: [devops/vps-probe]
+    paths: [.github/workflows/vps-probe.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vps-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VPS_HOST: ${{ vars.VPS_DMC268_IP_T4 }}
+      VPS_USER: ${{ secrets.VPS_DMC268_U }}
+    steps:
+      - name: Check inputs and mask the host
+        env:
+          HAS_PASSWORD: ${{ secrets.VPS_DMC268_P != '' }}
+        run: |
+          set -euo pipefail
+          # The repository is public: the IP is a Variable, not a secret, so mask it explicitly.
+          if [ -n "$VPS_HOST" ]; then echo "::add-mask::$VPS_HOST"; fi
+          missing=()
+          [ -n "$VPS_HOST" ] || missing+=("vars.VPS_DMC268_IP_T4")
+          [ -n "$VPS_USER" ] || missing+=("secrets.VPS_DMC268_U")
+          [ "$HAS_PASSWORD" = "true" ] || missing+=("secrets.VPS_DMC268_P")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "**Probe not started:** missing ${missing[*]}" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::missing ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Install sshpass
+        run: sudo apt-get install -y sshpass
+
+      - name: Fetch host key
+        run: |
+          set -uo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          keys=$(ssh-keyscan -T 10 -p 22 "$VPS_HOST" 2>/dev/null)
+          if [ -z "$keys" ]; then
+            if timeout 10 bash -c ': </dev/tcp/"$VPS_HOST"/22' 2>/dev/null; then
+              reason="host key: port 22 is open but ssh-keyscan got no key"
+            elif [ "$?" -eq 124 ]; then
+              reason="timeout: no answer on port 22 within 10s"
+            else
+              reason="connection refused on port 22"
+            fi
+            echo "**Connection failed:** $reason" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$reason"
+            exit 1
+          fi
+          printf '%s\n' "$keys" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          echo "Host key fingerprints (trust on first use, recorded for history):"
+          ssh-keygen -lf ~/.ssh/known_hosts
+
+      - name: Run read-only probe
+        env:
+          SSHPASS: ${{ secrets.VPS_DMC268_P }}
+        run: |
+          set -uo pipefail
+          err_file="$RUNNER_TEMP/ssh.err"
+          report=$(sshpass -e ssh -p 22 \
+            -o ConnectTimeout=15 \
+            -o StrictHostKeyChecking=yes \
+            -o PreferredAuthentications=password \
+            -o PubkeyAuthentication=no \
+            -o NumberOfPasswordPrompts=1 \
+            -o LogLevel=ERROR \
+            "$VPS_USER@$VPS_HOST" 'bash -s' 2>"$err_file" <<'PROBE'
+          section() { printf '\n### %s\n\n```text\n' "$1"; }
+          end_section() { printf '```\n'; }
+          try() {
+            local out status
+            out=$("$@" 2>&1); status=$?
+            if [ "$status" -eq 0 ]; then printf '%s\n' "$out"
+            else printf 'n/a: %s (exit %s)\n' "$(printf '%s' "$out" | head -n 3)" "$status"; fi
+          }
+          try_docker() {
+            local out status
+            out=$("$@" 2>&1); status=$?
+            if [ "$status" -eq 0 ]; then printf '%s\n' "$out"
+            elif printf '%s' "$out" | grep -qi 'permission denied'; then echo "n/a: no access to the docker socket"
+            else printf 'n/a: %s (exit %s)\n' "$(printf '%s' "$out" | head -n 3)" "$status"; fi
+          }
+
+          section "Identity"; try whoami; try id; try hostname; end_section
+          section "OS"; try grep '^PRETTY_NAME=' /etc/os-release; try uname -r; try uptime -p; end_section
+          section "CPU and memory"; echo "cpus: $(nproc 2>/dev/null || echo n/a)"; try free -h; end_section
+          section "Disk"; try df -h /; try df -h /var/lib/docker; end_section
+          section "Passwordless sudo"
+          if sudo -n true 2>/dev/null; then echo "passwordless sudo: yes"; else echo "passwordless sudo: no"; fi
+          end_section
+          section "Docker"
+          if command -v docker; then
+            try docker --version; try docker compose version
+          else
+            echo "n/a: docker not installed"
+          fi
+          docker_state=$(systemctl is-active docker 2>/dev/null)
+          echo "service: ${docker_state:-n/a}"
+          end_section
+          section "Docker daemon"
+          if command -v docker >/dev/null; then try_docker docker info --format '{{.ServerVersion}} {{.Driver}}'; else echo "n/a: docker not installed"; fi
+          end_section
+          section "Docker containers"
+          if command -v docker >/dev/null; then try_docker docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'; else echo "n/a: docker not installed"; fi
+          end_section
+          section "Groups"
+          try groups
+          if id -nG 2>/dev/null | tr ' ' '\n' | grep -qx docker; then echo "in docker group: yes"; else echo "in docker group: no"; fi
+          end_section
+          section "Listening TCP ports"; try ss -tln; end_section
+          section "Installed tools"
+          for tool in git python3 nginx caddy psql redis-server; do
+            path=$(command -v "$tool" 2>/dev/null) && echo "$tool: $path" || echo "$tool: not installed"
+          done
+          end_section
+          section "Timezone"; try timedatectl show -p Timezone --value; end_section
+          section "Home directory listing"; try ls -la ~; end_section
+          exit 0
+          PROBE
+          )
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            err=$(cat "$err_file")
+            case "$status:$err" in
+              5:*|*"Permission denied"*) reason="permission denied: check secrets.VPS_DMC268_U / secrets.VPS_DMC268_P (no retry)" ;;
+              6:*|*"Host key verification failed"*) reason="host key: verification failed" ;;
+              *"timed out"*) reason="timeout: SSH connection timed out" ;;
+              *"Connection refused"*) reason="connection refused on port 22" ;;
+              *) reason="ssh exit $status: $(printf '%s' "$err" | head -n 1)" ;;
+            esac
+            echo "**Connection failed:** $reason" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$reason"
+            exit 1
+          fi
+          # Job summaries of a public repository are public: replace host and user before writing.
+          report=${report//"$VPS_HOST"/***}
+          report=${report//"$VPS_USER"/***}
+          printf '%s\n' "$report"
+          {
+            echo "## VPS probe (read-only)"
+            printf '%s\n' "$report"
+          } >> "$GITHUB_STEP_SUMMARY"
