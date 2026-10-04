@@ -2,7 +2,7 @@ name: Deploy
 
 on:
   push:
-    branches: [main, devops/backend-cd] # TEMP: devops/backend-cd is removed before the PR
+    branches: [main]
   workflow_dispatch:
     inputs:
       image_tag:
