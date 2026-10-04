@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, devops/backend-cd] # TEMP: devops/backend-cd is removed before the PR
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          python3 --version
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet -e ".[dev]"
+
+      - name: Ruff
+        run: |
+          .venv/bin/ruff check .
+          .venv/bin/ruff format --check .
+
+      - name: Mypy
+        run: .venv/bin/mypy domain adapters
+
+      - name: Pytest
+        run: .venv/bin/pytest -q
+
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build --tag dmc268-api:ci .
+
+      - name: Check /health in the container
+        run: |
+          set -uo pipefail
+          docker run --detach --name api --publish 127.0.0.1:8000:8000 dmc268-api:ci
+          for attempt in $(seq 1 10); do
+            if body=$(curl -fsS http://127.0.0.1:8000/health); then
+              echo "attempt $attempt: $body"
+              [ "$body" = '{"status":"ok"}' ] && exit 0
+            fi
+            sleep 2
+          done
+          docker logs api
+          echo "::error::/health did not return {\"status\":\"ok\"}"
+          exit 1
+
+      - name: Container runs as non-root
+        run: |
+          user=$(docker exec api id -u)
+          echo "uid in container: $user"
+          [ "$user" != "0" ]
+
+      - name: Validate compose file
+        working-directory: deploy
+        run: |
+          printf 'IMAGE_TAG=ci\nPOSTGRES_USER=dmc\nPOSTGRES_PASSWORD=dummy\nPOSTGRES_DB=dmc268\n' > .env
+          docker compose -f compose.yml config --quiet
+          echo "compose.yml is valid; published ports:"
+          docker compose -f compose.yml config --format json | python3 -c "import json,sys; c=json.load(sys.stdin); print({n: [p.get('published') for p in s.get('ports', [])] for n, s in c['services'].items()})"
