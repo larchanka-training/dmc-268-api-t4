@@ -104,7 +104,10 @@ print_summary() {
   echo "docker service: $(systemctl is-active docker)"
   id "$DEPLOY_USER"
   stat -c '%A %U:%G %n' "$APP_DIR" "$APP_DIR/frontend"
-  echo "resolved: $(resolvectl status 2>/dev/null | grep -m1 -E '^\s*Protocols:' | sed 's/^ *//' || echo n/a)"
+  local protocols
+  # awk reads all of resolvectl's output: an early exit would SIGPIPE it and trip pipefail.
+  protocols=$(resolvectl status 2>/dev/null | awk '/^ *Protocols:/ && !seen { sub(/^ +/, ""); print; seen = 1 }')
+  echo "resolved: ${protocols:-n/a}"
 }
 
 main() {
