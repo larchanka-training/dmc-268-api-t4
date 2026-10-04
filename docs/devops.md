@@ -39,7 +39,7 @@ VPS (Debian 13), /opt/dmc268, docker compose project "dmc268"
 | `deploy/Caddyfile` | `:80`, `/api/*` → api, остальное → статика фронтенда |
 | `.github/workflows/ci.yml` | на PR и push в main: ruff, mypy, pytest; сборка образа, `/health` в контейнере, проверка `compose.yml` |
 | `.github/workflows/deploy.yml` | на push в main и вручную: сборка → GHCR → деплой → smoke → проверка портов |
-| `ops/bootstrap.sh`, `.github/workflows/bootstrap.yml` | однократная подготовка сервера root-ом: Docker, пользователь `deploy`, `/opt/dmc268`, LLMNR/mDNS выключены. Запускается вручную (`workflow_dispatch`) или push в ветку `devops/bootstrap`, но не push в `main` |
+| `ops/bootstrap.sh`, `.github/workflows/bootstrap.yml` | однократная подготовка сервера root-ом: Docker, `rsync` (для деплоя фронтенда), пользователь `deploy`, `/opt/dmc268`, LLMNR/mDNS выключены. Запускается вручную (`workflow_dispatch`) или push в ветку `devops/bootstrap`, но не push в `main` |
 | `ops/deploy_key.pub` | публичный ключ CI для пользователя `deploy` |
 
 ## Секреты и переменные

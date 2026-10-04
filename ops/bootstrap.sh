@@ -9,6 +9,8 @@ readonly APP_DIR=/opt/dmc268
 readonly DOCKER_KEYRING=/etc/apt/keyrings/docker.asc
 readonly DOCKER_SOURCE=/etc/apt/sources.list.d/docker.list
 readonly DOCKER_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+# rsync must exist on both ends: the frontend deploy copies dist/ with it.
+readonly EXTRA_PACKAGES=(rsync)
 readonly APT=(apt-get -o DPkg::Lock::Timeout=300 -y -qq)
 readonly RESOLVED_DROPIN=/etc/systemd/resolved.conf.d/90-dmc268-no-multicast.conf
 
@@ -57,6 +59,23 @@ install_docker() {
   "${APT[@]}" install "${DOCKER_PACKAGES[@]}"
 }
 
+install_extra_packages() {
+  local missing=() package
+  for package in "${EXTRA_PACKAGES[@]}"; do
+    if ! dpkg-query -W -f='${Status}\n' "$package" 2>/dev/null | grep -qx 'install ok installed'; then
+      missing+=("$package")
+    fi
+  done
+  if [ "${#missing[@]}" -eq 0 ]; then
+    echo "extra packages already installed: ${EXTRA_PACKAGES[*]}"
+    return
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  "${APT[@]}" update
+  "${APT[@]}" install "${missing[@]}"
+  echo "installed: ${missing[*]}"
+}
+
 setup_deploy_user() {
   if ! id "$DEPLOY_USER" >/dev/null 2>&1; then
     useradd --create-home --shell /bin/bash "$DEPLOY_USER"
@@ -102,6 +121,7 @@ print_summary() {
   docker --version
   docker compose version
   echo "docker service: $(systemctl is-active docker)"
+  echo "rsync: $(rsync --version 2>/dev/null | awk 'NR == 1' || echo n/a)"
   id "$DEPLOY_USER"
   stat -c '%A %U:%G %n' "$APP_DIR" "$APP_DIR/frontend"
   local protocols
@@ -114,6 +134,7 @@ main() {
   check_preconditions
   install_docker
   systemctl enable --now docker
+  install_extra_packages
   setup_deploy_user
   create_app_dirs
   disable_multicast_name_resolution
