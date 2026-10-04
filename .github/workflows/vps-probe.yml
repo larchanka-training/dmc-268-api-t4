@@ -93,8 +93,8 @@ jobs:
             else printf 'n/a: %s (exit %s)\n' "$(printf '%s' "$out" | head -n 3)" "$status"; fi
           }
 
-          section "Identity"; try whoami; try id; try hostname; end_section
-          section "OS"; try grep '^PRETTY_NAME=' /etc/os-release; try uname -r; try uptime -p; end_section
+          section "Identity"; try whoami; try id; end_section
+          section "OS"; try grep '^PRETTY_NAME=' /etc/os-release; try uptime -p; end_section
           section "CPU and memory"; echo "cpus: $(nproc 2>/dev/null || echo n/a)"; try free -h; end_section
           section "Disk"; try df -h /; try df -h /var/lib/docker; end_section
           section "Passwordless sudo"
@@ -113,20 +113,38 @@ jobs:
           if command -v docker >/dev/null; then try_docker docker info --format '{{.ServerVersion}} {{.Driver}}'; else echo "n/a: docker not installed"; fi
           end_section
           section "Docker containers"
-          if command -v docker >/dev/null; then try_docker docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'; else echo "n/a: docker not installed"; fi
+          if ! command -v docker >/dev/null; then
+            echo "n/a: docker not installed"
+          elif images=$(docker ps --format '{{.Image}}' 2>&1); then
+            echo "running: $(printf '%s' "$images" | grep -c .)"
+            for service in postgres redis nginx; do
+              if printf '%s\n' "$images" | grep -qi "$service"; then echo "$service: yes"; else echo "$service: no"; fi
+            done
+          elif printf '%s' "$images" | grep -qi 'permission denied'; then
+            echo "n/a: no access to the docker socket"
+          else
+            echo "n/a: docker ps failed"
+          fi
           end_section
           section "Groups"
           try groups
           if id -nG 2>/dev/null | tr ' ' '\n' | grep -qx docker; then echo "in docker group: yes"; else echo "in docker group: no"; fi
           end_section
-          section "Listening TCP ports"; try ss -tln; end_section
+          section "Listening TCP ports"
+          if command -v ss >/dev/null; then
+            for port in 22 80 443 5432 6379 8000 3000; do
+              if [ -n "$(ss -Htln "sport = :$port" 2>/dev/null)" ]; then echo "$port: yes"; else echo "$port: no"; fi
+            done
+          else
+            echo "n/a: ss not available"
+          fi
+          end_section
           section "Installed tools"
           for tool in git python3 nginx caddy psql redis-server; do
             path=$(command -v "$tool" 2>/dev/null) && echo "$tool: $path" || echo "$tool: not installed"
           done
           end_section
           section "Timezone"; try timedatectl show -p Timezone --value; end_section
-          section "Home directory listing"; try ls -la ~; end_section
           exit 0
           PROBE
           )
