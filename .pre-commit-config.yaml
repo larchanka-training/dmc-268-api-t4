@@ -1,0 +1,18 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff-check
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.4.0
+    hooks:
+      - id: mypy
+        args: [domain, adapters]
+        pass_filenames: false
+        additional_dependencies:
+          - httpx>=0.27
+          - pydantic>=2.7
+          - fastapi>=0.110.0
+          - "pyjwt[crypto]>=2.9"

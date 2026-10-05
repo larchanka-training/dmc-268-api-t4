@@ -1,0 +1,67 @@
+services:
+  api:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      APP_ORIGIN: http://localhost:8000
+      GITHUB_CLIENT_ID: local
+      GITHUB_CLIENT_SECRET: local
+      GITHUB_CALLBACK_URL: http://localhost:8000/api/auth/github/callback
+      GITHUB_APP_ID: "1"
+      GITHUB_APP_SLUG: local
+      GITHUB_APP_PRIVATE_KEY_PATH: /tmp/dev-app.pem
+    # The entrypoint script writes a throwaway PEM, then runs the app.
+    entrypoint:
+      - python
+      - -c
+      - |
+        import os
+        import sys
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        pem = key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        with open("/tmp/dev-app.pem", "wb") as key_file:
+            key_file.write(pem)
+        os.execvp(sys.argv[1], sys.argv[1:])
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: dmc
+      POSTGRES_PASSWORD: dmc
+      POSTGRES_DB: dmc268
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dmc -d dmc268"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
