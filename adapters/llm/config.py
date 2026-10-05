@@ -13,6 +13,9 @@ DEFAULT_TEMPERATURE = 0.0
 # Providers that receive no max_tokens may reserve the whole context window for the reply
 # and reject the request outright, so a reply budget is always sent.
 DEFAULT_MAX_TOKENS = 4096
+# Hard input budget, as recommended for qwen3-coder: a bigger prompt is refused before any
+# provider is called. Fitting context into the budget is the context builder's job.
+DEFAULT_MAX_INPUT_TOKENS = 32000
 MAX_TEMPERATURE = 2.0
 
 _TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
@@ -39,6 +42,7 @@ class LLMSettings:
     temperature: float
     json_mode: bool
     max_tokens: int = DEFAULT_MAX_TOKENS
+    max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "LLMSettings":
@@ -103,6 +107,7 @@ class _EnvReader:
             ),
             json_mode=self._bool("LLM_JSON_MODE", default=True),
             max_tokens=self._positive_int("LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS),
+            max_input_tokens=self._positive_int("LLM_MAX_INPUT_TOKENS", DEFAULT_MAX_INPUT_TOKENS),
         )
 
     def _text(self, name: str) -> str:

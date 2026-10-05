@@ -23,6 +23,15 @@ class LLMOutputError(LLMGatewayError):
         self.reason = reason
 
 
+class LLMInputTooLargeError(LLMGatewayError):
+    """The review input exceeds the token budget; no provider is called."""
+
+    def __init__(self, estimated_tokens: int, limit: int) -> None:
+        super().__init__(f"review input is too large: ~{estimated_tokens} tokens, limit {limit}")
+        self.estimated_tokens = estimated_tokens
+        self.limit = limit
+
+
 class AllProvidersFailedError(LLMGatewayError):
     def __init__(self, causes: Sequence[LLMGatewayError]) -> None:
         self.causes: tuple[LLMGatewayError, ...] = tuple(causes)

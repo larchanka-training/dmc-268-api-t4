@@ -3,7 +3,15 @@ import logging
 import pytest
 
 from adapters.llm.gateway import review_with_provider
-from adapters.llm.schema import InvalidReviewJSONError, parse_review, strip_code_fence
+from adapters.llm.schema import (
+    FINDINGS_MAX,
+    PATH_MAX_LENGTH,
+    SUGGESTION_MAX_LINES,
+    SUMMARY_MAX_LENGTH,
+    InvalidReviewJSONError,
+    parse_review,
+    strip_code_fence,
+)
 from domain.errors import LLMOutputError
 from domain.models import (
     Category,
@@ -154,3 +162,53 @@ async def test_dropped_findings_are_counted_in_warning_without_text(
     assert "dropped 1 finding(s)" in caplog.text
     assert "SECRET-FINDING-TEXT" not in caplog.text
     assert VALID_FINDING["message"] not in caplog.text
+
+
+def test_summary_is_cut_to_the_schema_limit() -> None:
+    parsed = parse_review(review_json(VALID_FINDING, summary="s" * (SUMMARY_MAX_LENGTH + 500)))
+
+    assert len(parsed.review.summary) == SUMMARY_MAX_LENGTH
+
+
+def test_too_long_path_drops_finding() -> None:
+    long_path = {**VALID_FINDING, "path": "a/" * PATH_MAX_LENGTH}
+
+    parsed = parse_review(review_json(long_path, VALID_FINDING))
+
+    assert len(parsed.review.findings) == 1
+    assert parsed.dropped_findings == 1
+
+
+def test_too_long_suggestion_drops_finding() -> None:
+    lines = ["x"] * (SUGGESTION_MAX_LINES + 1)
+    long_fix = {**VALID_FINDING, "suggestion": {"before": lines, "after": ["y"]}}
+
+    parsed = parse_review(review_json(long_fix, VALID_FINDING))
+
+    assert len(parsed.review.findings) == 1
+    assert parsed.dropped_findings == 1
+
+
+def test_findings_within_limit_keep_model_order() -> None:
+    low = {**VALID_FINDING, "severity": "low", "message": "first"}
+    critical = {**VALID_FINDING, "severity": "critical", "message": "second"}
+
+    parsed = parse_review(review_json(low, critical))
+
+    assert [finding.message for finding in parsed.review.findings] == ["first", "second"]
+    assert parsed.trimmed_findings == 0
+
+
+def test_findings_over_limit_keep_the_most_severe() -> None:
+    lows = [{**VALID_FINDING, "severity": "low", "message": f"low {i}"} for i in range(45)]
+    criticals = [
+        {**VALID_FINDING, "severity": "critical", "message": f"critical {i}"} for i in range(10)
+    ]
+
+    parsed = parse_review(review_json(*lows, *criticals))
+
+    kept = parsed.review.findings
+    assert len(kept) == FINDINGS_MAX
+    assert parsed.trimmed_findings == 5
+    assert [finding.message for finding in kept[:10]] == [f"critical {i}" for i in range(10)]
+    assert kept[10].message == "low 0"
