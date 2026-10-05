@@ -158,6 +158,7 @@ jobs:
             env_line LLM_PRIMARY_BASE_URL "$LLM_PRIMARY_BASE_URL"
             env_line LLM_TIMEOUT_SECONDS 300
             env_line SITE_ADDRESS                "$SITE_ADDRESS"
+            env_line SERVER_IP                   "$DEPLOY_HOST"
             env_line APP_ORIGIN                  "https://$SITE_ADDRESS"
             env_line GITHUB_CALLBACK_URL         "https://$SITE_ADDRESS/api/auth/github/callback"
             env_line GITHUB_CLIENT_ID            "$GITHUB_CLIENT_ID"
@@ -254,6 +255,11 @@ jobs:
             fail "http does not redirect to https (status $code)"
           fi
           echo "http redirects to https with $code"
+          ip_redirect=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' "http://$DEPLOY_HOST/api/health")
+          if ! [[ "${ip_redirect%% *}" =~ ^30[1278]$ && "${ip_redirect#* }" == "$base/api/health" ]]; then
+            fail "http://<IP> does not redirect to the site name (status ${ip_redirect%% *})"
+          fi
+          echo "http://<IP> redirects to the site name"
           certificate=$(echo | openssl s_client -connect "$SITE_ADDRESS:443" -servername "$SITE_ADDRESS" 2>/dev/null \
             | openssl x509 -noout -issuer -enddate | tr '\n' ' ')
           echo "certificate: $certificate"

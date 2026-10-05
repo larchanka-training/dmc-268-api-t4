@@ -38,6 +38,7 @@ services:
       - api
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:?SITE_ADDRESS must be set in .env}
+      SERVER_IP: ${SERVER_IP:?SERVER_IP must be set in .env}
     # 80 stays open for the ACME HTTP-01 challenge and the redirect to https.
     ports:
       - "80:80"
