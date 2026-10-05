@@ -20,4 +20,5 @@ RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin app
 USER app
 
 EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Caddy strips /api before proxying; --root-path makes /docs load /api/openapi.json.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--root-path", "/api"]

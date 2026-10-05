@@ -14,3 +14,9 @@
 		file_server
 	}
 }
+
+# The bare server IP has no certificate: send old http://<IP> links to the site name
+# instead of Caddy's default redirect to https://<IP>, which fails in the browser.
+http://{$SERVER_IP} {
+	redir https://{$SITE_ADDRESS}{uri} permanent
+}

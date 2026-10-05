@@ -27,7 +27,7 @@ push в main (dmc-268-api-t4)                push в main (dmc-268-ui-t4)
    smoke: curl localhost/api/health
         │
         ▼
-VPS (Debian 13), /opt/dmc268, docker compose project "dmc268"
+VPS у Contabo (Debian 13), /opt/dmc268, docker compose project "dmc268"
   caddy:2 ── :80 (ACME HTTP-01, редирект на https) и :443/tcp наружу, сертификат Let's Encrypt в volume caddy_data
     ├─ /api/*  → api:8000  (handle_path срезает /api)
     └─ всё остальное → /srv = /opt/dmc268/frontend, SPA fallback на /index.html
@@ -58,7 +58,7 @@ VPS (Debian 13), /opt/dmc268, docker compose project "dmc268"
 | `POSTGRES_PASSWORD` | repo secret | api | пароль PostgreSQL, сгенерирован `openssl rand -hex 24` |
 | `AI_DMC268_T4` | org secret | api | ключи Eurouter → `LLM_PRIMARY_API_KEYS` |
 | `AI_DMC268_URL` | org variable | api | → `LLM_PRIMARY_BASE_URL` |
-| `LLM_PRIMARY_MODEL` | repo variable | api | id модели Eurouter, сейчас `glm-5.2` (см. «Открытые вопросы»). Если переменную удалить, строка в `.env` не пишется, deploy выдаёт warning |
+| `LLM_PRIMARY_MODEL` | repo variable | api | id модели Eurouter, сейчас `qwen3-coder-30b-a3b` (см. «Открытые вопросы»). Если переменную удалить, строка в `.env` не пишется, deploy выдаёт warning |
 | `LLM_PRIMARY_PROVIDER_ORDER` | repo variable | api, llm-smoke | провайдеры Eurouter по порядку, например `scaleway,ovhcloud`. Пусто = маршрутизация Eurouter по умолчанию. Подробности в `docs/llm-gateway.md` |
 | `VPS_DMC268_U`, `VPS_DMC268_P` | org secret | — | root-вход по паролю, используется только в `bootstrap.yml` |
 | `GITHUB_TOKEN` | автоматически | api | push образа в GHCR; на сервере `docker login` → pull → `docker logout` |
@@ -168,17 +168,25 @@ gh workflow run deploy.yml -R larchanka-training/dmc-268-api-t4 --ref main -f im
     **В настройках GitHub App** нужно указать адреса на https: Callback URL
     `https://<site>/api/auth/github/callback` и Setup URL `https://<site>/api/github/setup`.
     Если появится свой домен, меняется только `SITE_ADDRESS` (и эти два URL).
+19. **Старый адрес `http://<IP>` ведёт на имя сайта.** Сертификата на голый IP нет, поэтому
+    стандартный редирект Caddy на `https://<IP>` в браузере давал ошибку. В Caddyfile отдельный
+    блок `http://{$SERVER_IP}` отвечает 308 на `https://<site>{uri}`. `SERVER_IP` пишет в `.env`
+    `deploy.yml` из `DEPLOY_HOST`, smoke проверяет этот редирект.
+20. **Swagger за префиксом `/api`.** Caddy срезает `/api` перед бэкендом, поэтому uvicorn
+    запускается с `--root-path /api` (Dockerfile): роуты не меняются, а `/api/docs` грузит
+    `/api/openapi.json`, а не `/openapi.json`, который отдал бы фронтенд.
+21. **Хостер: Contabo**, а не Hetzner из карточки спринта 1: сервер выдан вручную,
+    это видно в приветствии SSH.
 
 ## Открытые вопросы
 
 1. **Root-вход по паролю на сервере.** Он открыт, а пароль лежит в секретах организации.
    Предложение владельцу: закрыть вход по паролю (`PermitRootLogin prohibit-password`),
    поставить fail2ban.
-2. **Модели Anthropic в Eurouter недоступны с ключом команды.** Для `claude-sonnet-4-6`,
-   `anthropic/claude-sonnet-4-6` и `claude-haiku-4.5` Eurouter отвечает `400
-   invalid_request_error: No providers available for model … with given preferences`, даже на
-   запрос из одного `model` + `messages`. Модели других провайдеров (`mistral-small-4`,
-   `glm-5.2`) с тем же ключом работают. Вероятная причина — настройки маршрутизации
-   аккаунта или ключа, исключающие AWS Bedrock (единственный провайдер Claude в Eurouter).
-   Пока используется `glm-5.2`; вернуть Claude — правка настроек у владельца ключа и
-   смена repo variable `LLM_PRIMARY_MODEL`, без изменений кода.
+2. **Модели Anthropic в Eurouter недоступны.** Для `claude-sonnet-4-6`, `claude-haiku-4.5` и
+   других Eurouter отвечает `400 No providers available for model … with given preferences`.
+   Причина (документация Eurouter, раздел Routing → Data residency): по умолчанию запросы идут
+   только к провайдерам с EU-хостингом, а Claude в Eurouter доступен только через AWS Bedrock
+   вне EU. Сейчас используется `qwen3-coder-30b-a3b` (рекомендация Миши) с
+   `LLM_PRIMARY_PROVIDER_ORDER=scaleway,ovhcloud`. Вернуть Claude можно, только ослабив
+   требование EU-хостинга, а это решение команды по данным.
