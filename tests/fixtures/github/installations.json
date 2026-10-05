@@ -1,0 +1,45 @@
+{
+  "total_count": 4,
+  "installations": [
+    {
+      "id": 10,
+      "account": {
+        "id": 100,
+        "login": "acme",
+        "type": "Organization",
+        "name": "Acme Inc",
+        "avatar_url": "https://avatars.githubusercontent.com/u/100"
+      }
+    },
+    {
+      "id": 11,
+      "account": {
+        "id": 200,
+        "login": "pending-org",
+        "type": "Organization",
+        "name": "Pending Org",
+        "avatar_url": "https://avatars.githubusercontent.com/u/200"
+      }
+    },
+    {
+      "id": 12,
+      "account": {
+        "id": 1,
+        "login": "octocat",
+        "type": "User",
+        "name": null,
+        "avatar_url": "https://avatars.githubusercontent.com/u/1"
+      }
+    },
+    {
+      "id": 13,
+      "account": {
+        "id": 999,
+        "login": "someone-else",
+        "type": "User",
+        "name": "Someone Else",
+        "avatar_url": "https://avatars.githubusercontent.com/u/999"
+      }
+    }
+  ]
+}

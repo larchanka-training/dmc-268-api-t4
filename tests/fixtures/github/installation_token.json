@@ -1,0 +1,5 @@
+{
+  "token": "ghs_test_aaaaaaaaaaaaaaaaaaaaaaaa",
+  "expires_at": "2026-01-01T13:00:00Z",
+  "permissions": { "metadata": "read", "members": "read" }
+}

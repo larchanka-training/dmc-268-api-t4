@@ -2,7 +2,22 @@ import ast
 from pathlib import Path
 
 DOMAIN_DIR = Path(__file__).resolve().parent.parent / "domain"
-FORBIDDEN_ROOTS = frozenset({"adapters", "pydantic", "httpx"})
+# Hard rule 1 (AGENTS.md): domain/ imports nothing from the outer layers, and
+# nothing from a web or database framework.
+FORBIDDEN_ROOTS = frozenset(
+    {
+        "adapters",
+        "api",
+        "worker",
+        "ops",
+        "fastapi",
+        "starlette",
+        "pydantic",
+        "httpx",
+        "sqlalchemy",
+        "alembic",
+    }
+)
 
 
 def imported_roots(source: Path) -> set[str]:

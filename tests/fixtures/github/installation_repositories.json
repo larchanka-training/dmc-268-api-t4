@@ -1,0 +1,20 @@
+{
+  "total_count": 2,
+  "repositories": [
+    {
+      "id": 11,
+      "name": "web",
+      "private": false,
+      "default_branch": "develop",
+      "html_url": "https://github.com/acme/web",
+      "owner": { "login": "acme" }
+    },
+    {
+      "id": 12,
+      "name": "api",
+      "private": true,
+      "html_url": "https://github.com/acme/api",
+      "owner": { "login": "acme" }
+    }
+  ]
+}
