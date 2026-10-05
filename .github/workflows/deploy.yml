@@ -65,6 +65,11 @@ jobs:
           HAS_LLM_KEYS: ${{ secrets.AI_DMC268_T4 != '' }}
           HAS_LLM_URL: ${{ vars.AI_DMC268_URL != '' }}
           HAS_LLM_MODEL: ${{ vars.LLM_PRIMARY_MODEL != '' }}
+          HAS_GH_APP_ID: ${{ secrets.GH_APP_ID != '' }}
+          HAS_GH_APP_SLUG: ${{ vars.GH_APP_SLUG != '' }}
+          HAS_GH_CLIENT_ID: ${{ secrets.GH_CLIENT_ID != '' }}
+          HAS_GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET != '' }}
+          HAS_GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY != '' }}
         run: |
           set -euo pipefail
           missing=()
@@ -74,6 +79,11 @@ jobs:
           [ "$HAS_POSTGRES_PASSWORD" = true ] || missing+=(secrets.POSTGRES_PASSWORD)
           [ "$HAS_LLM_KEYS" = true ] || missing+=(secrets.AI_DMC268_T4)
           [ "$HAS_LLM_URL" = true ] || missing+=(vars.AI_DMC268_URL)
+          [ "$HAS_GH_APP_ID" = true ] || missing+=(secrets.GH_APP_ID)
+          [ "$HAS_GH_APP_SLUG" = true ] || missing+=(vars.GH_APP_SLUG)
+          [ "$HAS_GH_CLIENT_ID" = true ] || missing+=(secrets.GH_CLIENT_ID)
+          [ "$HAS_GH_CLIENT_SECRET" = true ] || missing+=(secrets.GH_CLIENT_SECRET)
+          [ "$HAS_GH_APP_PRIVATE_KEY" = true ] || missing+=(secrets.GH_APP_PRIVATE_KEY)
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "**Deploy not started:** missing ${missing[*]}" >> "$GITHUB_STEP_SUMMARY"
             echo "::error::missing ${missing[*]}"
@@ -125,13 +135,10 @@ jobs:
           LLM_PRIMARY_API_KEYS: ${{ secrets.AI_DMC268_T4 }}
           LLM_PRIMARY_BASE_URL: ${{ vars.AI_DMC268_URL }}
           LLM_PRIMARY_MODEL: ${{ vars.LLM_PRIMARY_MODEL }}
-          APP_ORIGIN: ${{ secrets.DEPLOY_HOST }}
-          GITHUB_CALLBACK_URL: ${{ secrets.DEPLOY_HOST }}/api/auth/github/callback
           GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
           GITHUB_APP_SLUG: ${{ vars.GH_APP_SLUG }}
           GITHUB_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
           GITHUB_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
-          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           env_line() { printf '%s=%s\n' "$1" "$(printf '%s' "$2" | tr -d '\r\n')"; }
@@ -143,8 +150,33 @@ jobs:
             env_line LLM_PRIMARY_API_KEYS "$LLM_PRIMARY_API_KEYS"
             env_line LLM_PRIMARY_BASE_URL "$LLM_PRIMARY_BASE_URL"
             env_line LLM_TIMEOUT_SECONDS 300
+            env_line APP_ORIGIN                  "http://$DEPLOY_HOST"
+            env_line GITHUB_CALLBACK_URL         "http://$DEPLOY_HOST/api/auth/github/callback"
+            env_line GITHUB_CLIENT_ID            "$GITHUB_CLIENT_ID"
+            env_line GITHUB_CLIENT_SECRET        "$GITHUB_CLIENT_SECRET"
+            env_line GITHUB_APP_ID               "$GITHUB_APP_ID"
+            env_line GITHUB_APP_SLUG             "$GITHUB_APP_SLUG"
+            env_line GITHUB_APP_PRIVATE_KEY_PATH $APP_DIR/github-app.pem
             if [ -n "$LLM_PRIMARY_MODEL" ]; then env_line LLM_PRIMARY_MODEL "$LLM_PRIMARY_MODEL"; fi
           } | ssh deploy-target "umask 077 && cat > $APP_DIR/.env.new && mv $APP_DIR/.env.new $APP_DIR/.env"
+
+      - name: Write the App private key
+        env:
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          # Deliberately not env_line: that strips newlines, and a PEM is
+          # multi-line. The container reads this path, so compose mounts the
+          # file at the same path it has on the host (deploy/compose.yml).
+          printf '%s\n' "$GITHUB_APP_PRIVATE_KEY" | ssh deploy-target "
+            umask 077 && cat > $APP_DIR/github-app.pem.new
+            grep -q 'PRIVATE KEY' $APP_DIR/github-app.pem.new || {
+              echo 'secrets.GH_APP_PRIVATE_KEY is not a PEM private key' >&2
+              rm -f $APP_DIR/github-app.pem.new
+              exit 1
+            }
+            chmod 644 $APP_DIR/github-app.pem.new
+            mv $APP_DIR/github-app.pem.new $APP_DIR/github-app.pem"
 
       - name: Pull and start
         env:

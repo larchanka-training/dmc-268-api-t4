@@ -13,6 +13,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    volumes:
+      - ./github-app.pem:/opt/dmc268/github-app.pem:ro
 
   postgres:
     image: postgres:17-alpine
