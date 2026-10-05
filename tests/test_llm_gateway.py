@@ -8,6 +8,7 @@ from adapters.llm.factory import build_gateway
 from adapters.llm.gateway import FallbackLLMGateway
 from domain.errors import (
     AllProvidersFailedError,
+    LLMInputTooLargeError,
     LLMOutputError,
     ProviderUnavailableError,
 )
@@ -125,3 +126,31 @@ async def test_factory_builds_keyed_primary_and_keyless_fallback() -> None:
     primary_request, fallback_request = transport.requests
     assert primary_request.headers["Authorization"] == f"Bearer {FAKE_KEY_A}"
     assert "Authorization" not in fallback_request.headers
+
+
+async def test_input_over_budget_is_refused_before_any_provider_call(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = RecordingTransport(replies(chat_response(review_json(VALID_FINDING))))
+    big = ReviewRequest(diff_text="x" * 30_000, pr_title="t", pr_description="d")
+
+    with (
+        caplog.at_level(logging.WARNING, logger="adapters.llm"),
+        pytest.raises(LLMInputTooLargeError) as error,
+    ):
+        await FallbackLLMGateway([make_provider(transport)], max_input_tokens=1000).review(big)
+
+    assert transport.requests == []
+    assert error.value.limit == 1000
+    assert error.value.estimated_tokens > 1000
+    assert "x" * 50 not in caplog.text
+
+
+async def test_input_within_budget_is_reviewed() -> None:
+    transport = RecordingTransport(replies(chat_response(review_json(VALID_FINDING))))
+
+    result = await FallbackLLMGateway([make_provider(transport)], max_input_tokens=32000).review(
+        REQUEST
+    )
+
+    assert len(result.findings) == 1

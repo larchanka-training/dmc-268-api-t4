@@ -15,9 +15,18 @@ from domain.models import (
     Severity,
 )
 
+# Limits from docs/schemas/llm-output.schema.json (the contract agreed in #11).
+SUMMARY_MAX_LENGTH = 4000
+FINDINGS_MAX = 50
+PATH_MAX_LENGTH = 1024
+SUGGESTION_MAX_LINES = 50
+_SEVERITY_RANK = {severity: rank for rank, severity in enumerate(Severity)}
+
 _FENCE = re.compile(r"\A\s*```[A-Za-z]*[ \t]*\n(?P<body>.*?)\n?[ \t]*```\s*\Z", re.DOTALL)
 
-NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+FindingPath = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=PATH_MAX_LENGTH)
+]
 FindingMessage = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MESSAGE_MAX_LENGTH)
 ]
@@ -30,8 +39,8 @@ class InvalidReviewJSONError(ValueError):
 class SuggestionOut(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
-    before: list[str]
-    after: list[str]
+    before: list[str] = Field(max_length=SUGGESTION_MAX_LINES)
+    after: list[str] = Field(max_length=SUGGESTION_MAX_LINES)
 
     def to_domain(self) -> FindingSuggestion:
         return FindingSuggestion(before=tuple(self.before), after=tuple(self.after))
@@ -40,7 +49,7 @@ class SuggestionOut(BaseModel):
 class FindingOut(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
-    path: NonEmptyText
+    path: FindingPath
     line: int = Field(ge=1, strict=True)
     side: DiffSide
     severity: Severity
@@ -79,6 +88,7 @@ class _ReviewEnvelope(BaseModel):
 class ParsedReview:
     review: ReviewOut
     dropped_findings: int
+    trimmed_findings: int = 0
 
 
 def strip_code_fence(text: str) -> str:
@@ -105,5 +115,14 @@ def parse_review(raw_reply: str) -> ParsedReview:
             valid.append(FindingOut.model_validate(item))
         except ValidationError:
             continue
-    review = ReviewOut(summary=envelope.summary.strip(), findings=valid)
-    return ParsedReview(review=review, dropped_findings=len(envelope.findings) - len(valid))
+    kept = valid
+    if len(valid) > FINDINGS_MAX:
+        # Over the limit, keep the most severe: the dashboard reads them first. sorted() is
+        # stable, so findings of equal severity keep the model's order.
+        kept = sorted(valid, key=lambda finding: _SEVERITY_RANK[finding.severity])[:FINDINGS_MAX]
+    review = ReviewOut(summary=envelope.summary.strip()[:SUMMARY_MAX_LENGTH], findings=kept)
+    return ParsedReview(
+        review=review,
+        dropped_findings=len(envelope.findings) - len(valid),
+        trimmed_findings=len(valid) - len(kept),
+    )

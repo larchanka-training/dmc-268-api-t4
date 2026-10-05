@@ -64,3 +64,13 @@ def build_correction_messages(original: list[ChatMessage], invalid_reply: str) -
         {"role": "assistant", "content": invalid_reply},
         {"role": "user", "content": JSON_CORRECTION},
     ]
+
+
+# Code averages 3.5-4 characters per token; dividing by 3 overestimates on purpose, so the
+# budget errs on the side of refusing rather than overflowing the model's context window.
+CHARS_PER_TOKEN_ESTIMATE = 3
+
+
+def estimate_tokens(messages: list[ChatMessage]) -> int:
+    characters = sum(len(message["content"]) for message in messages)
+    return -(-characters // CHARS_PER_TOKEN_ESTIMATE)

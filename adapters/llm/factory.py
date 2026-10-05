@@ -22,7 +22,7 @@ def build_gateway(
         _build_provider(provider, settings, transport=transport, clock=clock)
         for provider in configured
     ]
-    return FallbackLLMGateway(providers)
+    return FallbackLLMGateway(providers, max_input_tokens=settings.max_input_tokens)
 
 
 def _build_provider(
