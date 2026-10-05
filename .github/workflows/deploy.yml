@@ -141,6 +141,7 @@ jobs:
           LLM_PRIMARY_API_KEYS: ${{ secrets.AI_DMC268_T4 }}
           LLM_PRIMARY_BASE_URL: ${{ vars.AI_DMC268_URL }}
           LLM_PRIMARY_MODEL: ${{ vars.LLM_PRIMARY_MODEL }}
+          LLM_PRIMARY_PROVIDER_ORDER: ${{ vars.LLM_PRIMARY_PROVIDER_ORDER }}
           GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
           GITHUB_APP_SLUG: ${{ vars.GH_APP_SLUG }}
           GITHUB_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
@@ -165,6 +166,7 @@ jobs:
             env_line GITHUB_APP_SLUG             "$GITHUB_APP_SLUG"
             env_line GITHUB_APP_PRIVATE_KEY_PATH $APP_DIR/github-app.pem
             if [ -n "$LLM_PRIMARY_MODEL" ]; then env_line LLM_PRIMARY_MODEL "$LLM_PRIMARY_MODEL"; fi
+            if [ -n "$LLM_PRIMARY_PROVIDER_ORDER" ]; then env_line LLM_PRIMARY_PROVIDER_ORDER "$LLM_PRIMARY_PROVIDER_ORDER"; fi
           } | ssh deploy-target "umask 077 && cat > $APP_DIR/.env.new && mv $APP_DIR/.env.new $APP_DIR/.env"
 
       - name: Write the App private key

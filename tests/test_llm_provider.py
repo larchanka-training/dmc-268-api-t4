@@ -128,6 +128,16 @@ async def test_request_body_fields(json_mode: bool) -> None:
         assert body["response_format"] == {"type": "json_object"}
     else:
         assert "response_format" not in body
+    assert "provider" not in body
+
+
+async def test_provider_order_pins_upstream_providers() -> None:
+    transport = RecordingTransport(replies(chat_response("ok")))
+
+    await make_provider(transport, provider_order=("scaleway", "ovhcloud")).complete(MESSAGES)
+
+    body = json.loads(transport.requests[0].read())
+    assert body["provider"] == {"order": ["scaleway", "ovhcloud"], "allow_fallbacks": False}
 
 
 @pytest.mark.parametrize(

@@ -28,6 +28,7 @@ jobs:
           LLM_PRIMARY_API_KEYS: ${{ secrets.AI_DMC268_T4 }}
           LLM_PRIMARY_BASE_URL: ${{ vars.AI_DMC268_URL }}
           LLM_PRIMARY_MODEL: ${{ vars.LLM_PRIMARY_MODEL }}
+          LLM_PRIMARY_PROVIDER_ORDER: ${{ vars.LLM_PRIMARY_PROVIDER_ORDER }}
           LLM_TIMEOUT_SECONDS: "300"
         run: |
           # GitHub runs steps with bash -e; failures are classified below, so -e is off.

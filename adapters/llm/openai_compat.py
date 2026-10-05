@@ -38,6 +38,7 @@ class OpenAICompatibleProvider:
         json_mode: bool,
         timeout_seconds: float,
         max_tokens: int,
+        provider_order: tuple[str, ...] = (),
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._name = name
@@ -47,6 +48,7 @@ class OpenAICompatibleProvider:
         self._temperature = temperature
         self._json_mode = json_mode
         self._max_tokens = max_tokens
+        self._provider_order = provider_order
         self._timeout_seconds = timeout_seconds
         self._transport = transport
 
@@ -83,6 +85,8 @@ class OpenAICompatibleProvider:
         }
         if self._json_mode:
             body["response_format"] = {"type": "json_object"}
+        if self._provider_order:
+            body["provider"] = {"order": list(self._provider_order), "allow_fallbacks": False}
         return body
 
     async def _post(

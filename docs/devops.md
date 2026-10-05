@@ -59,6 +59,7 @@ VPS (Debian 13), /opt/dmc268, docker compose project "dmc268"
 | `AI_DMC268_T4` | org secret | api | ключи Eurouter → `LLM_PRIMARY_API_KEYS` |
 | `AI_DMC268_URL` | org variable | api | → `LLM_PRIMARY_BASE_URL` |
 | `LLM_PRIMARY_MODEL` | repo variable | api | id модели Eurouter, сейчас `glm-5.2` (см. «Открытые вопросы»). Если переменную удалить, строка в `.env` не пишется, deploy выдаёт warning |
+| `LLM_PRIMARY_PROVIDER_ORDER` | repo variable | api, llm-smoke | провайдеры Eurouter по порядку, например `scaleway,ovhcloud`. Пусто = маршрутизация Eurouter по умолчанию. Подробности в `docs/llm-gateway.md` |
 | `VPS_DMC268_U`, `VPS_DMC268_P` | org secret | — | root-вход по паролю, используется только в `bootstrap.yml` |
 | `GITHUB_TOKEN` | автоматически | api | push образа в GHCR; на сервере `docker login` → pull → `docker logout` |
 

@@ -91,6 +91,7 @@ def make_provider(
     keys: tuple[str, ...] = (FAKE_KEY_A,),
     clock: FakeClock | None = None,
     json_mode: bool = True,
+    provider_order: tuple[str, ...] = (),
 ) -> OpenAICompatibleProvider:
     pool = KeyPool(name, keys, clock or FakeClock()) if keys else None
     return OpenAICompatibleProvider(
@@ -102,6 +103,7 @@ def make_provider(
         json_mode=json_mode,
         timeout_seconds=5.0,
         max_tokens=1024,
+        provider_order=provider_order,
         transport=transport,
     )
 

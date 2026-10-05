@@ -19,6 +19,7 @@ def test_defaults_from_minimal_env() -> None:
     assert settings.temperature == 0.0
     assert settings.json_mode is True
     assert settings.max_tokens == 4096
+    assert settings.primary.provider_order == ()
 
 
 def test_missing_api_keys_names_the_variable() -> None:
@@ -105,3 +106,11 @@ def test_max_tokens_can_be_set() -> None:
 def test_invalid_max_tokens_names_the_variable(raw: str) -> None:
     with pytest.raises(LLMConfigurationError, match="LLM_MAX_TOKENS"):
         LLMSettings.from_env({**MINIMAL_ENV, "LLM_MAX_TOKENS": raw})
+
+
+def test_provider_order_is_parsed_in_order() -> None:
+    settings = LLMSettings.from_env(
+        {**MINIMAL_ENV, "LLM_PRIMARY_PROVIDER_ORDER": " scaleway, ,ovhcloud,scaleway "}
+    )
+
+    assert settings.primary.provider_order == ("scaleway", "ovhcloud")
