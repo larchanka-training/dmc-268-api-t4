@@ -21,15 +21,19 @@ Target layout: [docs/BACKEND_ARCHITECTURE.md § Planned code layout](docs/BACKEN
 
 ## Commands
 
-Tooling lands with PR #8 (`pyproject.toml` on `feat/llm-gateway`):
-
 ```bash
-python3 -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
-pytest -q
-ruff check .
-ruff format --check .
-mypy domain adapters
+uv sync --extra dev
+uv run pytest -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy domain adapters
 ```
+
+`uv.lock` is committed and pins the whole tree. Without uv the pip path still works from
+`pyproject.toml` (`pip install -e ".[dev]"`), so uv is not a prerequisite for contributing.
+`requirements.txt` is generated from the lock (`uv export --no-dev --no-hashes
+--no-emit-project -o requirements.txt`) and is runtime-only; edit `pyproject.toml` and
+re-export rather than editing it by hand.
 
 ## Hard rules
 

@@ -1,11 +1,15 @@
 # DevOps: окружение и CD
 
-Окружение команды 4 работает на одном VPS. Адрес — IP сервера, домена нет, только HTTP:
+Окружение команды 4 работает на одном VPS по HTTPS. Своего домена нет, имя сайта даёт
+сервис sslip.io: имя `<IP с дефисами>.sslip.io` резолвится в сам IP.
 
-- `http://<IP>/` — фронтенд (SPA из `dmc-268-ui-t4`);
-- `http://<IP>/api/health` — бэкенд, ответ `{"status":"ok"}`.
+- `https://<IP-с-дефисами>.sslip.io/` — фронтенд (SPA из `dmc-268-ui-t4`);
+- `https://<IP-с-дефисами>.sslip.io/api/health` — бэкенд, ответ `{"status":"ok"}`;
+- `http://…` на порт 80 перенаправляется на `https://…`.
 
-IP хранится в secret `DEPLOY_HOST` и в репозиторий не попадает.
+IP хранится в secret `DEPLOY_HOST`. Имя сайта workflow вычисляют из него
+(`${DEPLOY_HOST//./-}.sslip.io`) и сразу маскируют в логах. Ни IP, ни имя сайта в
+репозиторий не попадают.
 
 ## Схема
 
@@ -24,7 +28,7 @@ push в main (dmc-268-api-t4)                push в main (dmc-268-ui-t4)
         │
         ▼
 VPS (Debian 13), /opt/dmc268, docker compose project "dmc268"
-  caddy:2 ── :80 наружу
+  caddy:2 ── :80 (ACME HTTP-01, редирект на https) и :443/tcp наружу, сертификат Let's Encrypt в volume caddy_data
     ├─ /api/*  → api:8000  (handle_path срезает /api)
     └─ всё остальное → /srv = /opt/dmc268/frontend, SPA fallback на /index.html
   api      ghcr…/dmc-268-api-t4:${IMAGE_TAG}   uvicorn main:app, порт не публикуется
@@ -35,7 +39,7 @@ VPS (Debian 13), /opt/dmc268, docker compose project "dmc268"
 |---|---|
 | `Dockerfile`, `.dockerignore` | образ бэкенда: `python:3.13-slim`, `pip install .`, non-root uid 10001 |
 | `deploy/compose.yml` | стек на сервере: api, postgres, caddy |
-| `deploy/Caddyfile` | `:80`, `/api/*` → api, остальное → статика фронтенда |
+| `deploy/Caddyfile` | сайт `{$SITE_ADDRESS}` (из `.env`), автоматический HTTPS, `/api/*` → api, остальное → статика фронтенда |
 | `.github/workflows/ci.yml` | на PR и push в main: ruff, mypy, pytest; сборка образа, `/health` в контейнере, проверка `compose.yml` |
 | `.github/workflows/llm-smoke.yml` | вручную (`workflow_dispatch`): смоук LLM Gateway с живым ключом на `tests/fixtures/sql_injection.diff`; в Summary только provider, model и счётчики severity/category, текст модели в лог не попадает |
 | `.github/workflows/deploy.yml` | на push в main и вручную: сборка → GHCR → деплой → smoke → проверка портов |
@@ -48,7 +52,7 @@ VPS (Debian 13), /opt/dmc268, docker compose project "dmc268"
 
 | Имя | Тип | Где | Для чего |
 |---|---|---|---|
-| `DEPLOY_HOST` | repo secret | api, ui | IP сервера. Secret, а не variable, чтобы маскироваться в логах с первого появления |
+| `DEPLOY_HOST` | repo secret | api, ui | IP сервера. Secret, а не variable, чтобы маскироваться в логах с первого появления. Из него вычисляется имя сайта `SITE_ADDRESS` |
 | `DEPLOY_SSH_KEY` | repo secret | api, ui | приватный ключ пользователя `deploy` (ed25519) |
 | `DEPLOY_KNOWN_HOSTS` | repo secret | api, ui | строка known_hosts ключа хоста ED25519. Secret, потому что в ней IP |
 | `POSTGRES_PASSWORD` | repo secret | api | пароль PostgreSQL, сгенерирован `openssl rand -hex 24` |
@@ -127,11 +131,11 @@ gh workflow run deploy.yml -R larchanka-training/dmc-268-api-t4 --ref main -f im
    Secrets (`umask 077`, атомарно через `.env.new` → `mv`). Vault и Doppler не используем.
    Значения очищаются от `\r`/`\n`, чтобы секрет с переводом строки не сломал файл.
 9. **Root-вход по паролю не отключён** — это решение владельца сервера (см. «Открытые вопросы»).
-10. **Порт наружу публикует только Caddy (80).** После каждого деплоя `ss -tuln` на сервере
-    проверяет, что вне loopback и link-local слушаются только `22/tcp` и `80/tcp`; иначе
-    деплой падает. Если понадобится 443 (HTTPS), его нужно разрешить в шаге «Check exposed
-    ports». Дополнительно `/api/health` запрашивается с раннера через интернет, так что
-    проверяется и доступность порта 80 снаружи, а не только `localhost` на сервере.
+10. **Порты наружу публикует только Caddy: 80 и 443/tcp.** После каждого деплоя `ss -tuln` на
+    сервере проверяет, что вне loopback и link-local слушаются только `22/tcp`, `80/tcp` и
+    `443/tcp`; иначе деплой падает. HTTP/3 (443/udp) не публикуется. Дополнительно с раннера
+    через интернет проверяются `https://<site>/api/health` с проверкой сертификата (curl
+    без `-k`) и редирект `http` → `https`.
 11. **PostgreSQL получает только свои переменные** через интерполяцию compose, а не весь
     `.env`: ключам LLM в контейнере БД делать нечего. api получает `.env` целиком.
 12. **`main.py` копируется в образ отдельно.** Он не входит в пакеты setuptools
@@ -152,17 +156,24 @@ gh workflow run deploy.yml -R larchanka-training/dmc-268-api-t4 --ref main -f im
     занял ~95 с, так что на реальных PR 120 с не хватит. Job смоука поднят до 15 минут:
     два запроса (ответ и корректирующий повтор при невалидном JSON) по 300 с — это до
     10 минут.
+18. **HTTPS через sslip.io.** Своего домена нет, а cookie `__Host-*` для входа через GitHub
+    требуют `Secure`, то есть HTTPS. Имя `<IP с дефисами>.sslip.io` резолвится в IP сервера,
+    и Caddy получает на него сертификат Let's Encrypt (HTTP-01 через порт 80). Имя
+    вычисляется в `deploy.yml` из `DEPLOY_HOST`, маскируется и пишется в `.env` как
+    `SITE_ADDRESS`; оттуда же `APP_ORIGIN=https://<site>` и
+    `GITHUB_CALLBACK_URL=https://<site>/api/auth/github/callback`. Volume `caddy_data`
+    обязателен: без него сертификат перевыпускался бы на каждом деплое и упёрся бы в лимиты
+    Let's Encrypt. Первый выпуск занимает до минуты, поэтому smoke делает повторы.
+    **В настройках GitHub App** нужно указать адреса на https: Callback URL
+    `https://<site>/api/auth/github/callback` и Setup URL `https://<site>/api/github/setup`.
+    Если появится свой домен, меняется только `SITE_ADDRESS` (и эти два URL).
 
 ## Открытые вопросы
 
-1. **Домен и HTTPS.** Без домена Caddy не может получить сертификат, и всё идёт по HTTP:
-   cookie сессий и OAuth-callback в таком виде использовать нельзя. Нужен домен
-   (A-запись на сервер), после чего в Caddyfile `:80` меняется на имя хоста, а в compose
-   добавляется `443:443`.
-2. **Root-вход по паролю на сервере.** Он открыт, а пароль лежит в секретах организации.
+1. **Root-вход по паролю на сервере.** Он открыт, а пароль лежит в секретах организации.
    Предложение владельцу: закрыть вход по паролю (`PermitRootLogin prohibit-password`),
    поставить fail2ban.
-3. **Модели Anthropic в Eurouter недоступны с ключом команды.** Для `claude-sonnet-4-6`,
+2. **Модели Anthropic в Eurouter недоступны с ключом команды.** Для `claude-sonnet-4-6`,
    `anthropic/claude-sonnet-4-6` и `claude-haiku-4.5` Eurouter отвечает `400
    invalid_request_error: No providers available for model … with given preferences`, даже на
    запрос из одного `model` + `messages`. Модели других провайдеров (`mistral-small-4`,

@@ -480,8 +480,15 @@ risk.
 | `installation.suspend` | Cancel active jobs. GitHub stops delivering events while suspended, so no further arrivals are expected. |
 | `installation.unsuspend` | Nothing. Reviews resume with the next `pull_request` event; the backlog is deliberately not replayed. |
 | `installation.new_permissions_accepted` | Clear the "needs re-approval" state for that installation. The 403s that a permission bump causes stop on their own. |
-| `installation_repositories.removed` | Cancel active jobs for the removed `repo_id`s only. |
-| `installation_repositories.added` | Nothing. |
+| `installation_repositories.removed` | Cancel active jobs for the removed `repo_id`s only, and drop that installation's repository cache. |
+| `installation_repositories.added` | Drop that installation's repository cache. |
+
+Both `installation_repositories` actions could skip the cache drop entirely: the
+repository list is read live from the forge and cached for only a minute
+([configuration.md](./configuration.md), `REPOSITORIES_CACHE_TTL_SECONDS`), so it
+self-corrects without a webhook. Dropping it on the event only removes that minute of
+staleness, which matters because the user has just come back from GitHub expecting to see
+what they changed — and `/github/setup` already drops it on that path.
 
 **Cancelling active jobs** reuses `SKIPPED` rather than adding a state —
 `SUPERSEDED` means "a newer push replaced this", which is not what happened:

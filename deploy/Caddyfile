@@ -1,5 +1,7 @@
-# No domain yet: plain HTTP on the server IP. Automatic HTTPS needs a domain name.
-:80 {
+# SITE_ADDRESS comes from /opt/dmc268/.env: the server IP with dashes plus .sslip.io.
+# Caddy obtains a Let's Encrypt certificate for it (HTTP-01 on port 80), keeps it in the
+# caddy_data volume and redirects http to https.
+{$SITE_ADDRESS} {
 	encode gzip
 
 	handle_path /api/* {

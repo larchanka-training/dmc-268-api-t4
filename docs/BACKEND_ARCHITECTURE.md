@@ -265,6 +265,14 @@ comments — and only genuinely new ones appear, on the *same* Check Run updated
 place. This step is the reason the rest of the design looks the way
 it does.
 
+Changing which repositories the App may access sends the user back to the **Setup URL**,
+and that route trusts nothing GitHub puts on it. GitHub's own warning is that
+`installation_id` can be spoofed, and we hold no user token after sign-in with which to
+verify it — so `/github/setup` discards every parameter and re-runs sign-in instead. The
+callback's `/user/installations` read then *verifies* the installation and *refreshes* the
+organisation snapshot in one request, and claiming an unclaimed installation still happens
+there rather than on the Setup URL.
+
 Reviews on that PR are billed to **the account that connected the repository**,
 never to the contributor who opened it — contributors have no account with us. So
 the owner gets levers over whose PRs spend their budget: a per-author daily cap, a
@@ -678,13 +686,18 @@ obligations remain. Worth knowing before the first international customer.
 ## Public API
 <a id="public-api"></a>
 
-`/api/v1`, JSON, consumed by the dashboard.
+`/api`, JSON, consumed by the dashboard. The reverse proxy strips that prefix, so
+the backend's own paths carry none: `/me`, `/repositories`, `/auth/github`. The API
+is unversioned — a version in the URL buys nothing while there is one client, and
+the OAuth callback and the App's Setup URL are registered at the forge, which holds
+one value each and so cannot be versioned alongside the rest.
 
 ### Authentication
 
 | Client | Mechanism |
 | :--- | :--- |
-| Dashboard | Forge OAuth (GitHub or GitLab) → server-side session, `HttpOnly` `Secure` `SameSite=Lax` cookie |
+| Dashboard | Forge OAuth (GitHub or GitLab) → server-side session in `__Host-session`: `HttpOnly` `Secure` `SameSite=Strict` `Path=/`. The `__Host-` prefix forbids a `Domain` attribute |
+| Sign-in in flight | `__Host-oauth`, holding only the attempt id: `SameSite=Lax`, because it has to survive the forge's cross-site redirect back. It is single-use and cleared on every callback outcome |
 | Scripts / CI | API key, `Authorization: Bearer`, prefix-indexed and stored only as a hash |
 
 Server-side sessions rather than stateless JWTs: at this scale the extra lookup
@@ -698,10 +711,10 @@ one package:
 
 | Method | Path | Notes |
 | :--- | :--- | :--- |
-| `GET` | `/auth/{provider}/start` | Redirect to the forge. Generates `state` and a PKCE verifier, both stored server-side with a short TTL |
+| `GET` | `/auth/{provider}` | Redirect to the forge. Generates `state` and a PKCE verifier, both stored server-side with a short TTL. No `/start` suffix: this is the path the console already calls |
 | `GET` | `/auth/{provider}/callback` | Verifies `state`, exchanges the code, resolves or creates the identity, opens a session |
 | `POST` | `/auth/logout` | Deletes the session server-side, not just the cookie |
-| `GET` | `/me` | The user, their linked identities, and the accounts they can reach |
+| `GET` | `/me` | `user`, `organizations` (each with `role: owner \| member`) and a nullable `current_organization_id` — the organisation snapshot taken at sign-in. `401 {"error": "no_session"}` without one |
 | `POST` | `/me/identities/{provider}` | Link a second forge login. **Requires an active session** |
 | `DELETE` | `/me/identities/{id}` | Unlink. Refused if it is the last one |
 
@@ -716,7 +729,7 @@ token never appear in a log line or a `Referer`.
 | | GitHub | GitLab |
 | :--- | :--- | :--- |
 | Registration | Reuse the existing **App's** user-to-server flow — no separate OAuth App | A distinct OAuth application |
-| Scopes | `read:user` | `read_user` |
+| Scopes | **None.** GitHub Apps have no OAuth scopes; reading a member's role needs the App's *Organization permissions → Members: Read-only* | `read_user` |
 | Account match | Installation account id equals the authenticated user id | Same |
 | Issuer URL | `github.com`, fixed | `gitlab.com`, fixed |
 
@@ -724,6 +737,20 @@ Both issuers are constants because **self-managed forges are out of scope**: one
 OAuth application per forge, registered once, and no customer-supplied instance
 URL anywhere in the system. That last part is what keeps the worker's egress a
 fixed allowlist rather than an SSRF surface.
+
+**Paths carry no `/api` prefix.** The console calls `/api/auth/github`, `/api/me`
+and so on; the Vite proxy in development and the reverse proxy in production strip
+the prefix before the request reaches here. `GITHUB_CALLBACK_URL` is therefore
+configured explicitly rather than derived — the backend never sees the prefix, and
+the forge compares `redirect_uri` against its registered value character for
+character.
+
+Implemented in `api/auth.py` and `api/deps.py`, against
+`adapters/identity/github.py`. Sessions and sign-in attempts sit behind
+`SessionStore` and `SignInAttemptStore` with in-memory adapters until the database
+exists; `adapters/db/auth.py` replaces them without touching the domain or the API,
+and must pass the same conformance suites
+([spec 001](./001-github-auth-backend.md)).
 
 ### Authorization and tenant scoping
 
@@ -743,6 +770,10 @@ repository that cannot be called without a tenant scope cannot forget it.
 | `GET` | `/account` | The caller's own account. No id in the path, so there is no object to enumerate |
 | `GET` | `/installations` | Health and status per forge integration |
 | `DELETE` | `/installations/{id}` | Revokes and purges the credential |
+| `GET` | `/repositories` | Cursor-paginated, 10 per page, sorted by `owner/name`. Read **live from the forge** and cached for a minute, which is what keeps "no `repositories` table" true. `400 bad_cursor`, `502 forge_unavailable` |
+| `GET` | `/repositories/connect-url` | Where to send the user to connect one: the installation's settings page, or the App's install page when it is installed nowhere |
+| `GET` | `/repositories/{id}/disconnect-url` | Where to remove that repository from the installation, or `404 not_found`. The URL is the same settings page `connect-url` returns — GitHub has no per-repository removal URL, so the 404 is what this endpoint adds |
+| `GET` | `/github/setup` | The App's **Setup URL**, reached by GitHub's redirect rather than by the SPA. No session required |
 | `GET` | `/jobs` | Cursor-paginated; filters on repo, status, date |
 | `GET` | `/jobs/{id}` | Includes findings and error detail |
 | `POST` | `/jobs/{id}/rerun` | Creates a new job; never resurrects a terminal one |
@@ -1079,11 +1110,15 @@ adapters/
 
 api/
   webhooks/          #   github.py, gitlab.py, stripe.py
-  v1/                #   account, jobs, config, installations, subscription,
-                     #   billing, usage
-  auth.py            #   OAuth start/callback, sessions, API keys
+  auth.py            #   OAuth start/callback, sessions, API keys, /me
+  repositories.py    #   Installation repositories, connect and disconnect URLs
+  github_setup.py    #   The forge's post-install redirect
   deps.py            #   Request context: account scope, role
+  config.py          #   Process settings read from the environment
   main.py            #   App factory
+                     #   Later resources stay flat here, one module each:
+                     #   jobs.py, review_config.py (config.py is taken),
+                     #   subscription.py, billing.py, usage.py
 
 worker/
   loop.py            #   claim / LISTEN / poll fallback
