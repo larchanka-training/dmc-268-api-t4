@@ -37,6 +37,7 @@ class OpenAICompatibleProvider:
         temperature: float,
         json_mode: bool,
         timeout_seconds: float,
+        max_tokens: int,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._name = name
@@ -45,6 +46,7 @@ class OpenAICompatibleProvider:
         self._key_pool = key_pool
         self._temperature = temperature
         self._json_mode = json_mode
+        self._max_tokens = max_tokens
         self._timeout_seconds = timeout_seconds
         self._transport = transport
 
@@ -77,6 +79,7 @@ class OpenAICompatibleProvider:
             "model": self._model,
             "messages": list(messages),
             "temperature": self._temperature,
+            "max_tokens": self._max_tokens,
         }
         if self._json_mode:
             body["response_format"] = {"type": "json_object"}

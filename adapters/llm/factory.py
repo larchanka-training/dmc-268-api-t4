@@ -40,6 +40,7 @@ def _build_provider(
         key_pool=key_pool,
         temperature=settings.temperature,
         json_mode=settings.json_mode,
+        max_tokens=settings.max_tokens,
         timeout_seconds=settings.timeout_seconds,
         transport=transport,
     )
