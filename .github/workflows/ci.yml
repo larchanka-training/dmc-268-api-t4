@@ -44,7 +44,29 @@ jobs:
       - name: Check /health in the container
         run: |
           set -uo pipefail
-          docker run --detach --name api --publish 127.0.0.1:8000:8000 dmc268-api:ci
+          # The app validates every setting at import (api/config.py,
+          # adapters/github/config.py), so the image cannot boot without them.
+          # These values are throwaway: the step calls only GET /health, a safe
+          # method, so the CSRF check never compares APP_ORIGIN and nothing
+          # reaches GitHub.
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+            -out "$RUNNER_TEMP/ci-app.pem"
+          # On the Linux runner a bind mount keeps the host's uid and mode, so a
+          # 0600 key owned by the runner user is unreadable to uid 10001 in the
+          # container. Docker Desktop remaps ownership instead, so this is not
+          # reproducible on macOS. The key is throwaway and the runner ephemeral.
+          chmod 644 "$RUNNER_TEMP/ci-app.pem"
+          docker run --detach --name api \
+            --publish 127.0.0.1:8000:8000 \
+            --volume "$RUNNER_TEMP/ci-app.pem:/run/app.pem:ro" \
+            --env APP_ORIGIN=http://localhost:8000 \
+            --env GITHUB_CLIENT_ID=ci \
+            --env GITHUB_CLIENT_SECRET=ci \
+            --env GITHUB_CALLBACK_URL=http://localhost:8000/api/auth/github/callback \
+            --env GITHUB_APP_ID=1 \
+            --env GITHUB_APP_PRIVATE_KEY_PATH=/run/app.pem \
+            --env GITHUB_APP_SLUG=ci \
+            dmc268-api:ci
           for attempt in $(seq 1 10); do
             if body=$(curl -fsS http://127.0.0.1:8000/health); then
               echo "attempt $attempt: $body"
