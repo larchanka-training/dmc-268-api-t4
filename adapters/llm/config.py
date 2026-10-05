@@ -10,6 +10,9 @@ DEFAULT_FALLBACK_NAME = "ollama"
 DEFAULT_FALLBACK_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_TEMPERATURE = 0.0
+# Providers that receive no max_tokens may reserve the whole context window for the reply
+# and reject the request outright, so a reply budget is always sent.
+DEFAULT_MAX_TOKENS = 4096
 MAX_TEMPERATURE = 2.0
 
 _TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
@@ -31,6 +34,7 @@ class LLMSettings:
     timeout_seconds: float
     temperature: float
     json_mode: bool
+    max_tokens: int = DEFAULT_MAX_TOKENS
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "LLMSettings":
@@ -93,6 +97,7 @@ class _EnvReader:
                 "LLM_TEMPERATURE", DEFAULT_TEMPERATURE, minimum=0.0, maximum=MAX_TEMPERATURE
             ),
             json_mode=self._bool("LLM_JSON_MODE", default=True),
+            max_tokens=self._positive_int("LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS),
         )
 
     def _text(self, name: str) -> str:
@@ -113,6 +118,18 @@ class _EnvReader:
         if raw in _FALSE_VALUES:
             return False
         raise LLMConfigurationError(f"{name} must be true or false, got '{raw}'")
+
+    def _positive_int(self, name: str, default: int) -> int:
+        raw = self._text(name)
+        if not raw:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            raise LLMConfigurationError(f"{name} must be an integer, got '{raw}'") from None
+        if value <= 0:
+            raise LLMConfigurationError(f"{name} must be > 0, got {value}")
+        return value
 
     def _float(
         self,

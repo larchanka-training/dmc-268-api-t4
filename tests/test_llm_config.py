@@ -18,6 +18,7 @@ def test_defaults_from_minimal_env() -> None:
     assert settings.timeout_seconds == 120
     assert settings.temperature == 0.0
     assert settings.json_mode is True
+    assert settings.max_tokens == 4096
 
 
 def test_missing_api_keys_names_the_variable() -> None:
@@ -94,3 +95,13 @@ def test_smoke_without_env_reports_missing_keys(
 
     assert exit_code == smoke.EXIT_CONFIG_ERROR
     assert "LLM_PRIMARY_API_KEYS" in capsys.readouterr().err
+
+
+def test_max_tokens_can_be_set() -> None:
+    assert LLMSettings.from_env({**MINIMAL_ENV, "LLM_MAX_TOKENS": "8192"}).max_tokens == 8192
+
+
+@pytest.mark.parametrize("raw", ["0", "-5", "many", "1.5"])
+def test_invalid_max_tokens_names_the_variable(raw: str) -> None:
+    with pytest.raises(LLMConfigurationError, match="LLM_MAX_TOKENS"):
+        LLMSettings.from_env({**MINIMAL_ENV, "LLM_MAX_TOKENS": raw})

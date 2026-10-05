@@ -122,6 +122,7 @@ async def test_request_body_fields(json_mode: bool) -> None:
     body = json.loads(transport.requests[0].read())
     assert body["model"] == "eurouter-model"
     assert body["temperature"] == 0.0
+    assert body["max_tokens"] == 1024
     assert body["messages"] == MESSAGES
     if json_mode:
         assert body["response_format"] == {"type": "json_object"}

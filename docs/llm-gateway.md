@@ -76,6 +76,7 @@ result = await gateway.review(ReviewRequest(diff_text=diff, pr_title=title, pr_d
 | `LLM_TIMEOUT_SECONDS` | `120` | таймаут одного HTTP-запроса, `> 0` |
 | `LLM_TEMPERATURE` | `0.0` | от `0` до `2` |
 | `LLM_JSON_MODE` | `true` | добавляет в запрос `response_format: {"type": "json_object"}` |
+| `LLM_MAX_TOKENS` | `4096` | лимит ответа, отправляется как `max_tokens` в каждом запросе, `> 0`. Без него часть провайдеров резервирует под ответ всё окно модели и отклоняет запрос (так было с `qwen3-coder-30b-a3b` на Eurouter) |
 
 Если обязательных переменных нет, `LLMConfigurationError` перечисляет их все сразу.
 

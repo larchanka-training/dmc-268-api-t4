@@ -101,6 +101,7 @@ def make_provider(
         temperature=0.0,
         json_mode=json_mode,
         timeout_seconds=5.0,
+        max_tokens=1024,
         transport=transport,
     )
 
