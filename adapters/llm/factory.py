@@ -41,6 +41,7 @@ def _build_provider(
         temperature=settings.temperature,
         json_mode=settings.json_mode,
         max_tokens=settings.max_tokens,
+        provider_order=provider.provider_order,
         timeout_seconds=settings.timeout_seconds,
         transport=transport,
     )

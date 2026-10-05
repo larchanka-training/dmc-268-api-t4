@@ -25,6 +25,10 @@ class ProviderSettings:
     base_url: str
     model: str
     api_keys: tuple[str, ...] = field(default=(), repr=False)
+    # Eurouter routing: try these upstream providers in order and never fall back to others.
+    # Some upstreams reject requests for a model the catalog lists them for, so an
+    # unpinned request fails whenever the router happens to pick one of them.
+    provider_order: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,8 +45,8 @@ class LLMSettings:
         return _EnvReader(os.environ if env is None else env).read_settings()
 
 
-def parse_api_keys(raw: str) -> tuple[str, ...]:
-    """Split a comma-separated key list, dropping blanks and repeats but keeping order."""
+def parse_csv(raw: str) -> tuple[str, ...]:
+    """Split a comma-separated list, dropping blanks and repeats but keeping order."""
     keys = (part.strip() for part in raw.split(","))
     return tuple(dict.fromkeys(key for key in keys if key))
 
@@ -62,7 +66,7 @@ class _EnvReader:
                 "missing required environment variable(s): " + ", ".join(missing)
             )
 
-        primary_keys = parse_api_keys(self._text("LLM_PRIMARY_API_KEYS"))
+        primary_keys = parse_csv(self._text("LLM_PRIMARY_API_KEYS"))
         if not primary_keys:
             raise LLMConfigurationError(
                 "LLM_PRIMARY_API_KEYS must contain at least one non-empty key"
@@ -73,6 +77,7 @@ class _EnvReader:
             base_url=self._url("LLM_PRIMARY_BASE_URL", DEFAULT_PRIMARY_BASE_URL),
             model=self._text("LLM_PRIMARY_MODEL"),
             api_keys=primary_keys,
+            provider_order=parse_csv(self._text("LLM_PRIMARY_PROVIDER_ORDER")),
         )
         fallback = None
         if fallback_enabled:
