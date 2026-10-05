@@ -36,11 +36,17 @@ services:
     restart: unless-stopped
     depends_on:
       - api
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?SITE_ADDRESS must be set in .env}
+    # 80 stays open for the ACME HTTP-01 challenge and the redirect to https.
     ports:
       - "80:80"
+      - "443:443/tcp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./frontend:/srv:ro
+      # caddy_data keeps the certificate across deploys; losing it means a new issuance
+      # on every deploy and, soon, the Let's Encrypt rate limit.
       - caddy_data:/data
       - caddy_config:/config
 

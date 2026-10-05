@@ -72,6 +72,12 @@ jobs:
           HAS_GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY != '' }}
         run: |
           set -euo pipefail
+          # The site name embeds the server IP: mask it before anything can print it.
+          if [ -n "$DEPLOY_HOST" ]; then
+            echo "::add-mask::${DEPLOY_HOST//./-}"
+            echo "::add-mask::${DEPLOY_HOST//./-}.sslip.io"
+            echo "SITE_ADDRESS=${DEPLOY_HOST//./-}.sslip.io" >> "$GITHUB_ENV"
+          fi
           missing=()
           [ -n "$DEPLOY_HOST" ] || missing+=(secrets.DEPLOY_HOST)
           [ "$HAS_KNOWN_HOSTS" = true ] || missing+=(secrets.DEPLOY_KNOWN_HOSTS)
@@ -150,8 +156,9 @@ jobs:
             env_line LLM_PRIMARY_API_KEYS "$LLM_PRIMARY_API_KEYS"
             env_line LLM_PRIMARY_BASE_URL "$LLM_PRIMARY_BASE_URL"
             env_line LLM_TIMEOUT_SECONDS 300
-            env_line APP_ORIGIN                  "http://$DEPLOY_HOST"
-            env_line GITHUB_CALLBACK_URL         "http://$DEPLOY_HOST/api/auth/github/callback"
+            env_line SITE_ADDRESS                "$SITE_ADDRESS"
+            env_line APP_ORIGIN                  "https://$SITE_ADDRESS"
+            env_line GITHUB_CALLBACK_URL         "https://$SITE_ADDRESS/api/auth/github/callback"
             env_line GITHUB_CLIENT_ID            "$GITHUB_CLIENT_ID"
             env_line GITHUB_CLIENT_SECRET        "$GITHUB_CLIENT_SECRET"
             env_line GITHUB_APP_ID               "$GITHUB_APP_ID"
@@ -196,11 +203,12 @@ jobs:
       - name: Smoke test through Caddy
         run: |
           set -uo pipefail
-          if body=$(ssh deploy-target 'for attempt in $(seq 1 10); do
-                curl -fsS http://localhost/api/health && exit 0
-                sleep 3
+          # The first certificate issuance can take up to a minute, hence 20 attempts 5 s apart.
+          if body=$(ssh deploy-target "for attempt in \$(seq 1 20); do
+                curl -fsS --max-time 10 --resolve '$SITE_ADDRESS:443:127.0.0.1' 'https://$SITE_ADDRESS/api/health' && exit 0
+                sleep 5
               done
-              exit 1'); then
+              exit 1"); then
             echo "health: $body"
             {
               echo "## Deploy"
@@ -211,7 +219,7 @@ jobs:
             logs=$(ssh deploy-target "cd $APP_DIR && docker compose logs --no-color --tail 50 api" 2>&1)
             printf '%s\n' "$logs"
             {
-              echo "**Deploy failed:** /api/health did not answer through Caddy after 10 attempts"
+              echo "**Deploy failed:** /api/health did not answer over HTTPS through Caddy after 20 attempts"
               echo '```text'
               printf '%s\n' "$logs"
               echo '```'
@@ -222,17 +230,36 @@ jobs:
       - name: Smoke test from the internet
         run: |
           set -uo pipefail
-          for attempt in $(seq 1 5); do
-            if body=$(curl -fsS --max-time 10 "http://$DEPLOY_HOST/api/health" 2>/dev/null); then
-              echo "external health: $body"
-              echo "- \`GET /api/health\` from the runner over the internet: \`$body\`" >> "$GITHUB_STEP_SUMMARY"
-              exit 0
-            fi
-            sleep 3
+          fail() {
+            echo "**Deploy failed:** $1" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$1"
+            exit 1
+          }
+          base="https://$SITE_ADDRESS"
+          body=""
+          # No -k: the certificate must be valid for the site name.
+          for attempt in $(seq 1 12); do
+            body=$(curl -fsS --max-time 10 "$base/api/health" 2>/dev/null) && break
+            body=""
+            sleep 5
           done
-          echo "**Deploy failed:** /api/health is not reachable from the internet on port 80" >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::/api/health is not reachable from the internet on port 80"
-          exit 1
+          [ -n "$body" ] || fail "/api/health is not reachable over HTTPS with a valid certificate"
+          echo "external health: $body"
+          redirect=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' "http://$SITE_ADDRESS/api/health")
+          code=${redirect%% *}
+          target=${redirect#* }
+          if ! [[ "$code" =~ ^30[1278]$ && "$target" == "$base/api/health" ]]; then
+            fail "http does not redirect to https (status $code)"
+          fi
+          echo "http redirects to https with $code"
+          certificate=$(echo | openssl s_client -connect "$SITE_ADDRESS:443" -servername "$SITE_ADDRESS" 2>/dev/null \
+            | openssl x509 -noout -issuer -enddate | tr '\n' ' ')
+          echo "certificate: $certificate"
+          {
+            echo "- \`GET /api/health\` over HTTPS from the runner (certificate verified): \`$body\`"
+            echo "- http redirects to https: \`$code\`"
+            echo "- certificate: \`$certificate\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check exposed ports
         run: |
@@ -245,7 +272,7 @@ jobs:
             | sed -E 's/^(tcp|udp) .*:([0-9]+)$/\1\/\2/' | sort -u | tr '\n' ' ')
           echo "listening outside loopback: $exposed"
           echo "- listening outside loopback: \`$exposed\`" >> "$GITHUB_STEP_SUMMARY"
-          unexpected=$(printf '%s\n' $exposed | grep -v -x -E 'tcp/22|tcp/80' || true)
+          unexpected=$(printf '%s\n' $exposed | grep -v -x -E 'tcp/22|tcp/80|tcp/443' || true)
           if [ -n "$unexpected" ]; then
             echo "**Unexpected exposed ports:** $(echo $unexpected)" >> "$GITHUB_STEP_SUMMARY"
             echo "::error::unexpected exposed ports: $(echo $unexpected)"
