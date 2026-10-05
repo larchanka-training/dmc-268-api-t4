@@ -2,7 +2,7 @@ name: Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, chore/devops-cleanup]
   workflow_dispatch:
     inputs:
       image_tag:
