@@ -10,6 +10,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY domain ./domain
 COPY adapters ./adapters
+COPY api ./api
 RUN pip install .
 
 # main.py is the ASGI entry point and is not part of the installed packages.
