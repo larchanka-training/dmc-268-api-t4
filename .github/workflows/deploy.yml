@@ -2,7 +2,7 @@ name: Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, sprint-2-github-auth] # TEMP: sprint-2-github-auth is removed before the merge
   workflow_dispatch:
     inputs:
       image_tag:
