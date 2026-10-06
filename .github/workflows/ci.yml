@@ -84,10 +84,16 @@ jobs:
           echo "uid in container: $user"
           [ "$user" != "0" ]
 
-      - name: Validate compose file
+      - name: Validate production compose file
         working-directory: deploy
         run: |
           printf 'IMAGE_TAG=ci\nPOSTGRES_USER=dmc\nPOSTGRES_PASSWORD=dummy\nPOSTGRES_DB=dmc268\nSITE_ADDRESS=localhost\nSERVER_IP=127.0.0.1\n' > .env
           docker compose -f compose.yml config --quiet
           echo "compose.yml is valid; published ports:"
           docker compose -f compose.yml config --format json | python3 -c "import json,sys; c=json.load(sys.stdin); print({n: [p.get('published') for p in s.get('ports', [])] for n, s in c['services'].items()})"
+
+      - name: Validate local compose file
+        run: |
+          docker compose -f docker-compose.yml config --quiet
+          echo "docker-compose.yml is valid; published ports:"
+          docker compose -f docker-compose.yml config --format json | python3 -c "import json,sys; c=json.load(sys.stdin); print({n: [p.get('published') for p in s.get('ports', [])] for n, s in c['services'].items()})"
