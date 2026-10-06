@@ -34,6 +34,11 @@ curl -fsS http://127.0.0.1:8000/health
 `GET /health` returns `{"status":"ok"}`. `curl` needs a second terminal while `up` is
 in the foreground.
 
+`docker-compose.yml` is the local stack: it builds from this tree, binds the API and
+PostgreSQL to localhost, and fills in throwaway GitHub settings. `deploy/compose.yml`
+is the VPS stack: it runs a published image, leaves the API and PostgreSQL on the
+compose network, and publishes only Caddy on ports 80 and 443.
+
 On the host, with a real `.env`:
 
 ```bash
