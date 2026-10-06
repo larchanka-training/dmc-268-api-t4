@@ -24,6 +24,23 @@ uv export --no-dev --no-hashes --no-emit-project -o requirements.txt
 
 ## Local development
 
+API and PostgreSQL, with throwaway GitHub settings:
+
+```bash
+docker compose up --build
+curl -fsS http://127.0.0.1:8000/health
+```
+
+`GET /health` returns `{"status":"ok"}`. `curl` needs a second terminal while `up` is
+in the foreground.
+
+`docker-compose.yml` is the local stack: it builds from this tree, binds the API and
+PostgreSQL to localhost, and fills in throwaway GitHub settings. `deploy/compose.yml`
+is the VPS stack: it runs a published image, leaves the API and PostgreSQL on the
+compose network, and publishes only Caddy on ports 80 and 443.
+
+On the host, with a real `.env`:
+
 ```bash
 set -a; . ./.env; set +a          # uvicorn does not read the env file itself
 uv run uvicorn main:app --reload --port 8000
@@ -32,3 +49,9 @@ uv run pytest -q
 
 `--reload` re-imports Python inside the environment uvicorn started with, so a new
 variable in `.env` needs a full restart, not a reload.
+
+Hooks match CI (`ruff check`, `ruff format`, `mypy domain adapters`):
+
+```bash
+uv run pre-commit install
+```
