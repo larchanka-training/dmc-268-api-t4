@@ -7,7 +7,7 @@ services:
       APP_ORIGIN: http://localhost:8000
       GITHUB_CLIENT_ID: local
       GITHUB_CLIENT_SECRET: local
-      GITHUB_CALLBACK_URL: http://localhost:8000/api/auth/github/callback
+      GITHUB_CALLBACK_URL: http://localhost:8000/auth/github/callback
       GITHUB_APP_ID: "1"
       GITHUB_APP_SLUG: local
       GITHUB_APP_PRIVATE_KEY_PATH: /tmp/dev-app.pem
