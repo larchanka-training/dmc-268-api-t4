@@ -70,6 +70,7 @@ jobs:
           HAS_GH_CLIENT_ID: ${{ secrets.GH_CLIENT_ID != '' }}
           HAS_GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET != '' }}
           HAS_GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY != '' }}
+          HAS_GH_WEBHOOK_SECRET: ${{ secrets.GH_APP_WEBHOOK_SECRET != '' }}
         run: |
           set -euo pipefail
           # The site name embeds the server IP: mask it before anything can print it.
@@ -90,6 +91,7 @@ jobs:
           [ "$HAS_GH_CLIENT_ID" = true ] || missing+=(secrets.GH_CLIENT_ID)
           [ "$HAS_GH_CLIENT_SECRET" = true ] || missing+=(secrets.GH_CLIENT_SECRET)
           [ "$HAS_GH_APP_PRIVATE_KEY" = true ] || missing+=(secrets.GH_APP_PRIVATE_KEY)
+          [ "$HAS_GH_WEBHOOK_SECRET" = true ] || missing+=(secrets.GH_APP_WEBHOOK_SECRET)
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "**Deploy not started:** missing ${missing[*]}" >> "$GITHUB_STEP_SUMMARY"
             echo "::error::missing ${missing[*]}"
@@ -146,6 +148,7 @@ jobs:
           GITHUB_APP_SLUG: ${{ vars.GH_APP_SLUG }}
           GITHUB_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
           GITHUB_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
+          GITHUB_WEBHOOK_SECRET: ${{ secrets.GH_APP_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
           env_line() { printf '%s=%s\n' "$1" "$(printf '%s' "$2" | tr -d '\r\n')"; }
@@ -166,6 +169,7 @@ jobs:
             env_line GITHUB_APP_ID               "$GITHUB_APP_ID"
             env_line GITHUB_APP_SLUG             "$GITHUB_APP_SLUG"
             env_line GITHUB_APP_PRIVATE_KEY_PATH $APP_DIR/github-app.pem
+            env_line GITHUB_WEBHOOK_SECRET       "$GITHUB_WEBHOOK_SECRET"
             if [ -n "$LLM_PRIMARY_MODEL" ]; then env_line LLM_PRIMARY_MODEL "$LLM_PRIMARY_MODEL"; fi
             if [ -n "$LLM_PRIMARY_PROVIDER_ORDER" ]; then env_line LLM_PRIMARY_PROVIDER_ORDER "$LLM_PRIMARY_PROVIDER_ORDER"; fi
           } | ssh deploy-target "umask 077 && cat > $APP_DIR/.env.new && mv $APP_DIR/.env.new $APP_DIR/.env"

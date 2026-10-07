@@ -11,11 +11,11 @@ Target layout: [docs/BACKEND_ARCHITECTURE.md § Planned code layout](docs/BACKEN
 | Path | Status | Contents |
 |---|---|---|
 | `docs/`, `SYSTEM_DESIGN.md`, `main.py` | exists | design documents, FastAPI stub |
-| `domain/` | lands with PR #8 | models, ports (`domain/ports.py`), errors; pure Python |
-| `adapters/` | lands with PR #8 (`adapters/llm/`) | integrations: `db/`, `github/`, `gitlab/`, `stripe/`, `identity/`, `vault/` planned |
-| `tests/` | lands with PR #8 | pytest suite |
-| `api/` | planned | webhooks, `/v1` routes, auth, app factory |
-| `worker/` | planned | claim loop, reaper, periodic tasks |
+| `domain/` | exists | models, ports (`domain/ports.py`), errors; pure Python |
+| `adapters/` | exists (`llm/`, `github/`, `identity/`, `memory/`, `jobs/`) | `jobs/` holds the in-memory `JobRepository`; `db/`, `gitlab/`, `stripe/`, `vault/` planned |
+| `tests/` | exists | pytest suite |
+| `api/` | exists | auth, `/repositories`, `/webhooks/github`, app factory; `/v1` routes planned |
+| `worker/` | exists (`process.py` processes one job) | claim loop, reaper, periodic tasks planned |
 | `ops/` | planned | `replay.py` |
 | `alembic/` | planned | migrations |
 

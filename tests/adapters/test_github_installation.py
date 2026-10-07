@@ -20,6 +20,7 @@ def settings() -> GitHubAppSettings:
         app_id="123456",
         private_key=KEY_PATH.read_text(encoding="utf-8"),
         app_slug="review-agent",
+        webhook_secret="whsec_test",
         api_base_url="https://api.github.test",
     )
 

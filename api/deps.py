@@ -20,6 +20,7 @@ NO_STORE = "no-store"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 _REQUESTED_WITH = "fetch"
 _CALLBACK_PATH = re.compile(r"^/auth/[^/]+/callback$")
+_WEBHOOK_PREFIX = "/webhooks/"
 
 
 class ApiError(Exception):
@@ -140,6 +141,13 @@ async def optional_session(request: Request) -> Session | None:
 
 def enforce_csrf(request: Request) -> JSONResponse | None:
     """Unsafe methods need X-Requested-With: fetch and our own Origin."""
+    # Webhook deliveries are forge-to-server POSTs: they carry no cookies
+    # and no Origin or X-Requested-With headers, so the checks below would
+    # reject every legitimate delivery. Their authentication is the
+    # delivery signature, verified in the route
+    # (docs/WORKFLOW_DESIGN.md §2 Step 2).
+    if request.url.path.startswith(_WEBHOOK_PREFIX):
+        return None
     if request.method in _SAFE_METHODS:
         return None
     if request.headers.get("x-requested-with") != _REQUESTED_WITH:

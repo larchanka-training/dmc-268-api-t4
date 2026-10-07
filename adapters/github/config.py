@@ -19,6 +19,8 @@ class GitHubAppSettings:
     # environment variable: a signing key never belongs in the environment.
     private_key: str = field(repr=False)
     app_slug: str
+    # Verifies webhook deliveries; a secret, so it never appears in a repr.
+    webhook_secret: str = field(repr=False)
     api_base_url: str = DEFAULT_API_BASE_URL
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
 
@@ -29,7 +31,12 @@ class GitHubAppSettings:
         def text(name: str) -> str:
             return source.get(name, "").strip()
 
-        required = ("GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_SLUG")
+        required = (
+            "GITHUB_APP_ID",
+            "GITHUB_APP_PRIVATE_KEY_PATH",
+            "GITHUB_APP_SLUG",
+            "GITHUB_WEBHOOK_SECRET",
+        )
         missing = [name for name in required if not text(name)]
         if missing:
             raise ForgeConfigurationError(
@@ -53,5 +60,6 @@ class GitHubAppSettings:
             app_id=text("GITHUB_APP_ID"),
             private_key=private_key,
             app_slug=text("GITHUB_APP_SLUG"),
+            webhook_secret=text("GITHUB_WEBHOOK_SECRET"),
             api_base_url=(text("GITHUB_API_BASE_URL") or DEFAULT_API_BASE_URL).rstrip("/"),
         )

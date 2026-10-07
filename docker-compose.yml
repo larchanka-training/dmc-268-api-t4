@@ -11,6 +11,7 @@ services:
       GITHUB_APP_ID: "1"
       GITHUB_APP_SLUG: local
       GITHUB_APP_PRIVATE_KEY_PATH: /tmp/dev-app.pem
+      GITHUB_WEBHOOK_SECRET: local-webhook-secret
     # The entrypoint script writes a throwaway PEM, then runs the app.
     entrypoint:
       - python
