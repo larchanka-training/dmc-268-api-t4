@@ -6,13 +6,19 @@ received bytes, route on the event header, then enqueue one review job per
 reviewable `pull_request` action and start the processing task
 (tasks/plan.md decision 2, 2026-10-07). The route is forge-to-server: no
 session, no CSRF headers — the delivery signature is the authentication.
+
+Every verified delivery logs its routing decision — event, action, delivery
+id, repo, PR, installation, short SHAs — so a real GitHub delivery is
+traceable in the console. Delivery content beyond those routing fields is
+never logged (AGENTS.md hard rule 3).
 """
 
 import asyncio
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import cast
+from typing import Any, cast
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
@@ -25,7 +31,7 @@ from domain.errors import WebhookPayloadError, WebhookSignatureError
 from domain.ports import GitProvider, JobRepository, NewReviewJob
 from worker.process import process_review_job
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('github_event')
 router = APIRouter()
 
 #: docs/WORKFLOW_DESIGN.md §2 Step 2 point 1: the raw body is capped at 5 MB
@@ -55,6 +61,15 @@ class GitHubWebhookDeps:
 
 def webhook_deps(request: Request) -> GitHubWebhookDeps:
     return cast(GitHubWebhookDeps, request.app.state.webhooks)
+
+
+def get_action(payload: Mapping[str, Any]) -> str:
+    """The action for one routing log line: routing metadata only, clipped
+    hard, so an adversarial payload cannot smuggle content into the logs."""
+    action = payload.get("action")
+    if isinstance(action, str) and action:
+        return action[:40]
+    return "<missing>"
 
 
 async def drain_background_tasks() -> None:
@@ -106,12 +121,22 @@ async def receive_github_webhook(request: Request) -> Response:
     # Step 2 point 4: route on the event header before the action. Only
     # `pull_request` goes to the review path; ping, lifecycle events and
     # anything unknown get 204 so GitHub stops redelivering them.
-    if request.headers.get(EVENT_HEADER) != PULL_REQUEST_EVENT:
+    gh_event = request.headers.get(EVENT_HEADER)
+    if gh_event != PULL_REQUEST_EVENT:
+        logger.info(
+            "github webhook ignored: event=%s action=%s",
+            gh_event,
+            get_action(payload)
+        )
         return Response(status_code=204)
 
     if reviewable_action(payload) is None:
         # Step 2 point 5: a non-reviewable action is not an error; it simply
         # does not review.
+        logger.info(
+            "github webhook ignored: event=pull_request action=%s",
+            get_action(payload)
+        )
         return Response(status_code=204)
 
     try:
@@ -121,6 +146,17 @@ async def receive_github_webhook(request: Request) -> Response:
         # to log; the response keeps the fixed ApiError wire shape.
         logger.warning("github webhook payload rejected: %s", error.reason)
         raise ApiError(400, "invalid_payload") from None
+
+    logger.info(
+        "github webhook accepted: event=pull_request action=%s repo=%s "
+        "pr=%s installation=%s head=%s base=%s",
+        event.action.value,
+        event.repo_full_name,
+        event.pr_number,
+        event.installation_id,
+        event.head_sha[:7],
+        event.base_sha[:7],
+    )
 
     try:
         job = NewReviewJob(
@@ -141,6 +177,12 @@ async def receive_github_webhook(request: Request) -> Response:
     # redelivered request must still see success, just no second job.
     job_id = await deps.jobs.enqueue(job)
     if job_id is None:
+        logger.info(
+            "github webhook duplicate delivery: action=%s repo=%s pr=%s",
+            event.action.value,
+            event.repo_full_name,
+            event.pr_number,
+        )
         return JSONResponse({"status": "duplicate"}, status_code=202)
 
     task = asyncio.create_task(_process_review(deps, job_id, job))

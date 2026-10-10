@@ -153,8 +153,13 @@ def opened_payload() -> dict[str, Any]:
 
 
 async def test_a_signed_delivery_ends_recorded_with_exact_structure(
-    auth_clock: FixedClock, caplog: pytest.LogCaptureFixture
+    auth_clock: FixedClock,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The diff-in-logs dev flag must not leak from a developer's shell into
+    # this rule-3 assertion.
+    monkeypatch.delenv("DEBUG_LOG_DIFF", raising=False)
     caplog.set_level(logging.DEBUG)
     transport = RecordingTransport(forge_handler)
     jobs = MemoryJobStore(clock=auth_clock)

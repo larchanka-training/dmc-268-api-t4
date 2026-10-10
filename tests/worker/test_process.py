@@ -323,7 +323,10 @@ async def test_failure_record_refused_leaves_job_unfailed() -> None:
 # --- logs: counts in, content out ------------------------------------------
 
 
-async def test_success_log_carries_counts_never_content(caplog) -> None:
+async def test_success_log_carries_counts_never_content(
+    caplog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DEBUG_LOG_DIFF", raising=False)
     store = MemoryJobStore()
     vcs = FakeGitProvider(make_context(GOOD_DIFF))
     payload = make_payload()
@@ -345,7 +348,10 @@ async def test_success_log_carries_counts_never_content(caplog) -> None:
     assert DESCRIPTION_SENTINEL not in text
 
 
-async def test_failure_log_carries_error_kind_never_messages(caplog) -> None:
+async def test_failure_log_carries_error_kind_never_messages(
+    caplog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DEBUG_LOG_DIFF", raising=False)
     store = MemoryJobStore()
     vcs = FakeGitProvider(error=ForgeUnavailableError("github", "connection reset by peer"))
     payload = make_payload()
@@ -361,3 +367,50 @@ async def test_failure_log_carries_error_kind_never_messages(caplog) -> None:
     assert DIFF_SENTINEL not in text
     assert TITLE_SENTINEL not in text
     assert DESCRIPTION_SENTINEL not in text
+
+
+async def test_the_file_inventory_is_logged_with_paths_and_reasons(caplog) -> None:
+    store = MemoryJobStore()
+    vcs = FakeGitProvider(make_context(GOOD_DIFF))
+    payload = make_payload()
+    job_id = await enqueue(store, payload)
+
+    with caplog.at_level(logging.INFO, logger="worker.process"):
+        assert await process_review_job(job_id, payload, vcs, store) is True
+
+    text = caplog.text
+    assert "review job files:" in text
+    assert "app/users.py" in text
+    assert "package-lock.json (lockfile)" in text
+
+
+async def test_the_debug_log_diff_flag_logs_the_diff_text(
+    caplog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEBUG_LOG_DIFF", "1")
+    store = MemoryJobStore()
+    vcs = FakeGitProvider(make_context(GOOD_DIFF))
+    payload = make_payload()
+    job_id = await enqueue(store, payload)
+
+    with caplog.at_level(logging.INFO, logger="worker.process"):
+        assert await process_review_job(job_id, payload, vcs, store) is True
+
+    # The single sanctioned exception to the no-diff-in-logs rule: an explicit
+    # dev-only flag, off by default.
+    assert DIFF_SENTINEL in caplog.text
+
+
+async def test_the_diff_stays_out_of_logs_without_the_flag(
+    caplog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DEBUG_LOG_DIFF", raising=False)
+    store = MemoryJobStore()
+    vcs = FakeGitProvider(make_context(GOOD_DIFF))
+    payload = make_payload()
+    job_id = await enqueue(store, payload)
+
+    with caplog.at_level(logging.DEBUG, logger="worker.process"):
+        assert await process_review_job(job_id, payload, vcs, store) is True
+
+    assert DIFF_SENTINEL not in caplog.text

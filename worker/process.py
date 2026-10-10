@@ -5,17 +5,40 @@ webhook enqueues a job and starts this coroutine as a background task
 (tasks/plan.md decision 2, 2026-10-07). The worker claim loop (§2 Step 4)
 replaces the direct invocation later; the function signature stays.
 
-Logs carry job id, provider, repo, PR number, counts, error kind and duration
-only — never diff text, PR title or description (AGENTS.md hard rule 3).
+Logs carry job id, provider, repo, PR number, file paths with skip reasons,
+counts, error kind and duration — never PR title or description, and never
+diff text. The single, explicit exception is the dev-only DEBUG_LOG_DIFF=1
+escape hatch (see _debug_log_diff_enabled), which exists so a developer can
+inspect what a real delivery fetched; it must never be set outside a
+developer machine.
 """
 
 import logging
+import os
 import time
 
 from domain.diff import parse_diff, split_into_chunks
 from domain.diff_filter import filter_files
 from domain.errors import DiffFormatError, ForgeError
 from domain.ports import GitProvider, JobRepository, JobStats, NewReviewJob
+
+#: Dev-only escape hatch: when "1", the fetched diff text is logged verbatim
+#: after the fetch. This knowingly deviates from AGENTS.md hard rule 3 (raw
+#: diffs are never logged) and is the only place in the codebase that does.
+DEBUG_LOG_DIFF_ENV = "DEBUG_LOG_DIFF"
+
+
+def _debug_log_diff_enabled() -> bool:
+    # Read per call, not at import, so tests and operators can flip it.
+    return os.environ.get(DEBUG_LOG_DIFF_ENV, "") == "1"
+
+
+def _clip(value: str, limit: int = 2000) -> str:
+    """Cap a joined inventory string so an absurd diff cannot make an absurd
+    log line; paths and reasons are metadata, the volume is not."""
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "..."
 
 
 async def process_review_job(
@@ -45,8 +68,31 @@ async def process_review_job(
         context = await vcs.fetch_pull_request(
             payload.installation_id, payload.repo_full_name, payload.pr_number
         )
+        if _debug_log_diff_enabled():
+            # Logged before parsing on purpose: a diff that fails to parse is
+            # exactly the case a developer needs to see.
+            log.info(
+                "review job diff (%s=1): job_id=%s repo=%s pr=%s diff_text=%s",
+                DEBUG_LOG_DIFF_ENV,
+                job_id,
+                payload.repo_full_name,
+                payload.pr_number,
+                context.diff_text,
+            )
         files = parse_diff(context.diff_text)
         filtered = filter_files(files)
+        kept_paths = ", ".join(diff.new_path or diff.old_path for diff in filtered.kept)
+        skipped_paths = ", ".join(
+            f"{entry.path} ({entry.reason.value})" for entry in filtered.skipped
+        )
+        log.info(
+            "review job files: job_id=%s repo=%s pr=%s reviewable=[%s] skipped=[%s]",
+            job_id,
+            payload.repo_full_name,
+            payload.pr_number,
+            _clip(kept_paths),
+            _clip(skipped_paths),
+        )
         stats = JobStats(
             files_total=len(files),
             files_reviewable=len(filtered.kept),
