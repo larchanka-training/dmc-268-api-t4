@@ -12,6 +12,20 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: dmc
+          POSTGRES_PASSWORD: dmc
+          POSTGRES_DB: dmc268
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +44,11 @@ jobs:
         run: .venv/bin/mypy domain adapters
 
       - name: Pytest
+        # The tests/db and tests/ports fixtures probe PostgreSQL themselves and
+        # skip when it is down; with the service up they must never skip — CI
+        # must not silently skip queue tests (.agents/rules/backend.md § Tests).
+        env:
+          DATABASE_URL: postgresql+asyncpg://dmc:dmc@localhost:5432/dmc268
         run: .venv/bin/pytest -q
 
   image:
