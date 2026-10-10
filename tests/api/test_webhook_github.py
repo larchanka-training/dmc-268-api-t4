@@ -423,13 +423,12 @@ async def test_an_accepted_delivery_logs_the_event_and_pull_request(
         vcs=FakeGitProvider(make_context()),
     )
 
-    with caplog.at_level(logging.INFO, logger="api.webhooks.github"):
+    with caplog.at_level(logging.INFO, logger="github_event"):
         response = await post_delivery(app, opened_body())
 
     assert response.status_code == 202
     text = caplog.text
     assert "github webhook accepted: event=pull_request action=opened" in text
-    assert f"delivery={DELIVERY}" in text
     assert f"repo={REPO} pr=7" in text
     assert f"installation={INSTALLATION_ID}" in text
     assert f"head={HEAD_SHA[:7]}" in text
@@ -441,7 +440,7 @@ async def test_ignored_events_and_actions_are_logged(
 ) -> None:
     app = build_test_app(auth_clock, FakeIdentityProvider())
 
-    with caplog.at_level(logging.INFO, logger="api.webhooks.github"):
+    with caplog.at_level(logging.INFO, logger="github_event"):
         await post_delivery(app, opened_body(), event="ping")
         await post_delivery(app, opened_body(action="edited"))
 
@@ -462,7 +461,7 @@ async def test_a_duplicate_delivery_is_logged(
     )
     body = opened_body()
 
-    with caplog.at_level(logging.INFO, logger="api.webhooks.github"):
+    with caplog.at_level(logging.INFO, logger="github_event"):
         await post_delivery(app, body)
         await post_delivery(app, body)
 

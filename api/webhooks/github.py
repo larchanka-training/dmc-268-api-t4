@@ -31,7 +31,7 @@ from domain.errors import WebhookPayloadError, WebhookSignatureError
 from domain.ports import GitProvider, JobRepository, NewReviewJob
 from worker.process import process_review_job
 
-logger = logging.getLogger('github_event')
+logger = logging.getLogger("github_event")
 router = APIRouter()
 
 #: docs/WORKFLOW_DESIGN.md §2 Step 2 point 1: the raw body is capped at 5 MB
@@ -123,20 +123,13 @@ async def receive_github_webhook(request: Request) -> Response:
     # anything unknown get 204 so GitHub stops redelivering them.
     gh_event = request.headers.get(EVENT_HEADER)
     if gh_event != PULL_REQUEST_EVENT:
-        logger.info(
-            "github webhook ignored: event=%s action=%s",
-            gh_event,
-            get_action(payload)
-        )
+        logger.info("github webhook ignored: event=%s action=%s", gh_event, get_action(payload))
         return Response(status_code=204)
 
     if reviewable_action(payload) is None:
         # Step 2 point 5: a non-reviewable action is not an error; it simply
         # does not review.
-        logger.info(
-            "github webhook ignored: event=pull_request action=%s",
-            get_action(payload)
-        )
+        logger.info("github webhook ignored: event=pull_request action=%s", get_action(payload))
         return Response(status_code=204)
 
     try:
