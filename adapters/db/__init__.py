@@ -7,3 +7,4 @@ imported looks like a table that should be dropped
 """
 
 from adapters.db import models  # noqa: F401
+from adapters.db.repository import PostgresJobStore  # noqa: F401

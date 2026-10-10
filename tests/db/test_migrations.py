@@ -8,22 +8,17 @@ reachable.
 import asyncio
 import os
 from datetime import UTC, datetime
-from pathlib import Path
 
 import asyncpg
 import pytest
-from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from alembic import command
+from tests.db.support import COMPOSE_URL, require_postgres, run_alembic
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-ALEMBIC_INI = REPO_ROOT / "alembic.ini"
-COMPOSE_URL = "postgresql+asyncpg://dmc:dmc@localhost:5432/dmc268"
 TEST_DB_NAME = "dmc268_test"
 
 JOB_INDEXES = (
@@ -57,20 +52,6 @@ def _job_params(delivery_id: str, status: str = "QUEUED") -> dict[str, object]:
     }
 
 
-def _run_alembic(url: str, verb: str, target: str) -> None:
-    previous = os.environ.get("DATABASE_URL")
-    os.environ["DATABASE_URL"] = url
-    try:
-        cfg = Config(str(ALEMBIC_INI))
-        cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
-        getattr(command, verb)(cfg, target)
-    finally:
-        if previous is None:
-            os.environ.pop("DATABASE_URL", None)
-        else:
-            os.environ["DATABASE_URL"] = previous
-
-
 async def _fetch_all(url: str, statement: str, params: dict[str, object] | None = None):
     engine = create_async_engine(url, poolclass=NullPool)
     try:
@@ -99,20 +80,6 @@ async def _table_names(url: str) -> set[str]:
     return {row[0] for row in await _fetch_all(url, TABLES_SQL)}
 
 
-def _asyncpg_dsn(url) -> str:
-    # asyncpg wants a plain postgresql:// DSN, without SQLAlchemy's +asyncpg.
-    return url.set(drivername="postgresql").render_as_string(hide_password=False)
-
-
-async def _server_reachable(admin_dsn: str) -> bool:
-    try:
-        conn = await asyncpg.connect(admin_dsn, timeout=3)
-    except Exception:
-        return False
-    await conn.close()
-    return True
-
-
 async def _recreate_test_database(admin_dsn: str) -> None:
     conn = await asyncpg.connect(admin_dsn)
     try:
@@ -133,17 +100,12 @@ async def _drop_test_database(admin_dsn: str) -> None:
 @pytest.fixture(scope="module")
 def migrated_url():
     base = make_url(os.environ.get("DATABASE_URL") or COMPOSE_URL)
-    admin_dsn = _asyncpg_dsn(base.set(database="postgres"))
-    if not asyncio.run(_server_reachable(admin_dsn)):
-        pytest.skip(
-            "PostgreSQL is not reachable at "
-            f"{base.set(database='postgres').render_as_string(hide_password=True)} "
-            "— the Alembic round-trip tests need a local PostgreSQL "
-            "(`docker compose up -d postgres`); CI always provides one"
-        )
+    admin_dsn = require_postgres(
+        base, reason="the Alembic round-trip tests need a local PostgreSQL"
+    )
     asyncio.run(_recreate_test_database(admin_dsn))
     url = base.set(database=TEST_DB_NAME).render_as_string(hide_password=False)
-    _run_alembic(url, "upgrade", "head")
+    run_alembic(url, "upgrade", "head")
     yield url
     asyncio.run(_drop_test_database(admin_dsn))
 
@@ -188,14 +150,14 @@ def test_updated_at_trigger_overwrites_manual_writes(migrated_url: str) -> None:
 
 
 def test_downgrade_base_drops_tables(migrated_url: str) -> None:
-    _run_alembic(migrated_url, "downgrade", "base")
+    run_alembic(migrated_url, "downgrade", "base")
     tables = asyncio.run(_table_names(migrated_url))
     assert "pr_review_jobs" not in tables
     assert "pr_review_steps" not in tables
 
 
 def test_reupgrade_head_is_repeatable(migrated_url: str) -> None:
-    _run_alembic(migrated_url, "upgrade", "head")
+    run_alembic(migrated_url, "upgrade", "head")
     tables = asyncio.run(_table_names(migrated_url))
     assert "pr_review_jobs" in tables
     assert "pr_review_steps" in tables
