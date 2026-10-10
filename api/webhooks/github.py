@@ -3,14 +3,16 @@
 Implements [docs/WORKFLOW_DESIGN.md §2](../../docs/WORKFLOW_DESIGN.md): read
 the raw body capped at 5 MB, verify the HMAC signature over exactly the
 received bytes, route on the event header, then enqueue one review job per
-reviewable `pull_request` action and start the processing task
-(tasks/plan.md decision 2, 2026-10-07). The route is forge-to-server: no
-session, no CSRF headers — the delivery signature is the authentication.
+reviewable `pull_request` action. Processing runs as a background task that
+claims the queue once — a mini-worker over the same port the production
+claim loop of Step 4 will use (tasks/plan.md decision 2, 2026-10-07). The
+route is forge-to-server: no session, no CSRF headers — the delivery
+signature is the authentication.
 
 Every verified delivery logs its routing decision — event, action, delivery
 id, repo, PR, installation, short SHAs — so a real GitHub delivery is
-traceable in the console. Delivery content beyond those routing fields is
-never logged (AGENTS.md hard rule 3).
+traceable in the console. Delivery content beyond those routing fields,
+titles and branch names included, is never logged (AGENTS.md hard rule 3).
 """
 
 import asyncio
@@ -28,8 +30,9 @@ from adapters.github.payload import parse_pull_request_event, reviewable_action
 from adapters.github.signature import SIGNATURE_HEADER, verify_webhook_signature
 from api.deps import ApiError
 from domain.errors import WebhookPayloadError, WebhookSignatureError
+from domain.jobs import clamp_for_storage
 from domain.ports import GitProvider, JobRepository, NewReviewJob
-from worker.process import process_review_job
+from worker.process import process_claimed_job
 
 logger = logging.getLogger("github_event")
 router = APIRouter()
@@ -41,6 +44,10 @@ MAX_BODY = 5 * 1024 * 1024
 EVENT_HEADER = "x-github-event"
 DELIVERY_HEADER = "x-github-delivery"
 PULL_REQUEST_EVENT = "pull_request"
+
+#: The worker id of the inline one-shot claimer. The production worker claim
+#: loop (§2 Step 4) replaces it with real worker ids.
+INLINE_WORKER_ID = "inline"
 
 #: In-flight processing tasks. A bare task result can be garbage-collected
 #: mid-run, so the module keeps a reference until the task finishes
@@ -83,9 +90,16 @@ async def drain_background_tasks() -> None:
         await asyncio.gather(*BACKGROUND_TASKS)
 
 
-async def _process_review(deps: GitHubWebhookDeps, job_id: str, job: NewReviewJob) -> None:
-    """Wrap one job run so the tracked tasks are always Task[None]."""
-    await process_review_job(job_id, job, deps.vcs, deps.jobs)
+async def _process_review(deps: GitHubWebhookDeps) -> None:
+    """One claim-based mini-worker pass, so the port has one shape.
+
+    Claims whatever is eligible — not necessarily the job this delivery
+    enqueued — and runs it. The production worker claim loop (Step 4)
+    replaces the inline invocation; the function it calls is the same.
+    """
+    claimed = await deps.jobs.claim(worker_id=INLINE_WORKER_ID)
+    if claimed is not None:
+        await process_claimed_job(claimed, deps.vcs, deps.jobs)
 
 
 @router.post("/webhooks/github")
@@ -162,6 +176,14 @@ async def receive_github_webhook(request: Request) -> Response:
             head_sha=event.head_sha,
             base_sha=event.base_sha,
             event_action=event.action.value,
+            # D5 metadata (docs/PIPELINE_SPEC.md §7.2), clamped to the
+            # VARCHAR(255) columns: the strings are untrusted and unbounded.
+            pr_title=clamp_for_storage(event.title),
+            author_login=(
+                clamp_for_storage(event.author_login) if event.author_login is not None else None
+            ),
+            head_ref=clamp_for_storage(event.head_ref) if event.head_ref is not None else None,
+            base_ref=clamp_for_storage(event.base_ref) if event.base_ref is not None else None,
         )
     except ValueError:
         raise ApiError(400, "invalid_payload") from None
@@ -178,7 +200,7 @@ async def receive_github_webhook(request: Request) -> Response:
         )
         return JSONResponse({"status": "duplicate"}, status_code=202)
 
-    task = asyncio.create_task(_process_review(deps, job_id, job))
+    task = asyncio.create_task(_process_review(deps))
     BACKGROUND_TASKS.add(task)
     task.add_done_callback(BACKGROUND_TASKS.discard)
     return JSONResponse({"job_id": job_id, "status": "queued"}, status_code=202)

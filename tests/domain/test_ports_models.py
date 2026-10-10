@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from domain.ports import (
+    ClaimedJob,
     CommitInfo,
     JobStats,
     NewReviewJob,
@@ -64,6 +65,7 @@ def make_new_job(**overrides: object) -> NewReviewJob:
         "head_sha": HEAD_SHA,
         "base_sha": BASE_SHA,
         "event_action": "opened",
+        "pr_title": "Add a feature",
     }
     values.update(overrides)
     return NewReviewJob(**values)  # type: ignore[arg-type]
@@ -168,9 +170,11 @@ def test_review_job_status_values() -> None:
     assert [status.value for status in ReviewJobStatus] == [
         "QUEUED",
         "PROCESSING",
+        "RETRYING",
         "COMPLETED",
         "FAILED",
         "SUPERSEDED",
+        "SKIPPED",
     ]
 
 
@@ -234,6 +238,29 @@ def test_new_review_job_happy_path() -> None:
     assert job.delivery_id == "d-6f1c2a30-51b1-11ef"
     assert job.event_action == "opened"
     assert job.head_sha == HEAD_SHA
+    assert job.pr_title == "Add a feature"
+
+
+def test_new_review_job_d5_defaults_are_none() -> None:
+    job = make_new_job()
+
+    assert job.author_login is None
+    assert job.head_ref is None
+    assert job.base_ref is None
+
+
+def test_new_review_job_accepts_d5_metadata_and_an_empty_title() -> None:
+    job = make_new_job(
+        pr_title="",
+        author_login="octocat",
+        head_ref="feature",
+        base_ref="main",
+    )
+
+    assert job.pr_title == ""
+    assert job.author_login == "octocat"
+    assert job.head_ref == "feature"
+    assert job.base_ref == "main"
 
 
 def test_new_review_job_allows_a_missing_delivery_id() -> None:
@@ -292,9 +319,35 @@ def test_review_job_defaults_to_no_stats_error_or_finish_time() -> None:
     assert job.stats is None
     assert job.error_kind is None
     assert job.finished_at is None
+    assert job.retry_count == 0
+    assert job.next_attempt_at is None
+
+
+def test_review_job_carries_retry_state() -> None:
+    next_attempt_at = datetime(2026, 10, 7, 12, 3, tzinfo=UTC)
+    job = make_review_job(
+        status=ReviewJobStatus.RETRYING,
+        retry_count=2,
+        next_attempt_at=next_attempt_at,
+    )
+
+    assert job.retry_count == 2
+    assert job.next_attempt_at == next_attempt_at
 
 
 @pytest.mark.parametrize("job_id", ["", "  "])
 def test_review_job_rejects_an_empty_job_id(job_id: str) -> None:
     with pytest.raises(ValueError, match="job_id"):
         make_review_job(job_id=job_id)
+
+
+# --- ClaimedJob ----------------------------------------------------------
+
+
+def test_claimed_job_carries_the_claim_state() -> None:
+    claimed = ClaimedJob(job_id="job-1", payload=make_new_job(), attempt=2, worker_id="w-1")
+
+    assert claimed.job_id == "job-1"
+    assert claimed.payload.pr_title == "Add a feature"
+    assert claimed.attempt == 2
+    assert claimed.worker_id == "w-1"

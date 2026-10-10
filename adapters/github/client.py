@@ -17,7 +17,7 @@ import httpx
 
 from adapters.github.app_auth import GitHubAppAuth
 from adapters.github.config import PROVIDER_NAME, GitHubAppSettings
-from domain.errors import ForgeUnavailableError
+from domain.errors import ForgeUnavailableError, InstallationGoneError, PrNotFoundError
 from domain.ports import CommitInfo, PullRequestContext
 
 logger = logging.getLogger(__name__)
@@ -68,12 +68,13 @@ class GitHubVCSClient:
                 f"/repos/{repo_full_name}/pulls/{number}",
                 headers,
                 "pull request fetch",
+                installation_id,
             )
             commits, dropped_commits = await self._fetch_commits(
-                client, repo_full_name, number, headers
+                client, repo_full_name, number, headers, installation_id
             )
             diff_path = f"/repos/{repo_full_name}/pulls/{number}.diff"
-            diff_text = await self._fetch_diff(client, diff_path, headers)
+            diff_text = await self._fetch_diff(client, diff_path, headers, installation_id)
         context = _build_context(
             installation_id, repo_full_name, number, detail, commits, diff_text
         )
@@ -99,6 +100,7 @@ class GitHubVCSClient:
         repo_full_name: str,
         number: int,
         headers: dict[str, str],
+        installation_id: int,
     ) -> tuple[tuple[CommitInfo, ...], int]:
         url: str | None = (
             f"{self._base_url}/repos/{repo_full_name}/pulls/{number}/commits"
@@ -108,7 +110,7 @@ class GitHubVCSClient:
         dropped_commits = 0
         pages = 0
         while url is not None and pages < MAX_COMMIT_PAGES:
-            response = await self._get(client, url, headers, "commit listing")
+            response = await self._get(client, url, headers, "commit listing", installation_id)
             body = self._json_body(response, "commit listing")
             if not isinstance(body, list):
                 raise ForgeUnavailableError(
@@ -138,13 +140,17 @@ class GitHubVCSClient:
         return tuple(commits), dropped_commits
 
     async def _fetch_diff(
-        self, client: httpx.AsyncClient, path: str, headers: dict[str, str]
+        self,
+        client: httpx.AsyncClient,
+        path: str,
+        headers: dict[str, str],
+        installation_id: int,
     ) -> str:
         diff_headers = {**headers, "Accept": "application/vnd.github.diff"}
         request = client.build_request("GET", f"{self._base_url}{path}", headers=diff_headers)
         response = await self._send(client, request, "diff fetch")
         try:
-            _check_status(response, "diff fetch")
+            _check_status(response, "diff fetch", installation_id)
             declared_length = response.headers.get("Content-Length", "")
             if declared_length.isdigit() and int(declared_length) > MAX_DIFF_BYTES:
                 raise ForgeUnavailableError(PROVIDER_NAME, f"diff exceeds {MAX_DIFF_BYTES} bytes")
@@ -167,20 +173,28 @@ class GitHubVCSClient:
         path: str,
         headers: dict[str, str],
         step: str,
+        installation_id: int,
     ) -> dict[str, Any]:
-        response = await self._get(client, f"{self._base_url}{path}", headers, step)
+        response = await self._get(
+            client, f"{self._base_url}{path}", headers, step, installation_id
+        )
         body = self._json_body(response, step)
         if not isinstance(body, dict):
             raise ForgeUnavailableError(PROVIDER_NAME, f"{step} returned a non-object body")
         return body
 
     async def _get(
-        self, client: httpx.AsyncClient, url: str, headers: dict[str, str], step: str
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        headers: dict[str, str],
+        step: str,
+        installation_id: int,
     ) -> httpx.Response:
         request = client.build_request("GET", url, headers=headers)
         response = await self._send(client, request, step)
         try:
-            _check_status(response, step)
+            _check_status(response, step, installation_id)
             await response.aread()
         except Exception:
             await response.aclose()
@@ -206,13 +220,16 @@ class GitHubVCSClient:
             raise ForgeUnavailableError(PROVIDER_NAME, f"{step} returned invalid JSON") from error
 
 
-def _check_status(response: httpx.Response, step: str) -> None:
+def _check_status(response: httpx.Response, step: str, installation_id: int) -> None:
+    """Error mapping for the pull request endpoints (fetch_pull_request knows
+    the installation; the installation/token endpoints in app_auth.py keep
+    their own mapping). Class per docs/PIPELINE_SPEC.md §4.2: 404 is
+    permanent (the PR is gone), 401/403 is permanent (access revoked) — the
+    rest is retryable. Never a response body (AGENTS.md hard rule 2)."""
     if response.status_code == 404:
-        raise ForgeUnavailableError(PROVIDER_NAME, f"{step}: pull request not found")
+        raise PrNotFoundError(PROVIDER_NAME, "pull request not found")
     if response.status_code in (401, 403):
-        raise ForgeUnavailableError(
-            PROVIDER_NAME, f"{step}: permission denied (HTTP {response.status_code})"
-        )
+        raise InstallationGoneError(installation_id, "permission denied")
     if response.status_code >= 400:
         raise ForgeUnavailableError(PROVIDER_NAME, f"{step}: HTTP {response.status_code}")
     if response.status_code not in _PERMITTED_STATUSES:

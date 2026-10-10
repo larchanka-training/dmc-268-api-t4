@@ -90,6 +90,19 @@ class ForgeUnavailableError(ForgeError):
         self.reason = reason
 
 
+class PrNotFoundError(ForgeError):
+    """The pull request no longer exists on the forge (HTTP 404).
+
+    Permanent, not retryable (docs/PIPELINE_SPEC.md §4.2): retrying cannot
+    bring a deleted pull request back. Mirrors ForgeUnavailableError.
+    """
+
+    def __init__(self, provider: str, reason: str) -> None:
+        super().__init__(f"forge '{provider}': {reason}")
+        self.provider = provider
+        self.reason = reason
+
+
 class WebhookSignatureError(ForgeError):
     """A webhook delivery did not authenticate.
 

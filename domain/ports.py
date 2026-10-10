@@ -157,11 +157,15 @@ class PullRequestContext:
 
 
 class ReviewJobStatus(StrEnum):
+    """The status set of docs/PIPELINE_SPEC.md §2 [D1] and WORKFLOW_DESIGN §7."""
+
     QUEUED = "QUEUED"
     PROCESSING = "PROCESSING"
+    RETRYING = "RETRYING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     SUPERSEDED = "SUPERSEDED"
+    SKIPPED = "SKIPPED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,7 +204,13 @@ class JobStats:
 
 @dataclass(frozen=True, slots=True)
 class NewReviewJob:
-    """A review to run, as first recorded from a webhook delivery."""
+    """A review to run, as first recorded from a webhook delivery.
+
+    The D5 metadata (docs/PIPELINE_SPEC.md §7.2) rides along so the review
+    list is readable without a forge round-trip; callers clamp the
+    untrusted strings to their VARCHAR(255) columns with
+    `domain.jobs.clamp_for_storage` before building this.
+    """
 
     provider: str
     delivery_id: str | None
@@ -211,6 +221,10 @@ class NewReviewJob:
     head_sha: str
     base_sha: str
     event_action: str
+    pr_title: str
+    author_login: str | None = None
+    head_ref: str | None = None
+    base_ref: str | None = None
 
     def __post_init__(self) -> None:
         if not self.provider.strip():
@@ -239,10 +253,26 @@ class ReviewJob:
     stats: JobStats | None = None
     error_kind: str | None = None
     finished_at: datetime | None = None
+    retry_count: int = 0
+    next_attempt_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.job_id.strip():
             raise ValueError("job_id must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimedJob:
+    """A job handed to a worker by `JobRepository.claim`.
+
+    The job is already PROCESSING and leased to `worker_id`;
+    `attempt` is the job's retry_count at claim time.
+    """
+
+    job_id: str
+    payload: NewReviewJob
+    attempt: int
+    worker_id: str
 
 
 class GitProvider(Protocol):
@@ -256,18 +286,55 @@ class GitProvider(Protocol):
 class JobRepository(Protocol):
     """Persists review jobs and their status transitions.
 
-    The bool returns are False when the job is missing or has been superseded;
-    the caller must stop processing it.
+    Who writes which status (docs/WORKFLOW_DESIGN.md §7): only the ingest
+    path writes SUPERSEDED; only a worker holding the lease writes
+    PROCESSING (via claim), COMPLETED, RETRYING and FAILED. Terminal states
+    are never re-entered — a re-run enqueues a new job.
+
+    Contract of the returns: bool methods return False, and `fail` returns
+    None, when the job is missing, already terminal, or leased to another
+    worker; the caller must stop processing that job.
     """
 
     async def enqueue(self, job: NewReviewJob) -> str | None:
-        """Returns the job id, or None when the delivery is a duplicate."""
+        """Returns the new job id, or None when the delivery is a duplicate
+        (provider, delivery_id). Supersedes the pull request's active jobs
+        (QUEUED/RETRYING/PROCESSING) in the same step."""
         ...
 
-    async def mark_processing(self, job_id: str) -> bool: ...
+    async def claim(self, worker_id: str) -> ClaimedJob | None:
+        """Marks the oldest eligible job PROCESSING and leases it to
+        `worker_id`: QUEUED/RETRYING with `next_attempt_at <= now`, ordered
+        by next_attempt_at (set at enqueue and after each retry), then
+        created_at, skipping installations already running
+        MAX_IN_FLIGHT_PER_INSTALLATION jobs. Returns None when nothing is
+        eligible (docs/WORKFLOW_DESIGN.md §2 Step 4). The column is NOT
+        NULL in the schema — PostgreSQL ASC would sort NULLS LAST — so
+        both stores see the same order.
+        """
+        ...
 
-    async def mark_completed(self, job_id: str, stats: JobStats) -> bool: ...
+    async def complete(self, job_id: str, stats: JobStats, *, worker_id: str) -> bool:
+        """PROCESSING and leased to `worker_id` → COMPLETED with stats and
+        finished_at; False otherwise."""
+        ...
 
-    async def mark_failed(self, job_id: str, error_kind: str) -> bool: ...
+    async def fail(
+        self, job_id: str, error_kind: str, *, retryable: bool, worker_id: str
+    ) -> ReviewJobStatus | None:
+        """Holder-checked like complete. Retryable with retries left →
+        RETRYING, retry_count + 1, next_attempt_at = now + backoff on the
+        pre-increment retry_count, 1/2/4 min (docs/PIPELINE_SPEC.md §4.3;
+        the lease is cleared); retryable but exhausted, or not retryable →
+        FAILED, with retry_count capped at max_retries
+        (ck_pr_review_jobs_retry_bounds). Returns the new status, or None
+        when not the holder.
+        """
+        ...
+
+    async def extend_lease(self, job_id: str, *, worker_id: str) -> bool:
+        """Holder-checked; pushes locked_until out by LEASE_SECONDS. False
+        when the job is not PROCESSING or held by another worker."""
+        ...
 
     async def get(self, job_id: str) -> ReviewJob | None: ...

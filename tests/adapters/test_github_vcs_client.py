@@ -10,7 +10,7 @@ import pytest
 from adapters.github.app_auth import GitHubAppAuth
 from adapters.github.client import GitHubVCSClient
 from adapters.github.config import GitHubAppSettings
-from domain.errors import ForgeUnavailableError
+from domain.errors import ForgeUnavailableError, InstallationGoneError, PrNotFoundError
 from tests.conftest import FixedClock, RecordingTransport, github_fixture
 
 KEY_PATH = Path(__file__).resolve().parent.parent / "fixtures" / "github" / "app_key.pem"
@@ -73,6 +73,7 @@ def serving(
     *,
     detail: dict[str, Any] | None = None,
     commit_pages: list[list[dict[str, Any]]] | None = None,
+    commit_status: int = 200,
     diff_status: int = 200,
     diff_text: str = DIFF_TEXT,
 ) -> Any:
@@ -98,6 +99,8 @@ def serving(
                 if page_number < len(pages)
                 else {}
             )
+            if commit_status != 200:
+                return httpx.Response(commit_status, json={"message": "secret-body-marker"})
             return httpx.Response(200, json=batch, headers=headers)
         if path.endswith(f"/repos/{REPO}/pulls/{PR_NUMBER}.diff"):
             if diff_status != 200:
@@ -331,25 +334,41 @@ async def test_a_diff_exactly_at_the_cap_is_accepted(auth_clock: FixedClock) -> 
 # --- error mapping -------------------------------------------------------
 
 
-async def test_a_missing_pull_request_is_not_found(auth_clock: FixedClock) -> None:
-    client, _ = client_for(auth_clock, serving(detail_status=404))
+def serving_status(endpoint: str, status: int) -> Any:
+    """serving() with exactly one PR endpoint answering `status`."""
+    if endpoint == "detail":
+        return serving(detail_status=status)
+    if endpoint == "commits":
+        return serving(commit_status=status)
+    return serving(diff_status=status)
 
-    with pytest.raises(ForgeUnavailableError) as caught:
+
+@pytest.mark.parametrize("endpoint", ["detail", "commits", "diff"])
+async def test_a_404_on_any_pr_endpoint_is_pr_not_found(
+    auth_clock: FixedClock, endpoint: str
+) -> None:
+    client, _ = client_for(auth_clock, serving_status(endpoint, 404))
+
+    with pytest.raises(PrNotFoundError) as caught:
         await client.fetch_pull_request(42, REPO, PR_NUMBER)
 
-    assert "not found" in str(caught.value)
+    assert caught.value.provider == "github"
+    assert "pull request not found" in str(caught.value)
     assert "secret-body-marker" not in str(caught.value)
 
 
-async def test_a_forbidden_response_maps_to_permission_denied(
-    auth_clock: FixedClock,
+@pytest.mark.parametrize("status_code", [401, 403])
+@pytest.mark.parametrize("endpoint", ["detail", "commits", "diff"])
+async def test_denied_access_on_any_pr_endpoint_means_the_installation_is_gone(
+    auth_clock: FixedClock, status_code: int, endpoint: str
 ) -> None:
-    client, _ = client_for(auth_clock, serving(detail_status=403))
+    client, _ = client_for(auth_clock, serving_status(endpoint, status_code))
 
-    with pytest.raises(ForgeUnavailableError) as caught:
+    with pytest.raises(InstallationGoneError) as caught:
         await client.fetch_pull_request(42, REPO, PR_NUMBER)
 
-    assert "permission" in str(caught.value).lower()
+    assert caught.value.installation_id == 42
+    assert "permission denied" in str(caught.value)
     assert "secret-body-marker" not in str(caught.value)
     assert TOKEN not in str(caught.value)
 

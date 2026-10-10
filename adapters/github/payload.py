@@ -44,6 +44,10 @@ class PullRequestEvent:
     author_external_id: int | None
     author_association: str | None
     draft: bool
+    # D5 metadata (docs/PIPELINE_SPEC.md §7.2): present in every real
+    # delivery, but optional here — an older or trimmed payload yields None.
+    head_ref: str | None = None
+    base_ref: str | None = None
 
 
 def reviewable_action(payload: Mapping[str, Any]) -> PullRequestAction | None:
@@ -81,6 +85,8 @@ def parse_pull_request_event(payload: Mapping[str, Any]) -> PullRequestEvent:
     installation = _object_of(payload, "installation")
     repository = _object_of(payload, "repository")
     pull_request = _object_of(payload, "pull_request")
+    head = _object_of(pull_request, "head")
+    base = _object_of(pull_request, "base")
 
     user = pull_request.get("user")
     if user is None:
@@ -101,14 +107,26 @@ def parse_pull_request_event(payload: Mapping[str, Any]) -> PullRequestEvent:
         repo_id=_int_of(repository, "id", "repository.id"),
         repo_full_name=_string_of(repository, "full_name", "repository.full_name"),
         pr_number=_int_of(pull_request, "number", "pull_request.number"),
-        head_sha=_sha_of(_object_of(pull_request, "head"), "sha", "pull_request.head.sha"),
-        base_sha=_sha_of(_object_of(pull_request, "base"), "sha", "pull_request.base.sha"),
+        head_sha=_sha_of(head, "sha", "pull_request.head.sha"),
+        base_sha=_sha_of(base, "sha", "pull_request.base.sha"),
         title=_string_of(pull_request, "title", "pull_request.title"),
         author_login=author_login,
         author_external_id=author_external_id,
         author_association=author_association,
         draft=_bool_of(pull_request, "draft", "pull_request.draft"),
+        head_ref=_optional_ref(head),
+        base_ref=_optional_ref(base),
     )
+
+
+def _optional_ref(section: Mapping[str, Any]) -> str | None:
+    """`head.ref`/`base.ref` are optional: absent or malformed yields None
+    rather than a rejected delivery — the SHAs, not the refs, are what the
+    review depends on."""
+    value = section.get("ref")
+    if isinstance(value, str) and value:
+        return value
+    return None
 
 
 def _object_of(section: Mapping[str, Any], key: str) -> Mapping[str, Any]:

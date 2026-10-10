@@ -18,6 +18,7 @@ import pytest
 from adapters.jobs.memory import MemoryJobStore
 from api.webhooks.github import MAX_BODY, drain_background_tasks
 from domain.ports import (
+    ClaimedJob,
     CommitInfo,
     JobStats,
     NewReviewJob,
@@ -65,8 +66,8 @@ def opened_payload(action: str = "opened") -> dict[str, Any]:
         "repository": {"id": REPO_ID, "full_name": REPO},
         "pull_request": {
             "number": 7,
-            "head": {"sha": HEAD_SHA},
-            "base": {"sha": BASE_SHA},
+            "head": {"sha": HEAD_SHA, "ref": "octocat/payments"},
+            "base": {"sha": BASE_SHA, "ref": "main"},
             "title": "Add payments webhook",
             "user": {"login": "octocat", "id": 583231},
             "author_association": "CONTRIBUTOR",
@@ -75,7 +76,7 @@ def opened_payload(action: str = "opened") -> dict[str, Any]:
     }
 
 
-def expected_job() -> NewReviewJob:
+def expected_job(title: str = "Add payments webhook") -> NewReviewJob:
     return NewReviewJob(
         provider="github",
         delivery_id=DELIVERY,
@@ -86,11 +87,15 @@ def expected_job() -> NewReviewJob:
         head_sha=HEAD_SHA,
         base_sha=BASE_SHA,
         event_action="opened",
+        pr_title=title,
+        author_login="octocat",
+        head_ref="octocat/payments",
+        base_ref="main",
     )
 
 
 class HeldJobStore:
-    """A JobRepository that parks mark_processing until released.
+    """A JobRepository that parks claim until released.
 
     A test can then assert QUEUED after the 202 without racing the
     background task, and release it to watch the run finish. Also counts
@@ -108,15 +113,20 @@ class HeldJobStore:
             self.created.append(job_id)
         return job_id
 
-    async def mark_processing(self, job_id: str) -> bool:
+    async def claim(self, worker_id: str) -> ClaimedJob | None:
         await self.hold.wait()
-        return await self.inner.mark_processing(job_id)
+        return await self.inner.claim(worker_id)
 
-    async def mark_completed(self, job_id: str, stats: JobStats) -> bool:
-        return await self.inner.mark_completed(job_id, stats)
+    async def complete(self, job_id: str, stats: JobStats, *, worker_id: str) -> bool:
+        return await self.inner.complete(job_id, stats, worker_id=worker_id)
 
-    async def mark_failed(self, job_id: str, error_kind: str) -> bool:
-        return await self.inner.mark_failed(job_id, error_kind)
+    async def fail(
+        self, job_id: str, error_kind: str, *, retryable: bool, worker_id: str
+    ) -> ReviewJobStatus | None:
+        return await self.inner.fail(job_id, error_kind, retryable=retryable, worker_id=worker_id)
+
+    async def extend_lease(self, job_id: str, *, worker_id: str) -> bool:
+        return await self.inner.extend_lease(job_id, worker_id=worker_id)
 
     async def get(self, job_id: str) -> ReviewJob | None:
         return await self.inner.get(job_id)
@@ -330,7 +340,7 @@ async def test_an_opened_pull_request_is_queued_then_processed(
     assert body["status"] == "queued"
     job_id = body["job_id"]
 
-    # Held at the first status transition: QUEUED, with the exact payload.
+    # Held at the claim: still QUEUED, with the exact payload.
     job = await store.get(job_id)
     assert job is not None
     assert job.status is ReviewJobStatus.QUEUED
@@ -350,6 +360,29 @@ async def test_an_opened_pull_request_is_queued_then_processed(
         chunks_total=1,
         skipped_counts=(),
     )
+
+
+async def test_overlong_d5_metadata_is_clamped_for_storage(
+    auth_clock: FixedClock,
+) -> None:
+    store = HeldJobStore(auth_clock)
+    app = build_test_app(
+        auth_clock,
+        FakeIdentityProvider(),
+        jobs=store,
+        vcs=FakeGitProvider(make_context()),
+    )
+    overlong_title = "t" * 300
+    payload_with_long_title = opened_payload()
+    payload_with_long_title["pull_request"]["title"] = overlong_title
+    body = json.dumps(payload_with_long_title).encode("utf-8")
+
+    response = await post_delivery(app, body)
+
+    assert response.status_code == 202
+    job = await store.get(response.json()["job_id"])
+    assert job is not None
+    assert job.payload.pr_title == "t" * 255
 
 
 async def test_a_redelivered_delivery_is_success_without_a_second_job(

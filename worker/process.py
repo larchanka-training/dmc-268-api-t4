@@ -1,26 +1,44 @@
-"""Run one review job: fetch, parse, filter, record stats.
+"""Run one claimed review job: fetch, parse, filter, record stats.
 
-This is Step 5 of the review workflow (docs/WORKFLOW_DESIGN.md §2): the
-webhook enqueues a job and starts this coroutine as a background task
-(tasks/plan.md decision 2, 2026-10-07). The worker claim loop (§2 Step 4)
-replaces the direct invocation later; the function signature stays.
+This is Step 5 of the review workflow (docs/WORKFLOW_DESIGN.md §2). The
+production caller is the worker claim loop (§2 Step 4); the webhook runs the
+same function inline as a one-shot claimer until that loop lands
+(tasks/plan.md decision 2, 2026-10-07).
+
+The job arrives already claimed — PROCESSING and leased to
+`claimed.worker_id` — so this stage never claims by itself. It does not call
+`extend_lease` either: this stage is seconds (one forge round-trip and
+parsing), not minutes; lease extension starts with the LLM stage
+(docs/WORKFLOW_DESIGN.md §6).
 
 Logs carry job id, provider, repo, PR number, file paths with skip reasons,
-counts, error kind and duration — never PR title or description, and never
-diff text. The single, explicit exception is the dev-only DEBUG_LOG_DIFF=1
-escape hatch (see _debug_log_diff_enabled), which exists so a developer can
-inspect what a real delivery fetched; it must never be set outside a
-developer machine.
+counts, error kind, retry attempt and next attempt time — never PR title or
+description, and never diff text. The single, explicit exception is the
+dev-only DEBUG_LOG_DIFF=1 escape hatch (see _debug_log_diff_enabled), which
+exists so a developer can inspect what a real delivery fetched; it must
+never be set outside a developer machine.
 """
 
 import logging
 import os
 import time
+from datetime import datetime
 
 from domain.diff import parse_diff, split_into_chunks
 from domain.diff_filter import filter_files
-from domain.errors import DiffFormatError, ForgeError
-from domain.ports import GitProvider, JobRepository, JobStats, NewReviewJob
+from domain.errors import (
+    DiffFormatError,
+    ForgeUnavailableError,
+    InstallationGoneError,
+    PrNotFoundError,
+)
+from domain.ports import (
+    ClaimedJob,
+    GitProvider,
+    JobRepository,
+    JobStats,
+    ReviewJobStatus,
+)
 
 #: Dev-only escape hatch: when "1", the fetched diff text is logged verbatim
 #: after the fetch. This knowingly deviates from AGENTS.md hard rule 3 (raw
@@ -41,28 +59,40 @@ def _clip(value: str, limit: int = 2000) -> str:
     return value[:limit] + "..."
 
 
-async def process_review_job(
-    job_id: str,
-    payload: NewReviewJob,
+def _classify(error: Exception) -> tuple[str, bool]:
+    """Map an exception to (error_kind, retryable) — the closed error
+    vocabulary of docs/PIPELINE_SPEC.md §4.2/§5."""
+    if isinstance(error, ForgeUnavailableError):
+        return "forge_unavailable", True
+    if isinstance(error, InstallationGoneError):
+        return "installation_removed", False
+    if isinstance(error, PrNotFoundError):
+        return "pr_not_found", False
+    if isinstance(error, DiffFormatError):
+        return "diff_parse_failed", False
+    return "internal_error", False
+
+
+async def process_claimed_job(
+    claimed: ClaimedJob,
     vcs: GitProvider,
     jobs: JobRepository,
     *,
     logger: logging.Logger | None = None,
 ) -> bool:
-    """Fetch and parse one pull request diff; record stats or the failure.
+    """Fetch and parse one claimed pull request diff; record stats or failure.
 
     Returns True only when the job reached COMPLETED. Returns False when the
-    job was superseded before start (the forge is never called) or mid-flight
-    (it is left to the superseding delivery), or when the run failed and the
-    job was marked FAILED. Unexpected errors — including the store raising on
-    a terminal transition — are swallowed: a background task has no caller to
-    raise to.
+    lease was lost mid-flight (a superseding delivery or the reaper owns the
+    job now), when the run failed terminally (FAILED), or when a retryable
+    failure sent it to RETRYING. Unexpected errors — including the store
+    raising on a terminal transition — are swallowed: a claimed job has no
+    caller to raise to; only the exception class is logged.
     """
     log = logger if logger is not None else logging.getLogger(__name__)
     started = time.monotonic()
-
-    if not await jobs.mark_processing(job_id):
-        return False
+    job_id = claimed.job_id
+    payload = claimed.payload
 
     try:
         context = await vcs.fetch_pull_request(
@@ -100,39 +130,20 @@ async def process_review_job(
             chunks_total=sum(len(split_into_chunks(diff)) for diff in filtered.kept),
             skipped_counts=tuple((reason.value, count) for reason, count in filtered.skip_counts),
         )
-    except ForgeError as err:
-        return await _mark_failed(
-            jobs,
-            job_id,
-            payload,
-            log,
-            started,
-            error_kind=type(err).__name__,
-            exc_class=type(err).__name__,
-        )
-    except DiffFormatError as err:
-        return await _mark_failed(
-            jobs,
-            job_id,
-            payload,
-            log,
-            started,
-            error_kind="diff_parse_failed",
-            exc_class=type(err).__name__,
-        )
     except Exception as err:
-        return await _mark_failed(
+        error_kind, retryable = _classify(err)
+        return await _record_failure(
             jobs,
-            job_id,
-            payload,
+            claimed,
             log,
             started,
-            error_kind="internal",
+            error_kind=error_kind,
+            retryable=retryable,
             exc_class=type(err).__name__,
         )
 
     try:
-        completed = await jobs.mark_completed(job_id, stats)
+        completed = await jobs.complete(job_id, stats, worker_id=claimed.worker_id)
     except Exception as err:
         log.error(
             "review job store error on completion: job_id=%s provider=%s repo=%s "
@@ -163,39 +174,37 @@ async def process_review_job(
     return True
 
 
-async def _mark_failed(
+async def _record_failure(
     jobs: JobRepository,
-    job_id: str,
-    payload: NewReviewJob,
+    claimed: ClaimedJob,
     log: logging.Logger,
     started: float,
     *,
     error_kind: str,
+    retryable: bool,
     exc_class: str,
 ) -> bool:
-    """Record FAILED and log error_kind and the exception class — not its message,
-    which is safe by construction today but is not guaranteed to stay that way.
-    The store call itself is guarded: raising while handling a failure would
-    lose the log-and-stop contract, so a store error is logged as internal
-    (exc_class only) and the function still returns False."""
-    log.warning(
-        "review job failed: job_id=%s provider=%s repo=%s pr_number=%s "
-        "error_kind=%s exc_class=%s duration_ms=%.0f",
-        job_id,
-        payload.provider,
-        payload.repo_full_name,
-        payload.pr_number,
-        error_kind,
-        exc_class,
-        (time.monotonic() - started) * 1000,
-    )
+    """Record RETRYING or FAILED with the store, then log which one it was.
+
+    The exception class is logged — never its message, which is safe by
+    construction today but is not guaranteed to stay that way. The store
+    calls are guarded: raising while handling a failure would lose the
+    log-and-stop contract, so a store error is logged (exc_class only) and
+    the function still returns False. A None status means the lease was
+    lost; nothing is logged because the job's new owner logs its own run."""
+    payload = claimed.payload
     try:
-        await jobs.mark_failed(job_id, error_kind)
+        status = await jobs.fail(
+            claimed.job_id,
+            error_kind,
+            retryable=retryable,
+            worker_id=claimed.worker_id,
+        )
     except Exception as err:
         log.error(
             "review job store error on failure record: job_id=%s provider=%s repo=%s "
             "pr_number=%s error_kind=%s exc_class=%s duration_ms=%.0f",
-            job_id,
+            claimed.job_id,
             payload.provider,
             payload.repo_full_name,
             payload.pr_number,
@@ -203,4 +212,64 @@ async def _mark_failed(
             type(err).__name__,
             (time.monotonic() - started) * 1000,
         )
+        return False
+    if status is ReviewJobStatus.RETRYING:
+        await _log_retrying(jobs, claimed, log, started, error_kind=error_kind)
+        return False
+    if status is ReviewJobStatus.FAILED:
+        log.warning(
+            "review job failed: job_id=%s provider=%s repo=%s pr_number=%s "
+            "error_kind=%s exc_class=%s duration_ms=%.0f",
+            claimed.job_id,
+            payload.provider,
+            payload.repo_full_name,
+            payload.pr_number,
+            error_kind,
+            exc_class,
+            (time.monotonic() - started) * 1000,
+        )
     return False
+
+
+async def _log_retrying(
+    jobs: JobRepository,
+    claimed: ClaimedJob,
+    log: logging.Logger,
+    started: float,
+    *,
+    error_kind: str,
+) -> None:
+    """Log the retry schedule; next_attempt_at is read back from the store,
+    which computed it with its own clock and rng. A supersede between the
+    fail and this read-back leaves the job with no next_attempt_at; it is
+    logged as '-'. The read is guarded like every other store call."""
+    payload = claimed.payload
+    next_attempt_at: datetime | None = None
+    try:
+        stored = await jobs.get(claimed.job_id)
+        if stored is not None:
+            next_attempt_at = stored.next_attempt_at
+    except Exception as err:
+        log.error(
+            "review job store error on retry record: job_id=%s provider=%s repo=%s "
+            "pr_number=%s error_kind=%s exc_class=%s duration_ms=%.0f",
+            claimed.job_id,
+            payload.provider,
+            payload.repo_full_name,
+            payload.pr_number,
+            error_kind,
+            type(err).__name__,
+            (time.monotonic() - started) * 1000,
+        )
+    log.info(
+        "review job retrying: job_id=%s provider=%s repo=%s pr_number=%s "
+        "error_kind=%s attempt=%d next_attempt_at=%s duration_ms=%.0f",
+        claimed.job_id,
+        payload.provider,
+        payload.repo_full_name,
+        payload.pr_number,
+        error_kind,
+        claimed.attempt + 1,
+        next_attempt_at.isoformat() if next_attempt_at is not None else "-",
+        (time.monotonic() - started) * 1000,
+    )

@@ -1,16 +1,20 @@
-"""MemoryJobStore: dedup, supersession, status transitions, injected clock.
+"""MemoryJobStore: dedup, supersession, claim/lease/retry, injected clock.
 
-Mirrors the enqueue transaction of docs/WORKFLOW_DESIGN.md §2 Step 3 — one
-lock here stands in for the single transaction there.
+Mirrors the enqueue transaction of docs/WORKFLOW_DESIGN.md §2 Step 3 and the
+claim statement of §2 Step 4 — one asyncio lock here stands in for the
+single transaction there. Backoff windows come from domain.jobs with a
+seeded rng and a stepped clock; no test sleeps.
 """
 
+import random
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from adapters.jobs.memory import MemoryJobStore
 from domain.errors import ForgeUnavailableError
-from domain.ports import JobStats, NewReviewJob, ReviewJob, ReviewJobStatus
+from domain.jobs import DEFAULT_MAX_RETRIES
+from domain.ports import ClaimedJob, JobStats, NewReviewJob, ReviewJob, ReviewJobStatus
 
 HEAD_SHA = "a1b2c3d4e5" * 4
 BASE_SHA = "f6e5d4c3b2" * 4
@@ -26,7 +30,7 @@ class StepClock:
     def now(self) -> datetime:
         return self._now
 
-    def advance(self, seconds: int) -> None:
+    def advance(self, seconds: float) -> None:
         self._now += timedelta(seconds=seconds)
 
 
@@ -41,6 +45,7 @@ def make_job(**overrides: object) -> NewReviewJob:
         "head_sha": HEAD_SHA,
         "base_sha": BASE_SHA,
         "event_action": "opened",
+        "pr_title": "Add a feature",
     }
     values.update(overrides)
     return NewReviewJob(**values)  # type: ignore[arg-type]
@@ -56,12 +61,23 @@ def make_stats() -> JobStats:
     )
 
 
-async def drive_to_processing(store: MemoryJobStore, job: NewReviewJob) -> str:
-    """Enqueue and claim a job, returning its id."""
+async def enqueue(store: MemoryJobStore, job: NewReviewJob) -> str:
     job_id = await store.enqueue(job)
     assert job_id is not None
-    assert await store.mark_processing(job_id)
     return job_id
+
+
+async def claim(store: MemoryJobStore, worker_id: str = "w-1") -> ClaimedJob:
+    claimed = await store.claim(worker_id)
+    assert claimed is not None
+    return claimed
+
+
+async def fail_retryable(store: MemoryJobStore, claimed: ClaimedJob) -> None:
+    status = await store.fail(
+        claimed.job_id, "forge_unavailable", retryable=True, worker_id=claimed.worker_id
+    )
+    assert status is ReviewJobStatus.RETRYING
 
 
 # --- enqueue ---------------------------------------------------------------
@@ -78,12 +94,16 @@ async def test_enqueue_stores_queued_job_with_payload() -> None:
         created_at=stored.created_at,
         status=ReviewJobStatus.QUEUED,
         payload=job,
+        next_attempt_at=stored.created_at,
     )
     assert stored is not None
     assert stored.created_at.tzinfo is UTC
     assert stored.stats is None
     assert stored.error_kind is None
     assert stored.finished_at is None
+    assert stored.retry_count == 0
+    # The schema's server_default now(): claimable immediately, never NULL.
+    assert stored.next_attempt_at == stored.created_at
 
 
 async def test_duplicate_delivery_id_same_provider_is_rejected_in_any_status() -> None:
@@ -132,6 +152,20 @@ async def test_new_job_for_same_pr_supersedes_active_one() -> None:
     assert active.finished_at is None
 
 
+async def test_a_retrying_job_is_still_superseded() -> None:
+    store = MemoryJobStore(clock=StepClock())
+    first = await enqueue(store, make_job(delivery_id="d-1"))
+    claimed = await claim(store)
+    await fail_retryable(store, claimed)
+
+    second = await store.enqueue(make_job(delivery_id="d-2", head_sha=OTHER_SHA))
+    assert second is not None
+
+    stored = await store.get(first)
+    assert stored is not None
+    assert stored.status is ReviewJobStatus.SUPERSEDED
+
+
 async def test_new_job_for_different_pr_leaves_other_jobs_alone() -> None:
     store = MemoryJobStore()
     first = await store.enqueue(make_job(delivery_id="d-1", pr_number=7))
@@ -146,8 +180,9 @@ async def test_new_job_for_different_pr_leaves_other_jobs_alone() -> None:
 
 async def test_finished_job_is_not_superseded() -> None:
     store = MemoryJobStore()
-    job_id = await drive_to_processing(store, make_job(delivery_id="d-1"))
-    assert await store.mark_completed(job_id, make_stats())
+    job_id = await enqueue(store, make_job(delivery_id="d-1"))
+    claimed = await claim(store)
+    assert await store.complete(job_id, make_stats(), worker_id=claimed.worker_id)
     assert await store.enqueue(make_job(delivery_id="d-2")) is not None
 
     stored = await store.get(job_id)
@@ -155,90 +190,245 @@ async def test_finished_job_is_not_superseded() -> None:
     assert stored.status is ReviewJobStatus.COMPLETED
 
 
-# --- status machine --------------------------------------------------------
+# --- claim -----------------------------------------------------------------
 
 
-async def test_mark_processing_from_queued() -> None:
+async def test_claim_returns_the_oldest_job_first() -> None:
+    store = MemoryJobStore(clock=StepClock())
+    first = await enqueue(store, make_job(delivery_id="d-1", pr_number=7))
+    second = await enqueue(store, make_job(delivery_id="d-2", pr_number=8))
+
+    claimed = await claim(store)
+    assert claimed.job_id == first
+    assert claimed.attempt == 0
+    assert claimed.worker_id == "w-1"
+    assert claimed.payload.pr_title == "Add a feature"
+
+    next_claimed = await claim(store, "w-2")
+    assert next_claimed.job_id == second
+
+    assert await store.claim("w-3") is None
+
+
+async def test_claim_marks_the_job_processing() -> None:
     store = MemoryJobStore()
-    job_id = await store.enqueue(make_job())
-    assert job_id is not None
-    assert await store.mark_processing(job_id) is True
+    job_id = await enqueue(store, make_job())
+
+    claimed = await claim(store)
+
+    stored = await store.get(job_id)
+    assert stored is not None
+    assert stored.status is ReviewJobStatus.PROCESSING
+    assert claimed.job_id == job_id
+
+
+async def test_claim_skips_a_job_whose_next_attempt_is_in_the_future() -> None:
+    clock = StepClock()
+    store = MemoryJobStore(clock=clock, rng=random.Random(7))
+    job_id = await enqueue(store, make_job(delivery_id="d-1"))
+    claimed = await claim(store, "w-1")
+    await fail_retryable(store, claimed)
+
+    retrying = await store.get(job_id)
+    assert retrying is not None
+    assert retrying.status is ReviewJobStatus.RETRYING
+    assert retrying.next_attempt_at is not None
+    assert retrying.next_attempt_at > clock.now()
+
+    # Not eligible yet: nothing else is queued.
+    assert await store.claim("w-2") is None
+
+    clock.advance(1000)
+    reclaimed = await store.claim("w-2")
+    assert reclaimed.job_id == job_id
+    assert reclaimed.attempt == 1
+
+
+async def test_claim_is_fair_per_installation() -> None:
+    store = MemoryJobStore(clock=StepClock())
+    burst = [
+        await enqueue(store, make_job(delivery_id=f"d-{index}", pr_number=7 + index))
+        for index in range(4)
+    ]
+    other = await enqueue(
+        store,
+        make_job(
+            delivery_id="d-other",
+            installation_id=7,
+            pr_number=1,
+        ),
+    )
+
+    first = await claim(store, "w-1")
+    second = await claim(store, "w-2")
+    third = await claim(store, "w-3")
+    assert first.job_id in burst
+    assert second.job_id in burst
+    assert third.job_id in burst
+
+    # Installation 42 now runs MAX_IN_FLIGHT_PER_INSTALLATION jobs; the
+    # fourth of its jobs is skipped in favour of the other installation's.
+    fourth = await store.claim("w-4")
+    assert fourth is not None
+    assert fourth.job_id == other
+
+    # Only the blocked job remains, and it stays blocked.
+    assert await store.claim("w-5") is None
+
+
+async def test_claim_never_takes_superseded_or_completed_jobs() -> None:
+    store = MemoryJobStore(clock=StepClock())
+    first = await enqueue(store, make_job(delivery_id="d-1"))
+    second = await enqueue(store, make_job(delivery_id="d-2", head_sha=OTHER_SHA))
+
+    claimed = await claim(store)
+    assert claimed.job_id == second
+
+    assert await store.complete(second, make_stats(), worker_id="w-1") is True
+    superseded = await store.get(first)
+    assert superseded is not None
+    assert superseded.status is ReviewJobStatus.SUPERSEDED
+
+    assert await store.claim("w-2") is None
+
+
+# --- holder checks ---------------------------------------------------------
+
+
+async def test_terminal_transitions_require_the_lease_holder() -> None:
+    store = MemoryJobStore(clock=StepClock())
+    job_id = await enqueue(store, make_job())
+    claimed = await claim(store, worker_id="w-1")
+
+    assert await store.complete(job_id, make_stats(), worker_id="w-2") is False
+    assert await store.extend_lease(job_id, worker_id="w-2") is False
+    assert await store.fail(job_id, "forge_unavailable", retryable=True, worker_id="w-2") is None
+    # The job is untouched: still PROCESSING under w-1.
     stored = await store.get(job_id)
     assert stored is not None
     assert stored.status is ReviewJobStatus.PROCESSING
 
+    assert await store.complete(job_id, make_stats(), worker_id=claimed.worker_id) is True
 
-async def test_mark_processing_rejects_missing_job() -> None:
+
+async def test_terminal_transitions_on_a_missing_job_fail_closed() -> None:
     store = MemoryJobStore()
-    assert await store.mark_processing("no-such-job") is False
+    assert await store.complete("no-such-job", make_stats(), worker_id="w-1") is False
+    assert (
+        await store.fail("no-such-job", "forge_unavailable", retryable=True, worker_id="w-1")
+        is None
+    )
+    assert await store.extend_lease("no-such-job", worker_id="w-1") is False
 
 
-async def test_mark_processing_rejects_superseded_job() -> None:
-    store = MemoryJobStore()
-    first = await store.enqueue(make_job(delivery_id="d-1"))
-    assert first is not None
-    assert await store.enqueue(make_job(delivery_id="d-2")) is not None
-    assert await store.mark_processing(first) is False
+async def test_extend_lease_pushes_the_deadline_out() -> None:
+    clock = StepClock()
+    store = MemoryJobStore(clock=clock)
+    job_id = await enqueue(store, make_job())
+    await claim(store, worker_id="w-1")
+
+    clock.advance(120)
+    assert await store.extend_lease(job_id, worker_id="w-1") is True
+    assert await store.complete(job_id, make_stats(), worker_id="w-1") is True
+    # Terminal now: the lease is gone with it.
+    clock.advance(1)
+    assert await store.extend_lease(job_id, worker_id="w-1") is False
 
 
-async def test_mark_processing_rejects_already_processing_job() -> None:
-    store = MemoryJobStore()
-    job_id = await drive_to_processing(store, make_job())
-    assert await store.mark_processing(job_id) is False
+# --- fail: retry, exhaustion, permanent ------------------------------------
 
 
-async def test_mark_completed_only_from_processing() -> None:
-    store = MemoryJobStore()
-    job_id = await store.enqueue(make_job())
-    assert job_id is not None
-    assert await store.mark_completed(job_id, make_stats()) is False
+async def test_fail_retryable_schedules_the_next_attempt_within_the_backoff_window() -> None:
+    clock = StepClock()
+    store = MemoryJobStore(clock=clock, rng=random.Random(7))
+    job_id = await enqueue(store, make_job())
+    claimed = await claim(store)
 
-    assert await store.mark_processing(job_id)
-    stats = make_stats()
-    assert await store.mark_completed(job_id, stats) is True
+    failed_at = clock.now()
+    status = await store.fail(
+        job_id, "forge_unavailable", retryable=True, worker_id=claimed.worker_id
+    )
 
+    assert status is ReviewJobStatus.RETRYING
     stored = await store.get(job_id)
     assert stored is not None
-    assert stored.status is ReviewJobStatus.COMPLETED
-    assert stored.stats == stats
-    assert stored.error_kind is None
-    assert stored.finished_at is not None
+    assert stored.status is ReviewJobStatus.RETRYING
+    assert stored.retry_count == 1
+    assert stored.error_kind == "forge_unavailable"
+    assert stored.finished_at is None
+    # Backoff takes the pre-increment count (0 here) → base 60 s; jitter
+    # ±20% (docs/PIPELINE_SPEC.md §4.3: 1/2/4 min for the three retries).
+    assert stored.next_attempt_at is not None
+    delay = stored.next_attempt_at - failed_at
+    assert timedelta(seconds=60 * 0.8) <= delay <= timedelta(seconds=60 * 1.2)
 
-    assert await store.mark_completed(job_id, stats) is False
 
+async def test_fail_retryable_exhausts_after_three_retries() -> None:
+    clock = StepClock()
+    store = MemoryJobStore(clock=clock, rng=random.Random(7))
+    job_id = await enqueue(store, make_job())
 
-async def test_mark_failed_only_from_processing() -> None:
-    store = MemoryJobStore()
-    job_id = await store.enqueue(make_job())
-    assert job_id is not None
-    assert await store.mark_failed(job_id, "ForgeUnavailableError") is False
+    claimed = await claim(store)
+    for expected_count in range(1, DEFAULT_MAX_RETRIES + 1):
+        status = await store.fail(
+            job_id, "forge_unavailable", retryable=True, worker_id=claimed.worker_id
+        )
+        assert status is ReviewJobStatus.RETRYING
+        stored = await store.get(job_id)
+        assert stored is not None
+        assert stored.retry_count == expected_count
+        clock.advance(1000)
+        claimed = await claim(store, "w-retry")
+        assert claimed.attempt == expected_count
 
-    assert await store.mark_processing(job_id)
-    assert await store.mark_failed(job_id, "ForgeUnavailableError") is True
-
+    status = await store.fail(
+        job_id, "forge_unavailable", retryable=True, worker_id=claimed.worker_id
+    )
+    assert status is ReviewJobStatus.FAILED
     stored = await store.get(job_id)
     assert stored is not None
     assert stored.status is ReviewJobStatus.FAILED
-    assert stored.error_kind == "ForgeUnavailableError"
-    assert stored.stats is None
+    # Capped at max_retries on exhaustion (ck_pr_review_jobs_retry_bounds).
+    assert stored.retry_count == DEFAULT_MAX_RETRIES
+    assert stored.error_kind == "forge_unavailable"
+    assert stored.finished_at is not None
+    assert stored.next_attempt_at is None
+    assert await store.claim("w-2") is None
+
+
+async def test_fail_persistent_fails_immediately() -> None:
+    clock = StepClock()
+    store = MemoryJobStore(clock=clock)
+    job_id = await enqueue(store, make_job())
+    claimed = await claim(store)
+
+    status = await store.fail(job_id, "pr_not_found", retryable=False, worker_id=claimed.worker_id)
+
+    assert status is ReviewJobStatus.FAILED
+    stored = await store.get(job_id)
+    assert stored is not None
+    assert stored.status is ReviewJobStatus.FAILED
+    assert stored.retry_count == 0
+    assert stored.error_kind == "pr_not_found"
     assert stored.finished_at is not None
 
-    assert await store.mark_failed(job_id, "ForgeUnavailableError") is False
 
-
-async def test_mark_failed_rejects_empty_error_kind() -> None:
+async def test_fail_rejects_empty_error_kind() -> None:
     store = MemoryJobStore()
-    job_id = await drive_to_processing(store, make_job())
+    await enqueue(store, make_job())
+    claimed = await claim(store)
     with pytest.raises(ValueError, match="error_kind"):
-        await store.mark_failed(job_id, "  ")
+        await store.fail(claimed.job_id, "  ", retryable=True, worker_id="w-1")
 
 
 async def test_error_kind_never_leaks_exception_content() -> None:
     store = MemoryJobStore()
-    job_id = await drive_to_processing(store, make_job())
+    await enqueue(store, make_job())
+    claimed = await claim(store)
     err = ForgeUnavailableError("github", "connection reset by peer")
-    assert await store.mark_failed(job_id, type(err).__name__) is True
-    stored = await store.get(job_id)
+    status = await store.fail(claimed.job_id, type(err).__name__, retryable=False, worker_id="w-1")
+    assert status is ReviewJobStatus.FAILED
+    stored = await store.get(claimed.job_id)
     assert stored is not None
     assert stored.error_kind == "ForgeUnavailableError"
     assert str(err) not in stored.error_kind
@@ -276,10 +466,10 @@ async def test_injected_clock_determines_created_at_and_finished_at() -> None:
     assert successor.created_at == superseded_at
 
     clock.advance(5)
-    assert await store.mark_processing(second)
+    claimed = await claim(store)
     clock.advance(10)
     completed_at = clock.now()
-    assert await store.mark_completed(second, make_stats())
+    assert await store.complete(second, make_stats(), worker_id=claimed.worker_id)
     completed = await store.get(second)
     assert completed is not None
     assert completed.finished_at == completed_at

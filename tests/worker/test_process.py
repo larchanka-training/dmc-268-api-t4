@@ -1,11 +1,12 @@
-"""worker.process_review_job: fetch → parse → filter → stats, run inline.
+"""worker.process_claimed_job: fetch → parse → filter → stats, on a claim.
 
-This is Step 5 of docs/WORKFLOW_DESIGN.md §2, started as a background task by
-the webhook (tasks/plan.md decision 2, 2026-10-07). All fakes are local and
-never touch the network; clocks are injected, no sleeps.
+This is Step 5 of docs/WORKFLOW_DESIGN.md §2, run by the worker claim loop
+(§2 Step 4) — here a test claims through the real in-memory store first. All
+fakes are local and never touch the network; clocks are injected, no sleeps.
 """
 
 import logging
+from datetime import UTC, datetime
 
 import pytest
 
@@ -13,9 +14,10 @@ from adapters.jobs.memory import MemoryJobStore
 from domain.errors import (
     ForgeUnavailableError,
     InstallationGoneError,
-    WebhookPayloadError,
+    PrNotFoundError,
 )
 from domain.ports import (
+    ClaimedJob,
     CommitInfo,
     JobRepository,
     JobStats,
@@ -24,7 +26,7 @@ from domain.ports import (
     ReviewJob,
     ReviewJobStatus,
 )
-from worker.process import process_review_job
+from worker.process import process_claimed_job
 
 HEAD_SHA = "a1b2c3d4e5" * 4
 BASE_SHA = "f6e5d4c3b2" * 4
@@ -74,6 +76,7 @@ def make_payload(**overrides: object) -> NewReviewJob:
         "head_sha": HEAD_SHA,
         "base_sha": BASE_SHA,
         "event_action": "opened",
+        "pr_title": TITLE_SENTINEL,
     }
     values.update(overrides)
     return NewReviewJob(**values)  # type: ignore[arg-type]
@@ -118,13 +121,16 @@ class FakeGitProvider:
         return self.context
 
 
+_MISSING = object()
+
+
 class StubJobRepository:
     """Wraps a real store; terminal transitions can be stubbed out.
 
-    mark_completed returns ``completed_result`` (False by default: every job
-    reports superseded at completion) or raises ``completed_error`` instead of
-    delegating; mark_failed returns ``failed_result`` or raises
-    ``failed_error`` when set.
+    complete returns ``completed_result`` (False by default: every job
+    reports superseded at completion) or raises ``completed_error`` instead
+    of delegating; fail returns ``failed_result`` (MISSING by default:
+    delegate to the store) or raises ``failed_error`` when set.
     """
 
     def __init__(
@@ -133,36 +139,45 @@ class StubJobRepository:
         *,
         completed_result: bool = False,
         completed_error: Exception | None = None,
-        failed_result: bool | None = None,
+        failed_result: object = _MISSING,
         failed_error: Exception | None = None,
+        get_result: object = _MISSING,
     ) -> None:
         self._inner = inner
         self._completed_result = completed_result
         self._completed_error = completed_error
         self._failed_result = failed_result
         self._failed_error = failed_error
+        self._get_result = get_result
 
     async def enqueue(self, job: NewReviewJob) -> str | None:
         return await self._inner.enqueue(job)
 
-    async def mark_processing(self, job_id: str) -> bool:
-        return await self._inner.mark_processing(job_id)
+    async def claim(self, worker_id: str) -> ClaimedJob | None:
+        return await self._inner.claim(worker_id)
 
-    async def mark_completed(self, job_id: str, stats: JobStats) -> bool:
+    async def complete(self, job_id: str, stats: JobStats, *, worker_id: str) -> bool:
         if self._completed_error is not None:
             raise self._completed_error
         if not self._completed_result:
             return False
-        return await self._inner.mark_completed(job_id, stats)
+        return await self._inner.complete(job_id, stats, worker_id=worker_id)
 
-    async def mark_failed(self, job_id: str, error_kind: str) -> bool:
+    async def fail(
+        self, job_id: str, error_kind: str, *, retryable: bool, worker_id: str
+    ) -> ReviewJobStatus | None:
         if self._failed_error is not None:
             raise self._failed_error
-        if self._failed_result is not None:
-            return self._failed_result
-        return await self._inner.mark_failed(job_id, error_kind)
+        if self._failed_result is not _MISSING:
+            return self._failed_result  # type: ignore[no-any-return]
+        return await self._inner.fail(job_id, error_kind, retryable=retryable, worker_id=worker_id)
+
+    async def extend_lease(self, job_id: str, *, worker_id: str) -> bool:
+        return await self._inner.extend_lease(job_id, worker_id=worker_id)
 
     async def get(self, job_id: str) -> ReviewJob | None:
+        if self._get_result is not _MISSING:
+            return self._get_result  # type: ignore[no-any-return]
         return await self._inner.get(job_id)
 
 
@@ -170,6 +185,12 @@ async def enqueue(store: JobRepository, payload: NewReviewJob) -> str:
     job_id = await store.enqueue(payload)
     assert job_id is not None
     return job_id
+
+
+async def claim(store: JobRepository, worker_id: str = "w-1") -> ClaimedJob:
+    claimed = await store.claim(worker_id)
+    assert claimed is not None
+    return claimed
 
 
 # --- happy path ------------------------------------------------------------
@@ -180,8 +201,9 @@ async def test_completed_job_carries_exact_stats() -> None:
     vcs = FakeGitProvider(make_context(GOOD_DIFF))
     payload = make_payload()
     job_id = await enqueue(store, payload)
+    claimed = await claim(store)
 
-    assert await process_review_job(job_id, payload, vcs, store) is True
+    assert await process_claimed_job(claimed, vcs, store) is True
 
     job = await store.get(job_id)
     assert job is not None
@@ -192,51 +214,78 @@ async def test_completed_job_carries_exact_stats() -> None:
     assert vcs.calls == [(42, "octocat/hello-world", 7)]
 
 
-async def test_presuperseded_job_never_reaches_the_forge() -> None:
+async def test_a_superseded_job_is_never_claimed() -> None:
     store = MemoryJobStore()
     vcs = FakeGitProvider(make_context(GOOD_DIFF))
-    payload = make_payload(delivery_id="d-1")
-    job_id = await enqueue(store, payload)
-    assert await store.enqueue(make_payload(delivery_id="d-2")) is not None
+    first = await enqueue(store, make_payload(delivery_id="d-1"))
+    await enqueue(store, make_payload(delivery_id="d-2"))
 
-    assert await process_review_job(job_id, payload, vcs, store) is False
-    assert vcs.calls == []
+    claimed = await claim(store)
+    assert claimed.payload.delivery_id == "d-2"
+    assert await process_claimed_job(claimed, vcs, store) is True
+
+    superseded = await store.get(first)
+    assert superseded is not None
+    assert superseded.status is ReviewJobStatus.SUPERSEDED
+    # The forge saw exactly one fetch — for the surviving job.
+    assert vcs.calls == [(42, "octocat/hello-world", 7)]
 
 
 # --- failure paths ---------------------------------------------------------
 
 
+async def test_retryable_forge_error_sends_the_job_to_retrying() -> None:
+    store = MemoryJobStore()
+    vcs = FakeGitProvider(error=ForgeUnavailableError("github", "connection reset by peer"))
+    job_id = await enqueue(store, make_payload())
+    claimed = await claim(store)
+
+    assert await process_claimed_job(claimed, vcs, store) is False
+
+    job = await store.get(job_id)
+    assert job is not None
+    assert job.status is ReviewJobStatus.RETRYING
+    assert job.error_kind == "forge_unavailable"
+    assert job.retry_count == 1
+    assert job.next_attempt_at is not None
+    assert job.finished_at is None
+    assert job.stats is None
+
+
 @pytest.mark.parametrize(
-    "error",
+    ("error", "expected_kind"),
     [
-        ForgeUnavailableError("github", "connection reset by peer"),
-        InstallationGoneError(42, "uninstalled"),
-        WebhookPayloadError("github", "missing pull_request field"),
+        (InstallationGoneError(42, "uninstalled"), "installation_removed"),
+        (PrNotFoundError("github", "pull request not found"), "pr_not_found"),
+        (RuntimeError(f"boom {DIFF_SENTINEL}"), "internal_error"),
     ],
 )
-async def test_forge_error_marks_job_failed_with_class_name(error: Exception) -> None:
+async def test_permanent_errors_fail_the_job_immediately(
+    error: Exception, expected_kind: str
+) -> None:
     store = MemoryJobStore()
     vcs = FakeGitProvider(error=error)
-    payload = make_payload()
-    job_id = await enqueue(store, payload)
+    job_id = await enqueue(store, make_payload())
+    claimed = await claim(store)
 
-    assert await process_review_job(job_id, payload, vcs, store) is False
+    assert await process_claimed_job(claimed, vcs, store) is False
 
     job = await store.get(job_id)
     assert job is not None
     assert job.status is ReviewJobStatus.FAILED
-    assert job.error_kind == type(error).__name__
-    assert job.stats is None
+    assert job.error_kind == expected_kind
+    assert job.retry_count == 0
+    assert job.next_attempt_at is None
     assert job.finished_at is not None
 
 
 async def test_malformed_diff_marks_diff_parse_failed() -> None:
     store = MemoryJobStore()
     vcs = FakeGitProvider(make_context("this is not a unified diff"))
-    payload = make_payload()
-    job_id = await enqueue(store, payload)
+    job_id = await enqueue(store, make_payload())
+    claimed = await claim(store)
 
-    assert await process_review_job(job_id, payload, vcs, store) is False
+    assert await process_claimed_job(claimed, vcs, store) is False
 
     job = await store.get(job_id)
     assert job is not None
@@ -244,28 +293,14 @@ async def test_malformed_diff_marks_diff_parse_failed() -> None:
     assert job.error_kind == "diff_parse_failed"
 
 
-async def test_unexpected_error_marks_internal_and_does_not_raise() -> None:
-    store = MemoryJobStore()
-    vcs = FakeGitProvider(error=RuntimeError(f"boom {DIFF_SENTINEL}"))
-    payload = make_payload()
-    job_id = await enqueue(store, payload)
-
-    assert await process_review_job(job_id, payload, vcs, store) is False
-
-    job = await store.get(job_id)
-    assert job is not None
-    assert job.status is ReviewJobStatus.FAILED
-    assert job.error_kind == "internal"
-
-
-async def test_supersession_mid_flight_returns_false_without_failing_job() -> None:
+async def test_lost_lease_at_completion_returns_false_without_failing_job() -> None:
     store = MemoryJobStore()
     stub = StubJobRepository(store)
     vcs = FakeGitProvider(make_context(GOOD_DIFF))
-    payload = make_payload()
-    job_id = await enqueue(stub, payload)
+    job_id = await enqueue(stub, make_payload())
+    claimed = await claim(stub)
 
-    assert await process_review_job(job_id, payload, vcs, stub) is False
+    assert await process_claimed_job(claimed, vcs, stub) is False
 
     job = await store.get(job_id)
     assert job is not None
@@ -276,11 +311,11 @@ async def test_store_error_on_completion_is_swallowed(caplog) -> None:
     store = MemoryJobStore()
     stub = StubJobRepository(store, completed_error=RuntimeError(f"store down {DIFF_SENTINEL}"))
     vcs = FakeGitProvider(make_context(GOOD_DIFF))
-    payload = make_payload()
-    job_id = await enqueue(stub, payload)
+    job_id = await enqueue(stub, make_payload())
+    claimed = await claim(stub)
 
     with caplog.at_level(logging.ERROR, logger="worker.process"):
-        assert await process_review_job(job_id, payload, vcs, stub) is False
+        assert await process_claimed_job(claimed, vcs, stub) is False
 
     job = await store.get(job_id)
     assert job is not None
@@ -293,10 +328,10 @@ async def test_store_error_while_recording_failure_is_swallowed() -> None:
     store = MemoryJobStore()
     stub = StubJobRepository(store, failed_error=RuntimeError("store down"))
     vcs = FakeGitProvider(error=ForgeUnavailableError("github", "connection reset by peer"))
-    payload = make_payload()
-    job_id = await enqueue(stub, payload)
+    job_id = await enqueue(stub, make_payload())
+    claimed = await claim(stub)
 
-    assert await process_review_job(job_id, payload, vcs, stub) is False
+    assert await process_claimed_job(claimed, vcs, stub) is False
 
     job = await store.get(job_id)
     assert job is not None
@@ -306,12 +341,12 @@ async def test_store_error_while_recording_failure_is_swallowed() -> None:
 
 async def test_failure_record_refused_leaves_job_unfailed() -> None:
     store = MemoryJobStore()
-    stub = StubJobRepository(store, completed_result=True, failed_result=False)
+    stub = StubJobRepository(store, completed_result=True, failed_result=None)
     vcs = FakeGitProvider(error=ForgeUnavailableError("github", "connection reset by peer"))
-    payload = make_payload()
-    job_id = await enqueue(stub, payload)
+    job_id = await enqueue(stub, make_payload())
+    claimed = await claim(stub)
 
-    assert await process_review_job(job_id, payload, vcs, stub) is False
+    assert await process_claimed_job(claimed, vcs, stub) is False
 
     job = await store.get(job_id)
     assert job is not None
@@ -331,9 +366,10 @@ async def test_success_log_carries_counts_never_content(
     vcs = FakeGitProvider(make_context(GOOD_DIFF))
     payload = make_payload()
     job_id = await enqueue(store, payload)
+    claimed = await claim(store)
 
     with caplog.at_level(logging.INFO, logger="worker.process"):
-        assert await process_review_job(job_id, payload, vcs, store) is True
+        assert await process_claimed_job(claimed, vcs, store) is True
 
     text = caplog.text
     assert job_id in text
@@ -353,30 +389,84 @@ async def test_failure_log_carries_error_kind_never_messages(
 ) -> None:
     monkeypatch.delenv("DEBUG_LOG_DIFF", raising=False)
     store = MemoryJobStore()
-    vcs = FakeGitProvider(error=ForgeUnavailableError("github", "connection reset by peer"))
+    vcs = FakeGitProvider(error=InstallationGoneError(42, f"permission revoked {DIFF_SENTINEL}"))
     payload = make_payload()
     job_id = await enqueue(store, payload)
+    claimed = await claim(store)
 
     with caplog.at_level(logging.WARNING, logger="worker.process"):
-        assert await process_review_job(job_id, payload, vcs, store) is False
+        assert await process_claimed_job(claimed, vcs, store) is False
 
     text = caplog.text
     assert job_id in text
-    assert "error_kind=ForgeUnavailableError" in text
-    assert "connection reset" not in text
+    assert "error_kind=installation_removed" in text
+    assert "permission revoked" not in text
     assert DIFF_SENTINEL not in text
     assert TITLE_SENTINEL not in text
     assert DESCRIPTION_SENTINEL not in text
 
 
+async def test_retrying_log_carries_the_retry_schedule_never_messages(
+    caplog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DEBUG_LOG_DIFF", raising=False)
+    store = MemoryJobStore()
+    vcs = FakeGitProvider(error=ForgeUnavailableError("github", "connection reset by peer"))
+    payload = make_payload()
+    job_id = await enqueue(store, payload)
+    claimed = await claim(store)
+
+    with caplog.at_level(logging.INFO, logger="worker.process"):
+        assert await process_claimed_job(claimed, vcs, store) is False
+
+    text = caplog.text
+    assert "review job retrying:" in text
+    assert f"job_id={job_id}" in text
+    assert "error_kind=forge_unavailable" in text
+    assert "attempt=1" in text
+    assert "next_attempt_at=" in text
+    assert "next_attempt_at=None" not in text
+    assert "connection reset" not in text
+    assert DIFF_SENTINEL not in text
+    assert TITLE_SENTINEL not in text
+
+
+async def test_retrying_log_tolerates_a_supersede_before_the_read_back(
+    caplog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DEBUG_LOG_DIFF", raising=False)
+    store = MemoryJobStore()
+    vcs = FakeGitProvider(error=ForgeUnavailableError("github", "connection reset by peer"))
+    payload = make_payload()
+    job_id = await enqueue(store, payload)
+    claimed = await claim(store)
+    # The race: a supersede lands between fail() and the read-back, so the
+    # job comes back with no next_attempt_at — the log line says '-', not None.
+    superseded = ReviewJob(
+        job_id=job_id,
+        created_at=datetime(2026, 10, 7, 12, 0, tzinfo=UTC),
+        status=ReviewJobStatus.SUPERSEDED,
+        payload=payload,
+    )
+    stub = StubJobRepository(store, failed_result=ReviewJobStatus.RETRYING, get_result=superseded)
+
+    with caplog.at_level(logging.INFO, logger="worker.process"):
+        assert await process_claimed_job(claimed, vcs, stub) is False
+
+    text = caplog.text
+    assert "review job retrying:" in text
+    assert "next_attempt_at=- " in text
+    assert "next_attempt_at=None" not in text
+
+
 async def test_the_file_inventory_is_logged_with_paths_and_reasons(caplog) -> None:
     store = MemoryJobStore()
     vcs = FakeGitProvider(make_context(GOOD_DIFF))
-    payload = make_payload()
-    job_id = await enqueue(store, payload)
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
 
     with caplog.at_level(logging.INFO, logger="worker.process"):
-        assert await process_review_job(job_id, payload, vcs, store) is True
+        assert await process_claimed_job(claimed, vcs, store) is True
 
     text = caplog.text
     assert "review job files:" in text
@@ -390,11 +480,11 @@ async def test_the_debug_log_diff_flag_logs_the_diff_text(
     monkeypatch.setenv("DEBUG_LOG_DIFF", "1")
     store = MemoryJobStore()
     vcs = FakeGitProvider(make_context(GOOD_DIFF))
-    payload = make_payload()
-    job_id = await enqueue(store, payload)
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
 
     with caplog.at_level(logging.INFO, logger="worker.process"):
-        assert await process_review_job(job_id, payload, vcs, store) is True
+        assert await process_claimed_job(claimed, vcs, store) is True
 
     # The single sanctioned exception to the no-diff-in-logs rule: an explicit
     # dev-only flag, off by default.
@@ -407,10 +497,10 @@ async def test_the_diff_stays_out_of_logs_without_the_flag(
     monkeypatch.delenv("DEBUG_LOG_DIFF", raising=False)
     store = MemoryJobStore()
     vcs = FakeGitProvider(make_context(GOOD_DIFF))
-    payload = make_payload()
-    job_id = await enqueue(store, payload)
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
 
     with caplog.at_level(logging.DEBUG, logger="worker.process"):
-        assert await process_review_job(job_id, payload, vcs, store) is True
+        assert await process_claimed_job(claimed, vcs, store) is True
 
     assert DIFF_SENTINEL not in caplog.text

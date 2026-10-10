@@ -26,8 +26,8 @@ def payload(action: str = "opened") -> dict[str, Any]:
             "draft": False,
             "author_association": "CONTRIBUTOR",
             "user": {"login": "octocat", "id": 583_231},
-            "head": {"sha": "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3"},
-            "base": {"sha": "109f4b3c50d7b0df729d299bc6f8e9ef9066971f"},
+            "head": {"sha": "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3", "ref": "octocat/parser"},
+            "base": {"sha": "109f4b3c50d7b0df729d299bc6f8e9ef9066971f", "ref": "main"},
         },
     }
 
@@ -78,6 +78,8 @@ def test_parse_extracts_every_field() -> None:
         author_external_id=583_231,
         author_association="CONTRIBUTOR",
         draft=False,
+        head_ref="octocat/parser",
+        base_ref="main",
     )
 
 
@@ -104,6 +106,18 @@ def test_parse_survives_a_deleted_user() -> None:
     assert event.author_login is None
     assert event.author_external_id is None
     assert event.author_association == "CONTRIBUTOR"
+
+
+def test_missing_or_malformed_refs_yield_none() -> None:
+    """`head.ref`/`base.ref` are optional D5 metadata, not routing data."""
+    body = payload()
+    del body["pull_request"]["head"]["ref"]
+    body["pull_request"]["base"]["ref"] = 17
+
+    event = parse_pull_request_event(body)
+    assert event.head_ref is None
+    assert event.base_ref is None
+    assert event.head_sha == "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3"
 
 
 # --- parsing: malformed payloads name the field ----------------------------

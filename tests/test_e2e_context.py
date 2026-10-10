@@ -100,6 +100,10 @@ EXPECTED_JOB = NewReviewJob(
     head_sha=HEAD_SHA,
     base_sha=BASE_SHA,
     event_action="opened",
+    pr_title=TITLE_SENTINEL,
+    author_login="octocat",
+    head_ref="octocat/payments",
+    base_ref="main",
 )
 
 EXPECTED_STATS = JobStats(
@@ -142,8 +146,8 @@ def opened_payload() -> dict[str, Any]:
         "repository": {"id": REPO_ID, "full_name": REPO},
         "pull_request": {
             "number": PR_NUMBER,
-            "head": {"sha": HEAD_SHA},
-            "base": {"sha": BASE_SHA},
+            "head": {"sha": HEAD_SHA, "ref": "octocat/payments"},
+            "base": {"sha": BASE_SHA, "ref": "main"},
             "title": TITLE_SENTINEL,
             "user": {"login": "octocat", "id": 583231},
             "author_association": "CONTRIBUTOR",
