@@ -51,8 +51,7 @@ def test_the_dockerfile_ships_the_migration_tree() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
     copied = {
-        match.group(1)
-        for match in re.finditer(r"^COPY\s+(\S+)\s+", dockerfile, re.MULTILINE)
+        match.group(1) for match in re.finditer(r"^COPY\s+(\S+)\s+", dockerfile, re.MULTILINE)
     }
 
     assert "alembic.ini" in copied
