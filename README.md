@@ -34,6 +34,17 @@ curl -fsS http://127.0.0.1:8000/health
 `GET /health` returns `{"status":"ok"}`. `curl` needs a second terminal while `up` is
 in the foreground.
 
+The worker process needs the schema, and migrations never run automatically
+on boot (`.agents/rules/backend.md` § Migrations) — apply them once against
+the compose database:
+
+```bash
+DATABASE_URL=postgresql+asyncpg://dmc:dmc@localhost:5432/dmc268 uv run alembic upgrade head
+```
+
+Without it the worker logs `claim attempt failed: exc_class=ProgrammingError`
+on every tick and no job is ever processed.
+
 `docker-compose.yml` is the local stack: it builds from this tree, binds the API and
 PostgreSQL to localhost, and fills in throwaway GitHub settings. `deploy/compose.yml`
 is the VPS stack: it runs a published image, leaves the API and PostgreSQL on the

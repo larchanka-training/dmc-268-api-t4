@@ -28,7 +28,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["domain*", "adapters*", "api*"]
+include = ["domain*", "adapters*", "api*", "worker*"]
 
 [tool.setuptools.package-data]
 "adapters.llm" = ["prompts/*.md"]
