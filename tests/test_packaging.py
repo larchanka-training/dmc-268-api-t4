@@ -42,3 +42,18 @@ def test_the_dockerfile_copies_every_runtime_package() -> None:
             "(the worker service died with 'No module named worker' when it "
             "was missing)"
         )
+
+
+def test_the_dockerfile_ships_the_migration_tree() -> None:
+    """The manual migration gate runs inside the container
+    (docker compose exec api alembic upgrade head), so alembic.ini and the
+    alembic/ tree must be in the image."""
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    copied = {
+        match.group(1)
+        for match in re.finditer(r"^COPY\s+(\S+)\s+", dockerfile, re.MULTILINE)
+    }
+
+    assert "alembic.ini" in copied
+    assert "alembic" in copied

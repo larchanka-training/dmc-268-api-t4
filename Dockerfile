@@ -14,6 +14,12 @@ COPY api ./api
 COPY worker ./worker
 RUN pip install .
 
+# Migrations run from the image too, behind the manual gate
+# (.agents/rules/backend.md § Migrations): docker compose exec api alembic
+# upgrade head - never automatically on boot.
+COPY alembic.ini ./
+COPY alembic ./alembic
+
 # main.py is the ASGI entry point and is not part of the installed packages.
 COPY main.py ./
 
