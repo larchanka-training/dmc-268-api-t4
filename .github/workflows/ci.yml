@@ -85,6 +85,7 @@ jobs:
             --env GITHUB_APP_ID=1 \
             --env GITHUB_APP_PRIVATE_KEY_PATH=/run/app.pem \
             --env GITHUB_APP_SLUG=ci \
+            --env GITHUB_WEBHOOK_SECRET=ci \
             dmc268-api:ci
           for attempt in $(seq 1 10); do
             if body=$(curl -fsS http://127.0.0.1:8000/health); then
