@@ -152,11 +152,16 @@ jobs:
         run: |
           set -euo pipefail
           env_line() { printf '%s=%s\n' "$1" "$(printf '%s' "$2" | tr -d '\r\n')"; }
+          # DATABASE_URL embeds the password in the URL, so the password
+          # must be percent-encoded (a raw '@', '/' or ':' in it would
+          # corrupt the DSN the api and worker read from this .env).
+          ENC_PASSWORD=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=''))" "$POSTGRES_PASSWORD")
           {
             env_line IMAGE_TAG "$IMAGE_TAG"
             env_line POSTGRES_USER dmc
             env_line POSTGRES_DB dmc268
             env_line POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
+            env_line DATABASE_URL "postgresql+asyncpg://dmc:${ENC_PASSWORD}@postgres:5432/dmc268"
             env_line LLM_PRIMARY_API_KEYS "$LLM_PRIMARY_API_KEYS"
             env_line LLM_PRIMARY_BASE_URL "$LLM_PRIMARY_BASE_URL"
             env_line LLM_TIMEOUT_SECONDS 300

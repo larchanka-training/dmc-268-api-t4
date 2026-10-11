@@ -40,7 +40,10 @@ a no-op (see `adapters/db/repository.py` `enqueue`).
 
 ## Follow-ups
 
-- Worker: claim loop (`LISTEN`/`NOTIFY`), reaper, periodic tasks.
+- Worker: claim loop (`LISTEN`/`NOTIFY`), reaper, periodic tasks — **LANDED in
+  this PR (2026-10-11)**: `worker/{config,listener,loop,periodic,__main__}.py`
+  plus `PostgresJobStore.reap_expired`; the later periodic tasks (usage
+  rollover, credential health, retention purge, grace expiry) remain planned.
 - Webhook wiring switches from `MemoryJobStore` to `PostgresJobStore`.
 - `pr_review_comments` migration with the D4 severity/category columns.
 - `account_id` fairness index + backfill when tenancy lands.

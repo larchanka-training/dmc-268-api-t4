@@ -7,6 +7,10 @@ services:
     image: ghcr.io/larchanka-training/dmc-268-api-t4:${IMAGE_TAG:?IMAGE_TAG must be set in .env}
     env_file: .env
     restart: unless-stopped
+    # DATABASE_URL comes from the same .env the postgres service reads —
+    # written by the deploy workflow with the password percent-encoded —
+    # so no new secrets are needed; the queue is the PostgreSQL one
+    # (WORKFLOW_DESIGN §1/§8) and a worker process consumes it.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
       interval: 10s
@@ -15,6 +19,25 @@ services:
       start_period: 10s
     volumes:
       - ./github-app.pem:/opt/dmc268/github-app.pem:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # The review worker (WORKFLOW_DESIGN §8): own process and event loop, so
+  # API deploys never kill an in-flight review. Needs the App PEM too — it
+  # mints installation tokens itself.
+  worker:
+    image: ghcr.io/larchanka-training/dmc-268-api-t4:${IMAGE_TAG:?IMAGE_TAG must be set in .env}
+    env_file: .env
+    restart: unless-stopped
+    # Grace must exceed the longest review / the 10-minute lease; Docker's 10s default would SIGKILL mid-drain (docs/BACKEND_ARCHITECTURE.md § Deployment).
+    stop_grace_period: 10m
+    command: ["python", "-m", "worker"]
+    volumes:
+      - ./github-app.pem:/opt/dmc268/github-app.pem:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   postgres:
     image: postgres:17-alpine

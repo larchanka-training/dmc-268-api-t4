@@ -12,6 +12,7 @@ services:
       GITHUB_APP_SLUG: local
       GITHUB_APP_PRIVATE_KEY_PATH: /tmp/dev-app.pem
       GITHUB_WEBHOOK_SECRET: local-webhook-secret
+      DATABASE_URL: postgresql+asyncpg://dmc:dmc@postgres:5432/dmc268
     # The entrypoint script writes a throwaway PEM, then runs the app.
     entrypoint:
       - python
@@ -47,6 +48,45 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  # The review worker (WORKFLOW_DESIGN §8): separate process consuming the
+  # PostgreSQL queue; same image and PEM bootstrap as the api.
+  worker:
+    build: .
+    # Grace must exceed the longest review / the 10-minute lease; Docker's 10s default would SIGKILL mid-drain (docs/BACKEND_ARCHITECTURE.md § Deployment).
+    stop_grace_period: 10m
+    environment:
+      APP_ORIGIN: http://localhost:8000
+      GITHUB_CLIENT_ID: local
+      GITHUB_CLIENT_SECRET: local
+      GITHUB_CALLBACK_URL: http://localhost:8000/auth/github/callback
+      GITHUB_APP_ID: "1"
+      GITHUB_APP_SLUG: local
+      GITHUB_APP_PRIVATE_KEY_PATH: /tmp/dev-app.pem
+      GITHUB_WEBHOOK_SECRET: local-webhook-secret
+      DATABASE_URL: postgresql+asyncpg://dmc:dmc@postgres:5432/dmc268
+    entrypoint:
+      - python
+      - -c
+      - |
+        import os
+        import sys
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        pem = key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        with open("/tmp/dev-app.pem", "wb") as key_file:
+            key_file.write(pem)
+        os.execvp(sys.argv[1], sys.argv[1:])
+    command: ["python", "-m", "worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   postgres:
     image: postgres:17-alpine

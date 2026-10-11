@@ -3,9 +3,12 @@
 Implements [docs/WORKFLOW_DESIGN.md §2](../../docs/WORKFLOW_DESIGN.md): read
 the raw body capped at 5 MB, verify the HMAC signature over exactly the
 received bytes, route on the event header, then enqueue one review job per
-reviewable `pull_request` action. Processing runs as a background task that
-claims the queue once — a mini-worker over the same port the production
-claim loop of Step 4 will use (tasks/plan.md decision 2, 2026-10-07). The
+reviewable `pull_request` action. Who consumes the job depends on the
+wiring: in the memory dev mode the API process dispatches a background task
+that claims the queue once, while the PostgreSQL queue is consumed by a
+separate worker process — two processes rather than one, so an API restart
+never abandons an in-flight review
+([docs/WORKFLOW_DESIGN.md §8](../../docs/WORKFLOW_DESIGN.md)). The
 route is forge-to-server: no session, no CSRF headers — the delivery
 signature is the authentication.
 
@@ -58,12 +61,21 @@ BACKGROUND_TASKS: set[asyncio.Future[None]] = set()
 
 @dataclass(frozen=True, slots=True)
 class GitHubWebhookDeps:
-    """What the webhook route needs, wired once by the app factory."""
+    """What the webhook route needs, wired once by the app factory.
+
+    ``dispatch_inline`` selects who consumes the queue: True = the memory
+    dev mode, where the API process itself claims via the one-shot claimer
+    right after enqueue; False = the PostgreSQL queue, where a separate
+    worker process consumes it — two processes rather than one
+    ([docs/WORKFLOW_DESIGN.md §8](../../docs/WORKFLOW_DESIGN.md)) — and the
+    API only enqueues.
+    """
 
     jobs: JobRepository
     vcs: GitProvider
     # A secret: out of the repr, so a logged dataclass cannot leak it.
     webhook_secret: str = field(repr=False)
+    dispatch_inline: bool = True
 
 
 def webhook_deps(request: Request) -> GitHubWebhookDeps:
@@ -83,8 +95,8 @@ async def drain_background_tasks() -> None:
     """Await every in-flight processing task.
 
     Tests call this to observe a job's final state deterministically;
-    production does not (the worker claim loop of Step 4 replaces the
-    direct dispatch later).
+    production does not (with the PostgreSQL queue the worker process, not
+    the API, consumes the jobs).
     """
     while BACKGROUND_TASKS:
         await asyncio.gather(*BACKGROUND_TASKS)
@@ -94,8 +106,9 @@ async def _process_review(deps: GitHubWebhookDeps) -> None:
     """One claim-based mini-worker pass, so the port has one shape.
 
     Claims whatever is eligible — not necessarily the job this delivery
-    enqueued — and runs it. The production worker claim loop (Step 4)
-    replaces the inline invocation; the function it calls is the same.
+    enqueued — and runs it. The worker claim loop (worker/loop.py, Step 4)
+    runs the same processing function against the PostgreSQL queue; this
+    inline invocation covers only the memory dev mode.
     """
     claimed = await deps.jobs.claim(worker_id=INLINE_WORKER_ID)
     if claimed is not None:
@@ -200,7 +213,11 @@ async def receive_github_webhook(request: Request) -> Response:
         )
         return JSONResponse({"status": "duplicate"}, status_code=202)
 
-    task = asyncio.create_task(_process_review(deps))
-    BACKGROUND_TASKS.add(task)
-    task.add_done_callback(BACKGROUND_TASKS.discard)
+    if deps.dispatch_inline:
+        # Memory dev mode only: the API process claims inline. With the
+        # PostgreSQL queue the job stays QUEUED for the worker process
+        # (docs/WORKFLOW_DESIGN.md §8).
+        task = asyncio.create_task(_process_review(deps))
+        BACKGROUND_TASKS.add(task)
+        task.add_done_callback(BACKGROUND_TASKS.discard)
     return JSONResponse({"job_id": job_id, "status": "queued"}, status_code=202)
