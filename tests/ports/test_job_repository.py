@@ -35,7 +35,14 @@ from domain.ports import (
     NewReviewJob,
     ReviewJobStatus,
 )
-from tests.db.support import COMPOSE_URL, asyncpg_dsn, require_postgres, run_alembic
+from tests.db.support import (
+    COMPOSE_URL,
+    asyncpg_dsn,
+    create_scratch_database,
+    drop_scratch_database,
+    require_postgres,
+    run_alembic,
+)
 
 HEAD_SHA = "a1b2c3d4e5" * 4
 BASE_SHA = "f6e5d4c3b2" * 4
@@ -133,23 +140,6 @@ async def _truncate(engine: AsyncEngine) -> None:
         await conn.execute(text("TRUNCATE TABLE pr_review_steps, pr_review_jobs"))
 
 
-async def _recreate_ports_database(admin_dsn: str) -> None:
-    conn = await asyncpg.connect(admin_dsn)
-    try:
-        await conn.execute(f"DROP DATABASE IF EXISTS {PORTS_DB_NAME} WITH (FORCE)")
-        await conn.execute(f"CREATE DATABASE {PORTS_DB_NAME}")
-    finally:
-        await conn.close()
-
-
-async def _drop_ports_database(admin_dsn: str) -> None:
-    conn = await asyncpg.connect(admin_dsn)
-    try:
-        await conn.execute(f"DROP DATABASE IF EXISTS {PORTS_DB_NAME} WITH (FORCE)")
-    finally:
-        await conn.close()
-
-
 @pytest.fixture(scope="session")
 def pg_engine() -> AsyncIterator[AsyncEngine]:
     base = make_url(os.environ.get("DATABASE_URL") or COMPOSE_URL)
@@ -159,14 +149,14 @@ def pg_engine() -> AsyncIterator[AsyncEngine]:
             "the postgres param of the JobRepository conformance suite needs a local PostgreSQL"
         ),
     )
-    asyncio.run(_recreate_ports_database(admin_dsn))
+    create_scratch_database(admin_dsn, PORTS_DB_NAME)
     url = base.set(database=PORTS_DB_NAME).render_as_string(hide_password=False)
     run_alembic(url, "upgrade", "head")
     # NullPool: connections must never cross the per-test event loops.
     engine = create_async_engine(url, poolclass=NullPool)
     yield engine
     asyncio.run(engine.dispose())
-    asyncio.run(_drop_ports_database(admin_dsn))
+    drop_scratch_database(admin_dsn, PORTS_DB_NAME)
 
 
 @pytest.fixture

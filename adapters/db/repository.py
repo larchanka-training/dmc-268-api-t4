@@ -270,6 +270,46 @@ class PostgresJobStore:
             )
             return result.rowcount == 1
 
+    async def reap_expired(self) -> int:
+        """Recover jobs whose worker died mid-flight (docs/WORKFLOW_DESIGN.md
+        §6; docs/db_models_and_migrations.md §5 "Reap") — the only path that
+        can increment retry_count after a worker dies.
+
+        A concrete method of the store, not the domain port: the reaper is
+        queue operations (docs/BACKEND_ARCHITECTURE.md § Planned code
+        layout, ``worker/reaper`` + ``repository: claim and reap
+        statements``), and the in-memory store has no leases to lose.
+
+        The statement is pure literals — no bound parameters at all, so no
+        reused-bind ambiguity. Every SET expression evaluates the OLD row
+        (PostgreSQL semantics), so the status CASE, the LEAST cap and the
+        power(2, …) backoff all see the pre-increment retry_count, like
+        ``fail``'s backoff (docs/PIPELINE_SPEC.md §4.3: 1/2/4 min — without
+        jitter here, matching the doc's reap SQL). ``LEAST(retry_count + 1,
+        max_retries)`` keeps ck_pr_review_jobs_retry_bounds satisfied on
+        the FAILED branch. ``finished_at`` on FAILED is an addition over
+        the doc SQL for parity with ``fail()``. Returns how many rows were
+        reaped.
+        """
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                text(
+                    "UPDATE pr_review_jobs"
+                    " SET status = CASE WHEN retry_count + 1 > max_retries"
+                    " THEN 'FAILED' ELSE 'RETRYING' END,"
+                    " retry_count = LEAST(retry_count + 1, max_retries),"
+                    " next_attempt_at = now() +"
+                    " make_interval(secs => least(60 * power(2, retry_count), 900)),"
+                    " error_kind = COALESCE(error_kind, 'lease_expired'),"
+                    " locked_by = NULL, locked_until = NULL,"
+                    " finished_at = CASE WHEN retry_count + 1 > max_retries"
+                    " THEN now() ELSE finished_at END"
+                    " WHERE status = 'PROCESSING' AND locked_until < now()"
+                    " RETURNING id"
+                )
+            )
+            return len(result.all())
+
     async def get(self, job_id: str) -> ReviewJob | None:
         row_id = _as_uuid(job_id)
         if row_id is None:

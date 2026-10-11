@@ -1,10 +1,12 @@
-"""Shared PostgreSQL helpers for the two DB-backed test suites.
+"""Shared PostgreSQL helpers for the DB-backed test suites.
 
-Both the Alembic round-trip suite (``tests/db/test_migrations.py``) and the
-JobRepository conformance suite (``tests/ports/test_job_repository.py``) run
-against a real PostgreSQL server, not a fake (.agents/rules/backend.md §
-Tests), so they share one way to resolve the server, require it (skip
-locally, fail in CI), and drive Alembic against a scratch database.
+The Alembic round-trip suite (``tests/db/test_migrations.py``), the
+JobRepository conformance suite (``tests/ports/test_job_repository.py``)
+and the worker suites (``tests/worker/``) all run against a real
+PostgreSQL server, not a fake (.agents/rules/backend.md § Tests), so they
+share one way to resolve the server, require it (skip locally, fail in
+CI), drive Alembic against a scratch database, and render a DSN asyncpg
+can connect to.
 """
 
 import asyncio
@@ -16,6 +18,7 @@ import pytest
 from alembic.config import Config
 from sqlalchemy.engine import URL
 
+from adapters.db.dsn import to_asyncpg
 from alembic import command
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -43,8 +46,37 @@ def run_alembic(url: str, verb: str, target: str) -> None:
 
 
 def asyncpg_dsn(url: URL) -> str:
-    """Render a SQLAlchemy URL as the plain ``postgresql://`` DSN asyncpg wants."""
-    return url.set(drivername="postgresql").render_as_string(hide_password=False)
+    """Render a SQLAlchemy URL as the plain ``postgresql://`` DSN asyncpg
+    wants. Delegates to ``adapters.db.dsn.to_asyncpg`` so the conversion
+    has exactly one implementation."""
+    return to_asyncpg(url)
+
+
+async def _recreate_database(admin_dsn: str, name: str) -> None:
+    conn = await asyncpg.connect(admin_dsn)
+    try:
+        await conn.execute(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
+        await conn.execute(f"CREATE DATABASE {name}")
+    finally:
+        await conn.close()
+
+
+async def _drop_database_only(admin_dsn: str, name: str) -> None:
+    conn = await asyncpg.connect(admin_dsn)
+    try:
+        await conn.execute(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
+    finally:
+        await conn.close()
+
+
+def create_scratch_database(admin_dsn: str, name: str) -> None:
+    """Recreate an empty scratch database. ``name`` is always a suite
+    constant, never caller input, so it cannot inject SQL."""
+    asyncio.run(_recreate_database(admin_dsn, name))
+
+
+def drop_scratch_database(admin_dsn: str, name: str) -> None:
+    asyncio.run(_drop_database_only(admin_dsn, name))
 
 
 async def server_reachable(admin_dsn: str) -> bool:

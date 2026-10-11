@@ -133,6 +133,10 @@ class DBConfigurationError(Exception):
     """The database adapter cannot be built from the given settings."""
 
 
+class WorkerConfigurationError(Exception):
+    """The worker process cannot be built from its settings."""
+
+
 class DiffFormatError(Exception):
     """The diff text is not a well-formed unified git diff.
 
