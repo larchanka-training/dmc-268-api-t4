@@ -381,8 +381,9 @@ console shows findings as plain text. That is a product decision, not a technica
 `GET /jobs/{job_id}/events` streams a job's status and step changes as Server-Sent Events.
 It adds to polling and does not replace it. Each event carries the backend `step` and a
 dashboard `stage` (`collecting_context`, `reviewing`, `validating`, `publishing`), so the
-console's progress bar does not have to know the step set. The API reads events through
-`JobEventsSource`; the format is in [003-publisher-and-sse.md](./003-publisher-and-sse.md).
+console's progress bar does not have to know the step set. The worker records steps in
+`pr_review_steps`, and the API rebuilds the events from them; the format is in
+[003-publisher-and-sse.md](./003-publisher-and-sse.md).
 
 ---
 

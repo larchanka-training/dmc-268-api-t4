@@ -95,7 +95,8 @@ Server-Sent Events.
 ## Статус по SSE
 
 `GET /jobs/{job_id}/events` (`api/jobs.py`, контракт в `docs/openapi.yaml`) требует сессию.
-На чужую или несуществующую задачу ответ одинаковый: 404.
+Задачу видят сессии, у которых есть организация с тем же `installation_id`. На чужую или
+несуществующую задачу ответ одинаковый: 404.
 
 ```
 retry: 3000
@@ -121,8 +122,31 @@ data: <json>
 | `validating` | `POSTPROCESS` |
 | `publishing` | `POST_FEEDBACK`, `METER` |
 
-События API берёт из порта `JobEventsSource`. Реализация сейчас одна: в памяти процесса
-(`adapters/memory/job_events.py`).
+Откуда берутся события:
+
+- воркер пишет шаги `CLAIMED`, `FETCH_DIFF`, `LLM_CALL`, `POST_FEEDBACK` в `pr_review_steps`
+  (`adapters/db/job_events.py`, `PostgresStepRecorder`): строка `RUNNING` при старте шага,
+  итог и `error_kind` при завершении. Пишет только воркер, держащий аренду задачи. Ошибка
+  записи не останавливает ревью;
+- API собирает события из строки задачи и её шагов (`PostgresJobEventsSource`,
+  `domain.jobs.events_from_steps`): у каждого шага событие старта и завершения, после
+  повторённой попытки `RETRYING`, в конце конечный статус. Номер события `seq` — позиция в
+  этом списке, новые записи только дописываются в конец;
+- пока поток ждёт, API перечитывает задачу раз в секунду.
+
+Без `DATABASE_URL` шаги не пишутся, и поток отвечает 404.
+
+## Список задач
+
+`GET /jobs` и `GET /jobs/{job_id}` (`api/jobs.py`, контракт в `docs/openapi.yaml`) читают
+`pr_review_jobs` через порт `JobHistory`, его реализуют оба хранилища задач.
+
+- `GET /jobs` отдаёт задачи текущей организации сессии, новые первыми, страницами по
+  `limit` (1–100, по умолчанию 25) с курсором по `(created_at, id)`. Фильтры: `status`
+  (`active` = `QUEUED`, `PROCESSING`, `RETRYING`, или один статус), `repository`, `author`,
+  `from`, `to`, `q` (подстрока заголовка PR или его номер).
+- `GET /jobs/{job_id}` добавляет шаги из `pr_review_steps`. Доступ как у потока SSE.
+- `finding_count` — число опубликованных inline-комментариев, воркер пишет его в `stats`.
 
 ## Переменные окружения
 
@@ -133,7 +157,9 @@ data: <json>
 ## Проверки
 
 Тесты: `tests/domain/test_publishing.py`, `tests/adapters/test_github_publisher.py`,
-`tests/api/test_job_events.py`, `tests/worker/test_review_stage.py`, `tests/worker/test_main.py`.
+`tests/api/test_job_events.py`, `tests/worker/test_review_stage.py`, `tests/worker/test_main.py`,
+`tests/domain/test_job_events_from_steps.py`, `tests/api/test_jobs.py`,
+`tests/db/test_job_events.py` (на PostgreSQL).
 
 Ручной смоук на тестовом PR (пишет в GitHub, не для CI):
 
@@ -161,6 +187,10 @@ summary и напечатает ссылки. Полный путь провер
    нему же список опубликованного можно восстановить с форжа.
 7. **SSE дополняет polling, а не заменяет его.** Каждое событие несёт и шаг бэкенда, и `stage`
    консоли, так что консоль рисует прогресс, не зная набора шагов.
+8. **События собираются из `pr_review_steps`**, отдельной таблицы событий нет: шаги и так
+   пишутся для диагностики, а миграция не нужна. Поток перечитывает задачу раз в секунду
+   вместо `LISTEN`: это один индексированный запрос на открытый поток и без отдельного
+   соединения на процесс API.
 
 ## Ограничения
 
@@ -169,7 +199,6 @@ summary и напечатает ссылки. Полный путь провер
 - Исходящий текст не проходит редакцию секретов: `redact` по умолчанию возвращает текст как есть.
 - Очередь публикаций в репозиторий действует только внутри одного процесса.
 - Воркер не передаёт существующий Check Run, поэтому каждый прогон создаёт новый.
-- Воркер не записывает шаги задачи, а источник событий в памяти: на сервере поток SSE
-  отвечает 404.
-- `GET /jobs` и `GET /jobs/{job_id}` не реализованы.
+- `GET /jobs/{job_id}` отдаёт пустые `findings`, а `summary`, `error_log` и
+  `external_check_url` равны `null`: эти данные пока не сохраняются.
 - GitLab не поддерживается.

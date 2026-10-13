@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from adapters.clock import SystemClock
 from adapters.db.config import DBSettings
+from adapters.db.job_events import PostgresJobEventsSource
 from adapters.db.repository import PostgresJobStore
 from adapters.db.session import build_engine
 from adapters.github.app_auth import GitHubAppAuth
@@ -43,7 +44,7 @@ from domain.ports import (
     GitProvider,
     IdentityProvider,
     JobEventsSource,
-    JobRepository,
+    JobStore,
     SessionStore,
     SignInAttemptStore,
 )
@@ -82,7 +83,7 @@ def create_app(
     clock: Clock,
     repositories: RepositoriesService,
     app_slug: str,
-    jobs: JobRepository,
+    jobs: JobStore,
     vcs: GitProvider,
     webhook_secret: str,
     dispatch_inline: bool = True,
@@ -99,6 +100,7 @@ def create_app(
         repositories=repositories,
         app_slug=app_slug,
         job_events=job_events if job_events is not None else InMemoryJobEventsSource(),
+        jobs=jobs,
     )
     app.state.webhooks = GitHubWebhookDeps(
         jobs=jobs,
@@ -154,7 +156,7 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     settings = AppSettings.from_env()
     app_settings = GitHubAppSettings.from_env()
     app_auth = GitHubAppAuth(app_settings, clock, transport=transport)
-    jobs: JobRepository
+    jobs: JobStore
     dispatch_inline: bool
     engine: AsyncEngine | None = None
     if "DATABASE_URL" in os.environ:
@@ -192,7 +194,8 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         webhook_secret=app_settings.webhook_secret,
         dispatch_inline=dispatch_inline,
         engine=engine,
-        # The worker records no steps, so this source stays empty and every stream
-        # answers 404.
-        job_events=InMemoryJobEventsSource(),
+        # Without PostgreSQL no steps are recorded, so every stream answers 404.
+        job_events=(
+            InMemoryJobEventsSource() if engine is None else PostgresJobEventsSource(engine)
+        ),
     )

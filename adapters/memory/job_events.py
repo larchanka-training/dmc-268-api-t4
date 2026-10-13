@@ -1,7 +1,7 @@
 """In-memory `JobEventsSource`: events recorded in this process.
 
-Serves tests and single-process runs. The worker is a separate process and records
-nothing here, so in the deployed API every stream answers 404.
+Serves tests. With PostgreSQL the API reads `adapters/db/job_events.py` instead; the
+in-memory dev mode records no steps, so there every stream answers 404.
 """
 
 import asyncio
@@ -18,10 +18,10 @@ class InMemoryJobEventsSource:
         self._changed = asyncio.Condition()
 
     def create(
-        self, job_id: str, account_id: str, status: ReviewJobStatus = ReviewJobStatus.QUEUED
+        self, job_id: str, installation_id: int, status: ReviewJobStatus = ReviewJobStatus.QUEUED
     ) -> None:
         self._jobs[job_id] = JobSnapshot(
-            job_id=job_id, account_id=account_id, status=status, last_seq=0
+            job_id=job_id, installation_id=installation_id, status=status, last_seq=0
         )
         self._events[job_id] = []
 

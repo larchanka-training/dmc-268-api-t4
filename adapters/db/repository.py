@@ -20,7 +20,16 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from adapters.clock import SystemClock
-from domain.jobs import LEASE_SECONDS, MAX_IN_FLIGHT_PER_INSTALLATION, backoff_delay
+from domain.jobs import (
+    LEASE_SECONDS,
+    MAX_IN_FLIGHT_PER_INSTALLATION,
+    JobPage,
+    JobQuery,
+    JobStep,
+    StepRecord,
+    StepStatus,
+    backoff_delay,
+)
 from domain.ports import (
     ClaimedJob,
     Clock,
@@ -316,33 +325,123 @@ class PostgresJobStore:
             return None
         async with self._engine.connect() as conn:
             result = await conn.execute(
-                text(
-                    "SELECT id, delivery_id, provider, installation_id, repo_id,"
-                    " repo_full_name, pr_number, head_sha, base_sha, event_action,"
-                    " pr_title, author_login, head_ref, base_ref, status, stats,"
-                    " error_kind, created_at, finished_at, retry_count, next_attempt_at"
-                    " FROM pr_review_jobs WHERE id = :id"
-                ),
+                text(f"SELECT {_JOB_COLUMNS} FROM pr_review_jobs WHERE id = :id"),
                 {"id": row_id},
             )
             row = result.first()
-        if row is None:
-            return None
-        status = ReviewJobStatus(row.status)
-        return ReviewJob(
-            job_id=str(row.id.hex),
-            created_at=row.created_at,
-            status=status,
-            payload=_payload_from_row(row),
-            stats=_stats_from_json(row.stats),
-            error_kind=row.error_kind,
-            finished_at=row.finished_at,
-            retry_count=int(row.retry_count),
-            # The column is NOT NULL, so a terminal row keeps its last
-            # scheduled attempt on disk; through the port there is no next
-            # attempt, exactly like the memory store.
-            next_attempt_at=None if status in _TERMINAL_STATUSES else row.next_attempt_at,
+        return None if row is None else _job_from_row(row)
+
+    async def list_page(self, query: JobQuery) -> JobPage:
+        """Newest first, keyset-paged on (created_at, id)."""
+        if not query.installation_ids:
+            return JobPage(items=(), next_after=None)
+        where = ["installation_id = ANY(:installations)"]
+        params: dict[str, Any] = {
+            "installations": sorted(query.installation_ids),
+            "limit": query.limit + 1,
+        }
+        if query.statuses:
+            where.append("status = ANY(:statuses)")
+            params["statuses"] = sorted(str(status) for status in query.statuses)
+        if query.repository is not None:
+            where.append("repo_full_name = :repository")
+            params["repository"] = query.repository
+        if query.author is not None:
+            where.append("author_login = :author")
+            params["author"] = query.author
+        if query.created_from is not None:
+            where.append("created_at >= :created_from")
+            params["created_from"] = query.created_from
+        if query.created_to is not None:
+            where.append("created_at <= :created_to")
+            params["created_to"] = query.created_to
+        if query.text is not None:
+            number = query.text.strip().lstrip("#")
+            match = "pr_title ILIKE :title ESCAPE '\\'"
+            if number.isdigit():
+                match = f"({match} OR pr_number = :number)"
+                params["number"] = int(number)
+            where.append(match)
+            params["title"] = "%" + _escape_like(query.text) + "%"
+        if query.after is not None:
+            after_id = _as_uuid(query.after[1])
+            if after_id is None:
+                return JobPage(items=(), next_after=None)
+            where.append("(created_at, id) < (:after_at, :after_id)")
+            params["after_at"] = query.after[0]
+            params["after_id"] = after_id
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                text(
+                    f"SELECT {_JOB_COLUMNS} FROM pr_review_jobs"
+                    f" WHERE {' AND '.join(where)}"
+                    " ORDER BY created_at DESC, id DESC LIMIT :limit"
+                ),
+                params,
+            )
+            rows = result.all()
+        jobs = tuple(_job_from_row(row) for row in rows[: query.limit])
+        more = len(rows) > query.limit
+        return JobPage(
+            items=jobs,
+            next_after=(jobs[-1].created_at, jobs[-1].job_id) if more else None,
         )
+
+    async def steps(self, job_id: str) -> tuple[StepRecord, ...]:
+        row_id = _as_uuid(job_id)
+        if row_id is None:
+            return ()
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                text(
+                    "SELECT step, attempt, status, started_at, finished_at, error_kind"
+                    " FROM pr_review_steps WHERE job_id = :id ORDER BY attempt, seq"
+                ),
+                {"id": row_id},
+            )
+            rows = result.all()
+        return tuple(
+            StepRecord(
+                step=JobStep(row.step),
+                attempt=int(row.attempt),
+                status=StepStatus(row.status),
+                started_at=row.started_at,
+                finished_at=row.finished_at,
+                error_kind=row.error_kind,
+            )
+            for row in rows
+        )
+
+
+_JOB_COLUMNS = (
+    "id, delivery_id, provider, installation_id, repo_id, repo_full_name, pr_number,"
+    " head_sha, base_sha, event_action, pr_title, author_login, head_ref, base_ref,"
+    " status, stats, error_kind, created_at, started_at, finished_at, retry_count,"
+    " next_attempt_at"
+)
+
+
+def _job_from_row(row: Row[Any]) -> ReviewJob:
+    status = ReviewJobStatus(row.status)
+    return ReviewJob(
+        job_id=str(row.id.hex),
+        created_at=row.created_at,
+        status=status,
+        payload=_payload_from_row(row),
+        stats=_stats_from_json(row.stats),
+        error_kind=row.error_kind,
+        finished_at=row.finished_at,
+        retry_count=int(row.retry_count),
+        # The column is NOT NULL, so a terminal row keeps its last
+        # scheduled attempt on disk; through the port there is no next
+        # attempt, exactly like the memory store.
+        next_attempt_at=None if status in _TERMINAL_STATUSES else row.next_attempt_at,
+        started_at=row.started_at,
+    )
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _as_uuid(job_id: str) -> uuid.UUID | None:
@@ -379,6 +478,7 @@ def _stats_to_json(stats: JobStats) -> str:
             "hunks_total": stats.hunks_total,
             "chunks_total": stats.chunks_total,
             "skipped_counts": [[reason, count] for reason, count in stats.skipped_counts],
+            "findings_published": stats.findings_published,
         }
     )
 
@@ -396,4 +496,5 @@ def _stats_from_json(raw: Any) -> JobStats | None:
         skipped_counts=tuple(
             (str(reason), int(count)) for reason, count in value["skipped_counts"]
         ),
+        findings_published=int(value.get("findings_published", 0)),
     )

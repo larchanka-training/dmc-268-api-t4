@@ -60,7 +60,7 @@ def read_stream(client: TestClient, job_id: str = "job-1") -> list[tuple[str, di
 
 def test_a_running_job_streams_snapshot_then_steps_until_it_ends(auth_clock: FixedClock) -> None:
     source = InMemoryJobEventsSource()
-    source.create("job-1", account_id=ORG.id)
+    source.create("job-1", installation_id=ORG.installation_id)
     source.record_nowait(event(1, step=JobStep.CLAIMED, step_status=StepStatus.OK))
     client = client_for(auth_clock, source)
     # Recorded before the stream opens, after the snapshot is taken — exactly what the
@@ -92,7 +92,7 @@ def test_a_running_job_streams_snapshot_then_steps_until_it_ends(auth_clock: Fix
 
 def test_a_finished_job_sends_its_snapshot_and_ends(auth_clock: FixedClock) -> None:
     source = InMemoryJobEventsSource()
-    source.create("job-1", account_id=ORG.id)
+    source.create("job-1", installation_id=ORG.installation_id)
     source.record_nowait(event(1, status=ReviewJobStatus.FAILED))
 
     blocks = read_stream(client_for(auth_clock, source))
@@ -103,7 +103,7 @@ def test_a_finished_job_sends_its_snapshot_and_ends(auth_clock: FixedClock) -> N
 
 def test_another_accounts_job_is_not_found(auth_clock: FixedClock) -> None:
     source = InMemoryJobEventsSource()
-    source.create("job-1", account_id="999")
+    source.create("job-1", installation_id=999)
     client = client_for(auth_clock, source)
 
     assert client.get("/jobs/job-1/events").status_code == 404
@@ -112,7 +112,7 @@ def test_another_accounts_job_is_not_found(auth_clock: FixedClock) -> None:
 
 def test_the_stream_needs_a_session(auth_clock: FixedClock) -> None:
     source = InMemoryJobEventsSource()
-    source.create("job-1", account_id=ORG.id)
+    source.create("job-1", installation_id=ORG.installation_id)
     identity = FakeIdentityProvider()
     client = TestClient(
         build_test_app(auth_clock, identity, job_events=source), base_url=TEST_ORIGIN
@@ -138,7 +138,7 @@ async def test_an_idle_stream_sends_heartbeats_and_wakes_on_new_events(
 ) -> None:
     monkeypatch.setattr(api.jobs, "HEARTBEAT_SECONDS", 0.05)
     source = InMemoryJobEventsSource()
-    source.create("job-1", account_id=ORG.id)
+    source.create("job-1", installation_id=ORG.installation_id)
     snapshot = await source.snapshot("job-1")
     assert snapshot is not None
 
@@ -162,7 +162,7 @@ async def test_an_idle_stream_sends_heartbeats_and_wakes_on_new_events(
 
 async def test_events_must_arrive_in_order() -> None:
     source = InMemoryJobEventsSource()
-    source.create("job-1", account_id=ORG.id)
+    source.create("job-1", installation_id=ORG.installation_id)
     await source.record(event(2))
 
     with pytest.raises(ValueError):

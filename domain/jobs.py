@@ -9,12 +9,15 @@ It also holds the progress events streamed by `GET /jobs/{id}/events`: the step 
 docs/PIPELINE_SPEC.md §2 [D2]. The status set is `domain.ports.ReviewJobStatus`.
 """
 
+import base64
+import binascii
 import random
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 
-from domain.ports import ReviewJobStatus
+from domain.ports import ReviewJob, ReviewJobStatus
 
 #: At most this many jobs per installation may be PROCESSING at once —
 #: fairness, not capacity (docs/BACKEND_ARCHITECTURE.md § Processes,
@@ -156,12 +159,149 @@ class JobEvent:
 class JobSnapshot:
     """A job's state at one moment: what a client draws before following events.
 
-    `account_id` is the GitHub organisation id of the owning account; the stream is
-    served only to sessions that belong to it.
+    The stream is served only to sessions with an organisation on `installation_id`.
     """
 
     job_id: str
-    account_id: str
+    installation_id: int
     status: ReviewJobStatus
     last_seq: int
     steps: tuple[JobEvent, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class StepRecord:
+    """One row of `pr_review_steps`: a step of one attempt and how far it got."""
+
+    step: JobStep
+    attempt: int
+    status: StepStatus
+    started_at: datetime
+    finished_at: datetime | None = None
+    error_kind: str | None = None
+
+
+def events_from_steps(
+    job_id: str,
+    status: ReviewJobStatus,
+    retry_count: int,
+    status_at: datetime,
+    steps: Sequence[StepRecord],
+) -> tuple[JobEvent, ...]:
+    """A job's event history, rebuilt from its step rows and its current status.
+
+    Each step gives a RUNNING event when it starts and a second one when it finishes.
+    An attempt below `retry_count` is followed by a RETRYING event, and a terminal job
+    ends with its status. New rows and transitions only ever append, so `seq` (the
+    position in this list) stays stable between reads.
+    """
+    timed: list[tuple[datetime, int, int, JobEvent]] = []
+    for index, record in enumerate(steps):
+        base = JobEvent(
+            seq=0,
+            job_id=job_id,
+            at=record.started_at,
+            status=ReviewJobStatus.PROCESSING,
+            step=record.step,
+            step_status=StepStatus.RUNNING,
+            attempt=record.attempt,
+        )
+        timed.append((record.started_at, index, 0, base))
+        if record.finished_at is not None:
+            finished = JobEvent(
+                seq=0,
+                job_id=job_id,
+                at=record.finished_at,
+                status=ReviewJobStatus.PROCESSING,
+                step=record.step,
+                step_status=record.status,
+                attempt=record.attempt,
+                error_kind=record.error_kind,
+            )
+            timed.append((record.finished_at, index, 1, finished))
+
+    events: list[JobEvent] = []
+    attempts = sorted({record.attempt for record in steps})
+    for attempt in attempts:
+        in_attempt = sorted(
+            (entry for entry in timed if entry[3].attempt == attempt), key=lambda e: e[:3]
+        )
+        events.extend(entry[3] for entry in in_attempt)
+        if attempt < retry_count:
+            events.append(
+                JobEvent(
+                    seq=0,
+                    job_id=job_id,
+                    at=events[-1].at,
+                    status=ReviewJobStatus.RETRYING,
+                    attempt=attempt,
+                )
+            )
+    if is_terminal(status):
+        events.append(
+            JobEvent(seq=0, job_id=job_id, at=status_at, status=status, attempt=retry_count)
+        )
+    return tuple(replace(event, seq=seq) for seq, event in enumerate(events, start=1))
+
+
+def latest_steps(events: Sequence[JobEvent]) -> tuple[JobEvent, ...]:
+    """The latest event of each (step, attempt), in the order the steps started."""
+    latest: dict[tuple[JobStep, int], JobEvent] = {}
+    for event in events:
+        if event.step is not None:
+            latest[(event.step, event.attempt)] = event
+    return tuple(latest.values())
+
+
+#: `GET /jobs?status=active`: the jobs still in flight.
+ACTIVE_STATUSES = frozenset(
+    {ReviewJobStatus.QUEUED, ReviewJobStatus.PROCESSING, ReviewJobStatus.RETRYING}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class JobQuery:
+    """One page of `GET /jobs`, newest first.
+
+    Empty `statuses` means every status. `after` is the (created_at, job_id) of the last
+    job on the previous page. `text` matches the pull request title, or its number when
+    it is one.
+    """
+
+    installation_ids: frozenset[int]
+    statuses: frozenset[ReviewJobStatus] = frozenset()
+    repository: str | None = None
+    author: str | None = None
+    created_from: datetime | None = None
+    created_to: datetime | None = None
+    text: str | None = None
+    after: tuple[datetime, str] | None = None
+    limit: int = 25
+
+
+@dataclass(frozen=True, slots=True)
+class JobPage:
+    items: tuple[ReviewJob, ...]
+    # The position after the last item, or None when the list ends.
+    next_after: tuple[datetime, str] | None
+
+
+def encode_cursor(position: tuple[datetime, str]) -> str:
+    created_at, job_id = position
+    raw = f"{created_at.isoformat()}|{job_id}".encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def decode_cursor(cursor: str) -> tuple[datetime, str]:
+    """Raises ValueError for anything `encode_cursor` did not produce."""
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode()
+    except (binascii.Error, UnicodeDecodeError):
+        raise ValueError("bad cursor") from None
+    created_at, separator, job_id = raw.partition("|")
+    if not separator or not job_id:
+        raise ValueError("bad cursor")
+    parsed = datetime.fromisoformat(created_at)
+    if parsed.tzinfo is None:
+        raise ValueError("bad cursor")
+    return parsed, job_id

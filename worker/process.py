@@ -22,7 +22,8 @@ never be set outside a developer machine.
 import logging
 import os
 import time
-from dataclasses import dataclass
+from collections.abc import Awaitable
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from domain.diff import parse_diff, split_into_chunks
@@ -37,6 +38,7 @@ from domain.errors import (
     PrNotFoundError,
     ProviderUnavailableError,
 )
+from domain.jobs import JobStep, StepStatus
 from domain.ports import (
     ClaimedJob,
     GitProvider,
@@ -47,6 +49,7 @@ from domain.ports import (
     ReviewJobStatus,
     ReviewPublisher,
     ReviewRequest,
+    StepRecorder,
 )
 from domain.publishing import DEFAULT_POLICY, CommentableLines, PublishPolicy, build_plan
 
@@ -82,6 +85,60 @@ def _clip(value: str, limit: int = 2000) -> str:
     return value[:limit] + "..."
 
 
+class _Steps:
+    """The step the job is in, mirrored to a `StepRecorder` when one is given.
+
+    Recording is progress for the console, never part of the job's outcome: a failed
+    write is logged (exception class only) and the job goes on."""
+
+    def __init__(
+        self, recorder: StepRecorder | None, claimed: ClaimedJob, log: logging.Logger
+    ) -> None:
+        self._recorder = recorder
+        self._claimed = claimed
+        self._log = log
+        self._current: JobStep | None = None
+
+    async def begin(self, step: JobStep) -> None:
+        """Finish the current step as OK and start `step`."""
+        await self.end(StepStatus.OK)
+        self._current = step
+        if self._recorder is not None:
+            await self._guarded(
+                self._recorder.start(
+                    self._claimed.job_id,
+                    self._claimed.attempt,
+                    step,
+                    worker_id=self._claimed.worker_id,
+                )
+            )
+
+    async def end(self, status: StepStatus, error_kind: str | None = None) -> None:
+        step, self._current = self._current, None
+        if step is None or self._recorder is None:
+            return
+        await self._guarded(
+            self._recorder.finish(
+                self._claimed.job_id,
+                self._claimed.attempt,
+                step,
+                status,
+                worker_id=self._claimed.worker_id,
+                error_kind=error_kind,
+            )
+        )
+
+    async def _guarded(self, write: Awaitable[None]) -> None:
+        try:
+            await write
+        except Exception as err:
+            self._log.error(
+                "review job step record failed: job_id=%s exc_class=%s",
+                self._claimed.job_id,
+                type(err).__name__,
+            )
+
+
 def _classify(error: Exception) -> tuple[str, bool]:
     """Map an exception to (error_kind, retryable) — the closed error
     vocabulary of docs/PIPELINE_SPEC.md §4.2/§5."""
@@ -108,10 +165,11 @@ async def process_claimed_job(
     jobs: JobRepository,
     *,
     review: ReviewStage | None = None,
+    steps: StepRecorder | None = None,
     logger: logging.Logger | None = None,
 ) -> bool:
     """Fetch and parse one claimed pull request diff, review and publish it when a
-    review stage is given; record stats or failure.
+    review stage is given; record stats or failure, and each step in `steps`.
 
     Returns True only when the job reached COMPLETED. Returns False when the
     lease was lost mid-flight (a superseding delivery or the reaper owns the
@@ -124,8 +182,11 @@ async def process_claimed_job(
     started = time.monotonic()
     job_id = claimed.job_id
     payload = claimed.payload
+    progress = _Steps(steps, claimed, log)
 
     try:
+        await progress.begin(JobStep.CLAIMED)
+        await progress.begin(JobStep.FETCH_DIFF)
         context = await vcs.fetch_pull_request(
             payload.installation_id, payload.repo_full_name, payload.pr_number
         )
@@ -166,6 +227,7 @@ async def process_claimed_job(
             # lease before it and again before posting, and stop if it was lost.
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                 return False
+            await progress.begin(JobStep.LLM_CALL)
             result = await review.gateway.review(
                 ReviewRequest(
                     diff_text=context.diff_text,
@@ -181,8 +243,9 @@ async def process_claimed_job(
             )
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                 return False
+            await progress.begin(JobStep.POST_FEEDBACK)
             owner, repo = payload.repo_full_name.split("/", 1)
-            await review.publisher.publish(
+            outcome = await review.publisher.publish(
                 PullRequestTarget(
                     installation_id=payload.installation_id,
                     owner=owner,
@@ -192,8 +255,11 @@ async def process_claimed_job(
                 ),
                 plan,
             )
+            stats = replace(stats, findings_published=len(outcome.comments))
+        await progress.end(StepStatus.OK)
     except Exception as err:
         error_kind, retryable = _classify(err)
+        await progress.end(StepStatus.FAILED, error_kind)
         return await _record_failure(
             jobs,
             claimed,

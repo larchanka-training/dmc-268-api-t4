@@ -25,6 +25,9 @@ from domain.jobs import (
     DEFAULT_MAX_RETRIES,
     LEASE_SECONDS,
     MAX_IN_FLIGHT_PER_INSTALLATION,
+    JobPage,
+    JobQuery,
+    StepRecord,
     backoff_delay,
 )
 from domain.ports import (
@@ -141,7 +144,7 @@ class MemoryJobStore:
                 ),
             )
             self._records[oldest.job.job_id] = _Record(
-                job=replace(oldest.job, status=ReviewJobStatus.PROCESSING),
+                job=replace(oldest.job, status=ReviewJobStatus.PROCESSING, started_at=now),
                 locked_by=worker_id,
                 locked_until=now + timedelta(seconds=LEASE_SECONDS),
             )
@@ -223,6 +226,46 @@ class MemoryJobStore:
         async with self._lock:
             record = self._records.get(job_id)
             return record.job if record is not None else None
+
+    async def list_page(self, query: JobQuery) -> JobPage:
+        async with self._lock:
+            matching = sorted(
+                (record.job for record in self._records.values() if _matches(record.job, query)),
+                key=lambda job: (job.created_at, job.job_id),
+                reverse=True,
+            )
+        page = matching[: query.limit]
+        more = len(matching) > query.limit
+        return JobPage(
+            items=tuple(page),
+            next_after=(page[-1].created_at, page[-1].job_id) if more else None,
+        )
+
+    async def steps(self, job_id: str) -> tuple[StepRecord, ...]:
+        # The in-memory dev mode records no steps.
+        return ()
+
+
+def _matches(job: ReviewJob, query: JobQuery) -> bool:
+    payload = job.payload
+    if payload.installation_id not in query.installation_ids:
+        return False
+    if query.statuses and job.status not in query.statuses:
+        return False
+    if query.repository is not None and payload.repo_full_name != query.repository:
+        return False
+    if query.author is not None and payload.author_login != query.author:
+        return False
+    if query.created_from is not None and job.created_at < query.created_from:
+        return False
+    if query.created_to is not None and job.created_at > query.created_to:
+        return False
+    if query.text is not None:
+        number = query.text.strip().lstrip("#")
+        in_title = query.text.lower() in payload.pr_title.lower()
+        if not in_title and not (number.isdigit() and int(number) == payload.pr_number):
+            return False
+    return query.after is None or (job.created_at, job.job_id) < query.after
 
 
 def _held_by(record: _Record, worker_id: str) -> bool:

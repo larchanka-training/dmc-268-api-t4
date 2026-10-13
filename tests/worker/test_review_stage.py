@@ -2,6 +2,7 @@
 
 from adapters.jobs.memory import MemoryJobStore
 from domain.errors import AllProvidersFailedError, ProviderUnavailableError
+from domain.jobs import JobStep, StepStatus
 from domain.models import (
     Category,
     DiffSide,
@@ -115,3 +116,90 @@ async def test_an_unavailable_model_retries_and_posts_nothing() -> None:
     assert publisher.calls == []
     stored = await store.get(job_id)
     assert stored is not None and stored.status is ReviewJobStatus.RETRYING
+
+
+class FakeStepRecorder:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    async def start(self, job_id: str, attempt: int, step: JobStep, *, worker_id: str) -> None:
+        self.calls.append((str(step), "RUNNING", None))
+
+    async def finish(
+        self,
+        job_id: str,
+        attempt: int,
+        step: JobStep,
+        status: StepStatus,
+        *,
+        worker_id: str,
+        error_kind: str | None = None,
+    ) -> None:
+        self.calls.append((str(step), str(status), error_kind))
+
+
+async def test_each_step_is_recorded_as_it_starts_and_ends() -> None:
+    store = MemoryJobStore()
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
+    steps = FakeStepRecorder()
+
+    await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(gateway=FakeGateway(), publisher=FakePublisher()),
+        steps=steps,
+    )
+
+    assert steps.calls == [
+        ("CLAIMED", "RUNNING", None),
+        ("CLAIMED", "OK", None),
+        ("FETCH_DIFF", "RUNNING", None),
+        ("FETCH_DIFF", "OK", None),
+        ("LLM_CALL", "RUNNING", None),
+        ("LLM_CALL", "OK", None),
+        ("POST_FEEDBACK", "RUNNING", None),
+        ("POST_FEEDBACK", "OK", None),
+    ]
+
+
+async def test_the_failing_step_is_recorded_with_its_error_kind() -> None:
+    store = MemoryJobStore()
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
+    steps = FakeStepRecorder()
+    error = AllProvidersFailedError([ProviderUnavailableError("p", "down")])
+
+    await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(gateway=FakeGateway(error=error), publisher=FakePublisher()),
+        steps=steps,
+    )
+
+    assert steps.calls[-1] == ("LLM_CALL", "FAILED", "provider_unavailable")
+
+
+class BrokenStepRecorder(FakeStepRecorder):
+    async def start(self, job_id: str, attempt: int, step: JobStep, *, worker_id: str) -> None:
+        raise ConnectionError("database restarting")
+
+
+async def test_a_failed_step_write_does_not_stop_the_review() -> None:
+    store = MemoryJobStore()
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
+    publisher = FakePublisher()
+
+    done = await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(gateway=FakeGateway(), publisher=publisher),
+        steps=BrokenStepRecorder(),
+    )
+
+    assert done is True
+    assert len(publisher.calls) == 1
