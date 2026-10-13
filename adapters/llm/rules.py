@@ -22,15 +22,17 @@ SUSPICIOUS_RULE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r".{0,40}?\binstructions?\b",
         r"\bsystem\s+prompt\b",
         r"\byou\s+are\s+now\b",
-        r"\bact\s+as\b",
+        r"\bact\s+as\s+(?:an?\s+|the\s+)?(?:assistant|ai|model|system|admin\w*|developer)\b",
         r"\b(?:change|override|alter)\b.{0,40}?\b(?:output|response)\s+format\b",
         r"\b(?:change|override|alter)\b.{0,40}?\bjson\b",
-        r"\b(?:do\s+not|don'?t|never)\s+report\b",
-        r"\b(?:skip|suppress|hide)\b.{0,40}?\bfindings?\b",
+        r"\b(?:do\s+not|don'?t|never)\s+report\s+(?:all|any|every|security)\b",
+        r"\b(?:skip|suppress|hide)\b.{0,20}?\b(?:all|any|every|security)\b.{0,20}?\bfindings?\b",
         r"\b(?:reveal|print|show|output|repeat)\b.{0,40}?\bprompt\b",
         r"игнорир\w*.{0,40}?инструкци",
         r"системн\w*\s+промпт",
-        r"не\s+сообща",
+        r"не\s+сообщай(?:те)?\s+(?:об?\s+)?(?:находк|замечан|уязвимост)",
+        # A marker look-alike in a rule can only be an attempt to break out of the block.
+        r"<<<\s*(?:END_)?UNTRUSTED_\w+\s*>>>",
     )
 )
 
