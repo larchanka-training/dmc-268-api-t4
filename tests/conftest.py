@@ -1,5 +1,9 @@
+import asyncio
+import hashlib
+import hmac
 import json
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -8,14 +12,16 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from adapters.jobs.memory import MemoryJobStore
 from adapters.llm.keys import KeyPool
 from adapters.llm.openai_compat import OpenAICompatibleProvider
 from adapters.memory.auth import InMemorySessionStore, InMemorySignInAttemptStore
 from adapters.memory.repositories import InMemoryRepositoriesCache
 from api.config import AppSettings
 from api.main import create_app
+from api.webhooks.github import BACKGROUND_TASKS
 from domain.auth import Session, SignInAttempt
-from domain.ports import Profile, Token
+from domain.ports import GitProvider, JobRepository, Profile, PullRequestContext, Token
 from domain.repositories import RepositoriesService, Repository
 from domain.tenancy import AccountType, Organization, OrganizationRole, User
 
@@ -242,6 +248,27 @@ def make_settings(session_ttl_seconds: int = 3600, state_ttl_seconds: int = 600)
 
 APP_SLUG = "review-agent"
 
+TEST_WEBHOOK_SECRET = "whsec_test_secret"
+
+
+def sign_webhook(body: bytes, secret: str = TEST_WEBHOOK_SECRET) -> str:
+    """The X-Hub-Signature-256 value GitHub would send over this body."""
+    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
+
+
+class RefusingGitProvider:
+    """The default GitProvider for API tests.
+
+    No API test may let webhook processing reach a forge it does not
+    control, so the default provider refuses to fetch anything.
+    """
+
+    async def fetch_pull_request(
+        self, installation_id: int, repo_full_name: str, number: int
+    ) -> PullRequestContext:
+        raise AssertionError("no vcs fake was injected for webhook processing")
+
 
 def make_repository(
     owner: str = "acme",
@@ -289,6 +316,9 @@ def build_test_app(
     *,
     repositories: RepositoriesService | None = None,
     session_ttl_seconds: int = 3600,
+    jobs: JobRepository | None = None,
+    vcs: GitProvider | None = None,
+    webhook_secret: str = TEST_WEBHOOK_SECRET,
 ) -> Any:
     service = repositories or RepositoriesService(
         gateway=FakeInstallationGateway(),
@@ -304,6 +334,9 @@ def build_test_app(
         clock=clock,
         repositories=service,
         app_slug=APP_SLUG,
+        jobs=jobs or MemoryJobStore(clock=clock),
+        vcs=vcs or RefusingGitProvider(),
+        webhook_secret=webhook_secret,
     )
 
 
@@ -354,3 +387,21 @@ def client(
     with TestClient(app, base_url=TEST_ORIGIN) as test_client:
         test_client.sessions = test_client_sessions  # type: ignore[attr-defined]
         yield test_client
+
+
+@pytest.fixture(autouse=True)
+async def drained_webhook_tasks() -> AsyncIterator[None]:
+    """Cancel webhook processing tasks a failed test may have parked.
+
+    A test that dies between its 202 and its own drain would otherwise
+    leave a held task in BACKGROUND_TASKS for the next test's drain to
+    hang on: cancel it, swallow any fallout, empty the set.
+    """
+    yield
+    parked = list(BACKGROUND_TASKS)
+    for task in parked:
+        task.cancel()
+    for task in parked:
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+    BACKGROUND_TASKS.clear()

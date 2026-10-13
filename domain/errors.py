@@ -88,3 +88,63 @@ class ForgeUnavailableError(ForgeError):
         super().__init__(f"forge '{provider}' unavailable: {reason}")
         self.provider = provider
         self.reason = reason
+
+
+class PrNotFoundError(ForgeError):
+    """The pull request no longer exists on the forge (HTTP 404).
+
+    Permanent, not retryable (docs/PIPELINE_SPEC.md §4.2): retrying cannot
+    bring a deleted pull request back. Mirrors ForgeUnavailableError.
+    """
+
+    def __init__(self, provider: str, reason: str) -> None:
+        super().__init__(f"forge '{provider}': {reason}")
+        self.provider = provider
+        self.reason = reason
+
+
+class WebhookSignatureError(ForgeError):
+    """A webhook delivery did not authenticate.
+
+    The message carries the provider and a reason only: never the secret, the
+    provided digest, or any part of the body (AGENTS.md hard rule 2).
+    """
+
+    def __init__(self, provider: str, reason: str) -> None:
+        super().__init__(f"{provider} webhook signature verification failed: {reason}")
+        self.provider = provider
+        self.reason = reason
+
+
+class WebhookPayloadError(ForgeError):
+    """A webhook payload did not match the provider's documented shape.
+
+    The message names the missing or malformed field only: never any payload
+    content (AGENTS.md hard rule 6).
+    """
+
+    def __init__(self, provider: str, reason: str) -> None:
+        super().__init__(f"{provider} webhook payload is malformed: {reason}")
+        self.provider = provider
+        self.reason = reason
+
+
+class DBConfigurationError(Exception):
+    """The database adapter cannot be built from the given settings."""
+
+
+class WorkerConfigurationError(Exception):
+    """The worker process cannot be built from its settings."""
+
+
+class DiffFormatError(Exception):
+    """The diff text is not a well-formed unified git diff.
+
+    The message carries a reason and the offending line number only — never
+    diff content (AGENTS.md hard rule 3).
+    """
+
+    def __init__(self, reason: str, line_number: int) -> None:
+        super().__init__(f"malformed diff at line {line_number}: {reason}")
+        self.reason = reason
+        self.line_number = line_number

@@ -22,3 +22,6 @@ venv/
 .env.*
 !.env.example
 *.egg-info/
+
+# Local override with real dev-App credentials; values live in .env
+docker-compose.override.yml
