@@ -21,7 +21,7 @@ from domain.errors import (
     LLMOutputError,
     ProviderUnavailableError,
 )
-from domain.models import Finding, ReviewResult
+from domain.models import Finding, ReviewResult, VerificationOutcome
 from domain.ports import ReviewRequest
 
 logger = logging.getLogger("adapters.llm")
@@ -136,7 +136,12 @@ class FallbackLLMGateway:
         result = await self._first_pass(request, rules)
         if self._verifier is None:
             return result
-        report = await self._verifier.verify(request, rules, result.findings)
+        try:
+            report = await self._verifier.verify(request, rules, result.findings)
+        except Exception as exc:
+            # The verifier must never fail the review: publish the first pass as it is.
+            logger.warning("verifier raised %s, keeping the first pass", type(exc).__name__)
+            return dataclasses.replace(result, verification=VerificationOutcome.FAILED)
         return dataclasses.replace(
             result,
             findings=report.findings,
