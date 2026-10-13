@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import time
 from collections.abc import Sequence
@@ -10,6 +11,8 @@ from adapters.llm.prompt import (
     build_messages,
     estimate_tokens,
 )
+from adapters.llm.reflection import VerificationReport
+from adapters.llm.rules import Rule, RuleSet, parse_rules
 from adapters.llm.schema import InvalidReviewJSONError, ParsedReview, parse_review
 from domain.errors import (
     AllProvidersFailedError,
@@ -18,7 +21,7 @@ from domain.errors import (
     LLMOutputError,
     ProviderUnavailableError,
 )
-from domain.models import ReviewResult
+from domain.models import Finding, ReviewResult
 from domain.ports import ReviewRequest
 
 logger = logging.getLogger("adapters.llm")
@@ -34,13 +37,22 @@ class ChatProvider(Protocol):
     async def complete(self, messages: Sequence[ChatMessage]) -> str: ...
 
 
-async def review_with_provider(provider: ChatProvider, request: ReviewRequest) -> ReviewResult:
+class FindingVerifier(Protocol):
+    async def verify(
+        self, request: ReviewRequest, rules: Sequence[Rule], findings: Sequence[Finding]
+    ) -> VerificationReport: ...
+
+
+async def review_with_provider(
+    provider: ChatProvider, request: ReviewRequest, rules: Sequence[Rule] = ()
+) -> ReviewResult:
     """One provider's review: request, validate, and retry once if the reply is not JSON."""
     started = time.monotonic()
-    messages = build_messages(request)
+    rule_ids = frozenset(rule.id for rule in rules)
+    messages = build_messages(request, rules)
     reply = await provider.complete(messages)
     try:
-        parsed = parse_review(reply)
+        parsed = parse_review(reply, rule_ids)
     except InvalidReviewJSONError as first_error:
         logger.warning(
             "provider=%s model=%s reply rejected (%s), retrying once",
@@ -49,7 +61,7 @@ async def review_with_provider(provider: ChatProvider, request: ReviewRequest) -
             first_error,
         )
         reply = await provider.complete(build_correction_messages(messages, reply))
-        parsed = _parse_final(provider, reply)
+        parsed = _parse_final(provider, reply, rule_ids)
 
     if parsed.trimmed_findings:
         logger.warning(
@@ -65,6 +77,13 @@ async def review_with_provider(provider: ChatProvider, request: ReviewRequest) -
             provider.name,
             provider.model,
             parsed.dropped_findings,
+        )
+    if parsed.unknown_rule_ids:
+        logger.warning(
+            "provider=%s model=%s cleared rule_id on %d finding(s) citing no listed rule",
+            provider.name,
+            provider.model,
+            parsed.unknown_rule_ids,
         )
     findings = parsed.review.to_domain()
     logger.info(
@@ -82,9 +101,9 @@ async def review_with_provider(provider: ChatProvider, request: ReviewRequest) -
     )
 
 
-def _parse_final(provider: ChatProvider, reply: str) -> ParsedReview:
+def _parse_final(provider: ChatProvider, reply: str, rule_ids: frozenset[str]) -> ParsedReview:
     try:
-        return parse_review(reply)
+        return parse_review(reply, rule_ids)
     except InvalidReviewJSONError as exc:
         raise LLMOutputError(provider.name, f"{exc} after a corrective retry") from None
 
@@ -97,22 +116,39 @@ class FallbackLLMGateway:
         providers: Sequence[ChatProvider],
         *,
         max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
+        verifier: FindingVerifier | None = None,
     ) -> None:
         if not providers:
             raise ValueError("FallbackLLMGateway needs at least one provider")
         self._providers = tuple(providers)
         self._max_input_tokens = max_input_tokens
+        self._verifier = verifier
 
     async def review(self, request: ReviewRequest) -> ReviewResult:
-        estimated = estimate_tokens(build_messages(request))
+        rule_set = parse_rules(request.rules_markdown)
+        _log_dropped_rules(rule_set)
+        rules = rule_set.rules
+        estimated = estimate_tokens(build_messages(request, rules))
         if estimated > self._max_input_tokens:
             too_large = LLMInputTooLargeError(estimated, self._max_input_tokens)
             logger.warning("%s", too_large)
             raise too_large
+        result = await self._first_pass(request, rules)
+        if self._verifier is None:
+            return result
+        report = await self._verifier.verify(request, rules, result.findings)
+        return dataclasses.replace(
+            result,
+            findings=report.findings,
+            verification=report.outcome,
+            rejected_by_verifier=report.rejected,
+        )
+
+    async def _first_pass(self, request: ReviewRequest, rules: Sequence[Rule]) -> ReviewResult:
         causes: list[LLMGatewayError] = []
         for index, provider in enumerate(self._providers):
             try:
-                return await review_with_provider(provider, request)
+                return await review_with_provider(provider, request, rules)
             except (ProviderUnavailableError, LLMOutputError) as exc:
                 causes.append(exc)
                 if index + 1 < len(self._providers):
@@ -122,3 +158,13 @@ class FallbackLLMGateway:
         error = AllProvidersFailedError(causes)
         logger.error("%s", error)
         raise error
+
+
+def _log_dropped_rules(rule_set: RuleSet) -> None:
+    if rule_set.dropped_suspicious or rule_set.dropped_over_limit:
+        logger.warning(
+            "repository rules: kept %d, dropped %d suspicious and %d over the limits",
+            len(rule_set.rules),
+            rule_set.dropped_suspicious,
+            rule_set.dropped_over_limit,
+        )

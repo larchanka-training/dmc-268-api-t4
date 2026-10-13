@@ -6,6 +6,7 @@ from adapters.llm.config import LLMSettings, ProviderSettings
 from adapters.llm.gateway import FallbackLLMGateway
 from adapters.llm.keys import Clock, KeyPool
 from adapters.llm.openai_compat import OpenAICompatibleProvider
+from adapters.llm.reflection import JevVerifier
 from domain.ports import LLMGateway
 
 
@@ -22,7 +23,28 @@ def build_gateway(
         _build_provider(provider, settings, transport=transport, clock=clock)
         for provider in configured
     ]
-    return FallbackLLMGateway(providers, max_input_tokens=settings.max_input_tokens)
+    return FallbackLLMGateway(
+        providers,
+        max_input_tokens=settings.max_input_tokens,
+        verifier=_build_verifier(settings, transport=transport),
+    )
+
+
+def _build_verifier(
+    settings: LLMSettings, *, transport: httpx.AsyncBaseTransport | None
+) -> JevVerifier | None:
+    reflection = settings.reflection
+    if not reflection.is_active:
+        return None
+    return JevVerifier(
+        api_key=reflection.api_key,
+        base_url=reflection.base_url,
+        model=reflection.model,
+        keep_threshold=reflection.keep_threshold,
+        timeout_seconds=reflection.timeout_seconds,
+        max_input_tokens=settings.max_input_tokens,
+        transport=transport,
+    )
 
 
 def _build_provider(
