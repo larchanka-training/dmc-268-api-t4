@@ -38,10 +38,13 @@ jobs:
           errors="$RUNNER_TEMP/smoke.err"
           # stdout holds the model's findings text: keep it out of the public log and summary.
           .venv/bin/python -m adapters.llm.smoke tests/fixtures/sql_injection.diff \
-            --title "Add a sortable users list" >"$result" 2>"$errors"
+            --title "Add a sortable users list" \
+            --rules tests/fixtures/rules/injection_rules.md >"$result" 2>"$errors" # TEMP
           status=$?
           # stderr: gateway INFO/WARNING lines (provider, model, duration, counts) or the error.
           cat "$errors"
+          # TEMP: safe projection for the #29 check, no finding text.
+          [ "$status" -eq 0 ] && .venv/bin/python -c "import json,sys; r=json.load(open(sys.argv[1])); print('verification', r['verification'], 'rejected_by_verifier', r['rejected_by_verifier'], 'provider', r['provider'], 'model', r['model']); [print('finding', f['severity'], f['category'], 'rule_id', f['rule_id'], 'noul', f['verifier_score']) for f in r['findings']]" "$result"
           if [ "$status" -ne 0 ]; then
             reason=$(grep -m1 -E '^(configuration error|review failed|cannot read)' "$errors" || echo "smoke exited with $status")
             {
