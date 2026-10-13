@@ -4,10 +4,17 @@ Pure domain code (AGENTS.md hard rule 1): no imports from `adapters/`,
 `api/`, `worker/` or any framework, and no I/O. The in-memory store and the
 future PostgreSQL queue both import this module, so the numbers below live
 exactly once and cannot drift between the two implementations.
+
+It also holds the progress events streamed by `GET /jobs/{id}/events`: the step set of
+docs/PIPELINE_SPEC.md §2 [D2]. The status set is `domain.ports.ReviewJobStatus`.
 """
 
 import random
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import StrEnum
+
+from domain.ports import ReviewJobStatus
 
 #: At most this many jobs per installation may be PROCESSING at once —
 #: fairness, not capacity (docs/BACKEND_ARCHITECTURE.md § Processes,
@@ -57,3 +64,104 @@ def clamp_for_storage(value: str, limit: int = 255) -> str:
     if len(value) <= limit:
         return value
     return value[:limit]
+
+
+#: Statuses a job never leaves (docs/WORKFLOW_DESIGN.md §7).
+TERMINAL_STATUSES = frozenset(
+    {
+        ReviewJobStatus.COMPLETED,
+        ReviewJobStatus.FAILED,
+        ReviewJobStatus.SUPERSEDED,
+        ReviewJobStatus.SKIPPED,
+    }
+)
+
+
+def is_terminal(status: ReviewJobStatus) -> bool:
+    return status in TERMINAL_STATUSES
+
+
+class JobStep(StrEnum):
+    # The same set as the ck_pr_review_steps_step constraint (migration 0001).
+    CLAIMED = "CLAIMED"
+    AUTH = "AUTH"
+    FETCH_DIFF = "FETCH_DIFF"
+    BUILD_CONTEXT = "BUILD_CONTEXT"
+    REDACT = "REDACT"
+    GATE = "GATE"
+    LLM_CALL = "LLM_CALL"
+    POSTPROCESS = "POSTPROCESS"
+    POST_FEEDBACK = "POST_FEEDBACK"
+    METER = "METER"
+
+
+class StepStatus(StrEnum):
+    RUNNING = "RUNNING"
+    OK = "OK"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+
+
+class UiStage(StrEnum):
+    """The stages of the dashboard's progress bar.
+
+    Each event carries both its step and its stage, so the console draws the bar
+    without knowing the step set.
+    """
+
+    COLLECTING_CONTEXT = "collecting_context"
+    REVIEWING = "reviewing"
+    VALIDATING = "validating"
+    PUBLISHING = "publishing"
+
+
+_STAGE_OF_STEP = {
+    JobStep.CLAIMED: UiStage.COLLECTING_CONTEXT,
+    JobStep.AUTH: UiStage.COLLECTING_CONTEXT,
+    JobStep.FETCH_DIFF: UiStage.COLLECTING_CONTEXT,
+    JobStep.BUILD_CONTEXT: UiStage.COLLECTING_CONTEXT,
+    JobStep.REDACT: UiStage.COLLECTING_CONTEXT,
+    JobStep.GATE: UiStage.REVIEWING,
+    JobStep.LLM_CALL: UiStage.REVIEWING,
+    JobStep.POSTPROCESS: UiStage.VALIDATING,
+    JobStep.POST_FEEDBACK: UiStage.PUBLISHING,
+    # Metering happens after the comments are up; to the user it is still publishing.
+    JobStep.METER: UiStage.PUBLISHING,
+}
+
+
+def ui_stage(step: JobStep) -> UiStage:
+    return _STAGE_OF_STEP[step]
+
+
+@dataclass(frozen=True, slots=True)
+class JobEvent:
+    """One change to a job: its status moved, or a step started or finished.
+
+    `seq` increases per job and is the SSE event id. Shape only: no diff, prompt or model
+    text, the same rule as the step rows (WORKFLOW_DESIGN.md, Step tracing).
+    """
+
+    seq: int
+    job_id: str
+    at: datetime
+    status: ReviewJobStatus
+    step: JobStep | None = None
+    step_status: StepStatus | None = None
+    attempt: int = 0
+    error_kind: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JobSnapshot:
+    """A job's state at one moment: what a client draws before following events.
+
+    `account_id` is the GitHub organisation id of the owning account; the stream is
+    served only to sessions that belong to it.
+    """
+
+    job_id: str
+    account_id: str
+    status: ReviewJobStatus
+    last_seq: int
+    steps: tuple[JobEvent, ...] = ()

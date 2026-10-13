@@ -22,23 +22,46 @@ never be set outside a developer machine.
 import logging
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime
 
 from domain.diff import parse_diff, split_into_chunks
 from domain.diff_filter import filter_files
 from domain.errors import (
+    AllProvidersFailedError,
     DiffFormatError,
     ForgeUnavailableError,
     InstallationGoneError,
+    LLMInputTooLargeError,
+    LLMOutputError,
     PrNotFoundError,
+    ProviderUnavailableError,
 )
 from domain.ports import (
     ClaimedJob,
     GitProvider,
     JobRepository,
     JobStats,
+    LLMGateway,
+    PullRequestTarget,
     ReviewJobStatus,
+    ReviewPublisher,
+    ReviewRequest,
 )
+from domain.publishing import DEFAULT_POLICY, CommentableLines, PublishPolicy, build_plan
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewStage:
+    """What turns a parsed diff into a posted review: the LLM, then the forge.
+
+    Optional: without it the job stops after fetching and parsing the diff (tests and
+    the in-memory dev mode)."""
+
+    gateway: LLMGateway
+    publisher: ReviewPublisher
+    policy: PublishPolicy = DEFAULT_POLICY
+
 
 #: Dev-only escape hatch: when "1", the fetched diff text is logged verbatim
 #: after the fetch. This knowingly deviates from AGENTS.md hard rule 3 (raw
@@ -70,6 +93,12 @@ def _classify(error: Exception) -> tuple[str, bool]:
         return "pr_not_found", False
     if isinstance(error, DiffFormatError):
         return "diff_parse_failed", False
+    if isinstance(error, (AllProvidersFailedError, ProviderUnavailableError)):
+        return "provider_unavailable", True
+    if isinstance(error, LLMOutputError):
+        return "llm_output_invalid", False
+    if isinstance(error, LLMInputTooLargeError):
+        return "skip_diff_too_large", False
     return "internal_error", False
 
 
@@ -78,9 +107,11 @@ async def process_claimed_job(
     vcs: GitProvider,
     jobs: JobRepository,
     *,
+    review: ReviewStage | None = None,
     logger: logging.Logger | None = None,
 ) -> bool:
-    """Fetch and parse one claimed pull request diff; record stats or failure.
+    """Fetch and parse one claimed pull request diff, review and publish it when a
+    review stage is given; record stats or failure.
 
     Returns True only when the job reached COMPLETED. Returns False when the
     lease was lost mid-flight (a superseding delivery or the reaper owns the
@@ -130,6 +161,37 @@ async def process_claimed_job(
             chunks_total=sum(len(split_into_chunks(diff)) for diff in filtered.kept),
             skipped_counts=tuple((reason.value, count) for reason, count in filtered.skip_counts),
         )
+        if review is not None:
+            # LLM_CALL can take minutes (two 300 s attempts plus a fallback): renew the
+            # lease before it and again before posting, and stop if it was lost.
+            if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
+                return False
+            result = await review.gateway.review(
+                ReviewRequest(
+                    diff_text=context.diff_text,
+                    pr_title=context.title,
+                    pr_description=context.description,
+                )
+            )
+            plan = build_plan(
+                result.findings,
+                model_summary=result.summary,
+                lines=CommentableLines.from_files(filtered.kept),
+                policy=review.policy,
+            )
+            if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
+                return False
+            owner, repo = payload.repo_full_name.split("/", 1)
+            await review.publisher.publish(
+                PullRequestTarget(
+                    installation_id=payload.installation_id,
+                    owner=owner,
+                    repo=repo,
+                    number=payload.pr_number,
+                    head_sha=context.head_sha,
+                ),
+                plan,
+            )
     except Exception as err:
         error_kind, retryable = _classify(err)
         return await _record_failure(

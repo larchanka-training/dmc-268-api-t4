@@ -103,6 +103,30 @@ class PrNotFoundError(ForgeError):
         self.reason = reason
 
 
+class ForgeRateLimitedError(ForgeUnavailableError):
+    """The forge throttled us (429, or a 403 secondary rate limit). Retryable.
+
+    `retry_after_seconds` is the wait the forge asked for, when it gave one.
+    """
+
+    def __init__(self, provider: str, retry_after_seconds: int | None) -> None:
+        super().__init__(provider, "rate limited")
+        self.retry_after_seconds = retry_after_seconds
+
+
+class ForgePermissionError(ForgeError):
+    """The installation lacks a permission the call needs. Permanent until an admin acts.
+
+    For publishing that is `Pull requests: write` and `Checks: write` on the GitHub App;
+    after the App's permissions are raised, every installation must accept them.
+    """
+
+    def __init__(self, provider: str, reason: str) -> None:
+        super().__init__(f"forge '{provider}' refused for lack of permission: {reason}")
+        self.provider = provider
+        self.reason = reason
+
+
 class WebhookSignatureError(ForgeError):
     """A webhook delivery did not authenticate.
 

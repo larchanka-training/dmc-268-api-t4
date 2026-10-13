@@ -300,6 +300,44 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /jobs/{job_id}/events:
+    get:
+      tags: [jobs]
+      summary: Live progress of one job (Server-Sent Events)
+      description: |
+        An addition to polling `/jobs?status=active`, not a replacement (PIPELINE_SPEC.md
+        §7.5). The stream opens with a `snapshot` event, then sends `step` and `status`
+        events as the worker writes them, `: ping` comments every 15 s while idle, and an
+        `end` event once the job is terminal, after which the server closes it. Every
+        event's `id` is the job's event sequence number. A reconnect gets a fresh
+        snapshot, so `Last-Event-ID` is not needed.
+
+        `step` and `status` events carry a `JobEvent`; `snapshot` carries a
+        `JobEventsSnapshot`; `end` carries `{"status": <terminal JobStatus>}`.
+      parameters:
+        - $ref: "#/components/parameters/job_id"
+      responses:
+        "200":
+          description: An event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |
+                retry: 3000
+
+                id: 4
+                event: snapshot
+                data: {"job_id":"…","status":"PROCESSING","seq":4,"steps":[…]}
+
+                id: 5
+                event: step
+                data: {"job_id":"…","seq":5,"at":"2026-10-11T12:00:00+00:00","status":"PROCESSING","step":"LLM_CALL","step_status":"RUNNING","stage":"reviewing","attempt":0,"error_kind":null}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /jobs/{job_id}/findings/{finding_id}/context:
     get:
       tags: [jobs]
@@ -857,6 +895,47 @@ components:
           description: |
             Counts and digests only — never diff text, prompt or model reply. For example
             `{"model": "...", "input_tokens": 41233, "files": 18, "findings_dropped": 2}`.
+
+    JobEvent:
+      type: object
+      required: [job_id, seq, at, status, step, step_status, stage, attempt, error_kind]
+      description: One change to a job. Shape only, never diff, prompt or model text.
+      properties:
+        job_id: { type: string }
+        seq: { type: integer, minimum: 1 }
+        at: { type: string, format: date-time }
+        status: { $ref: "#/components/schemas/JobStatus" }
+        step:
+          type: [string, "null"]
+          enum: [CLAIMED, AUTH, FETCH_DIFF, BUILD_CONTEXT, REDACT, GATE, LLM_CALL, POSTPROCESS, POST_FEEDBACK, METER, null]
+          description: Null on a status-only event.
+        step_status:
+          type: [string, "null"]
+          enum: [RUNNING, OK, FAILED, SKIPPED, null]
+        stage:
+          type: [string, "null"]
+          enum: [collecting_context, reviewing, validating, publishing, null]
+          description: |
+            The console's progress-bar stage for this step: CLAIMED…REDACT are
+            collecting_context, GATE and LLM_CALL reviewing, POSTPROCESS validating,
+            POST_FEEDBACK and METER publishing.
+        attempt: { type: integer, minimum: 0 }
+        error_kind: { type: [string, "null"] }
+
+    JobEventsSnapshot:
+      type: object
+      required: [job_id, status, seq, steps]
+      properties:
+        job_id: { type: string }
+        status: { $ref: "#/components/schemas/JobStatus" }
+        seq:
+          type: integer
+          minimum: 0
+          description: The last event this snapshot covers.
+        steps:
+          type: array
+          description: The latest state of each step, one per (step, attempt).
+          items: { $ref: "#/components/schemas/JobEvent" }
 
     Finding:
       type: object

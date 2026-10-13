@@ -2,12 +2,17 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from domain.auth import Session, SignInAttempt
 from domain.models import ReviewResult
+from domain.publishing import PublishPlan
 from domain.repositories import Repository
 from domain.tenancy import Organization, User
+
+if TYPE_CHECKING:
+    # domain.jobs imports ReviewJobStatus from here; a runtime import would be circular.
+    from domain.jobs import JobEvent, JobSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,3 +343,73 @@ class JobRepository(Protocol):
         ...
 
     async def get(self, job_id: str) -> ReviewJob | None: ...
+
+
+# --- Publishing and job progress -------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestTarget:
+    """Where a review is posted. Everything a retry needs to re-authenticate is here."""
+
+    installation_id: int
+    owner: str
+    repo: str
+    number: int
+    head_sha: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExistingCheckRun:
+    """The check run an earlier job for this pull request left (`external_check_id`).
+
+    A check run belongs to one commit, so it is updated in place only while the head SHA
+    is unchanged. After a push the adapter creates a new one on the new head.
+    """
+
+    id: int
+    head_sha: str
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedComment:
+    fingerprint: str
+    external_comment_id: int | None
+    url: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PublishOutcome:
+    """What reached the forge: the check run, the review and each comment's id."""
+
+    check_run_id: int
+    check_run_url: str | None
+    review_id: int | None
+    review_url: str | None
+    comments: tuple[PublishedComment, ...]
+    # True when the forge refused the inline comments and they went into the review
+    # body instead (a position GitHub would not accept).
+    inline_fallback: bool = False
+
+
+class ReviewPublisher(Protocol):
+    """Posts a planned review on one forge."""
+
+    async def publish(
+        self,
+        target: PullRequestTarget,
+        plan: PublishPlan,
+        existing_check: ExistingCheckRun | None = None,
+    ) -> PublishOutcome: ...
+
+
+class JobEventsSource(Protocol):
+    """Where the API reads job progress for the SSE stream."""
+
+    async def snapshot(self, job_id: str) -> "JobSnapshot | None": ...
+
+    async def next_events(
+        self, job_id: str, after_seq: int, timeout_seconds: float
+    ) -> "tuple[JobEvent, ...]":
+        """Events with seq > after_seq; waits up to the timeout, then returns ()."""
+        ...

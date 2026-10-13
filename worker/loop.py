@@ -24,7 +24,7 @@ from domain.ports import GitProvider, JobRepository
 from worker.config import DEFAULT_POLL_INTERVAL_SECONDS, WorkerSettings
 from worker.listener import listen_for_jobs
 from worker.periodic import reaper_loop
-from worker.process import process_claimed_job
+from worker.process import ReviewStage, process_claimed_job
 
 #: The production listener plus any test fake: takes the asyncpg DSN and
 #: the shared wake event, runs until cancelled.
@@ -36,6 +36,7 @@ async def claim_and_process_once(
     vcs: GitProvider,
     worker_id: str,
     *,
+    review: ReviewStage | None = None,
     logger: logging.Logger | None = None,
 ) -> bool:
     """One claim attempt (WORKFLOW_DESIGN.md §2 Step 4); process if won.
@@ -49,7 +50,7 @@ async def claim_and_process_once(
     if claimed is None:
         return False
     log = logger if logger is not None else logging.getLogger(__name__)
-    await process_claimed_job(claimed, vcs, store, logger=log)
+    await process_claimed_job(claimed, vcs, store, review=review, logger=log)
     return True
 
 
@@ -61,6 +62,7 @@ async def worker_loop(
     stop: asyncio.Event,
     *,
     poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    review: ReviewStage | None = None,
     logger: logging.Logger | None = None,
 ) -> None:
     """One concurrency slot's loop (docs/BACKEND_ARCHITECTURE.md § Processes).
@@ -77,7 +79,9 @@ async def worker_loop(
     while not stop.is_set():
         while not stop.is_set():
             try:
-                processed = await claim_and_process_once(store, vcs, worker_id, logger=log)
+                processed = await claim_and_process_once(
+                    store, vcs, worker_id, review=review, logger=log
+                )
             except Exception as err:
                 # A store error (database restarting) must not kill the
                 # slot: log it, fall back to the timed wait, and the next
@@ -106,6 +110,7 @@ async def run_worker(
     listener: ListenerFactory | None = None,
     engine: AsyncEngine | None = None,
     store: JobRepository | None = None,
+    review: ReviewStage | None = None,
 ) -> None:
     """Run one worker process until ``stop`` is set, then drain and exit.
 
@@ -140,6 +145,7 @@ async def run_worker(
                 wake,
                 stop,
                 poll_interval=settings.poll_interval_seconds,
+                review=review,
                 logger=log,
             ),
             name=f"worker-loop-{index}",

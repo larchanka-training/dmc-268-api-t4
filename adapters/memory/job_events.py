@@ -1,0 +1,69 @@
+"""In-memory `JobEventsSource`: events recorded in this process.
+
+Serves tests and single-process runs. The worker is a separate process and records
+nothing here, so in the deployed API every stream answers 404.
+"""
+
+import asyncio
+from dataclasses import replace
+
+from domain.jobs import JobEvent, JobSnapshot
+from domain.ports import ReviewJobStatus
+
+
+class InMemoryJobEventsSource:
+    def __init__(self) -> None:
+        self._jobs: dict[str, JobSnapshot] = {}
+        self._events: dict[str, list[JobEvent]] = {}
+        self._changed = asyncio.Condition()
+
+    def create(
+        self, job_id: str, account_id: str, status: ReviewJobStatus = ReviewJobStatus.QUEUED
+    ) -> None:
+        self._jobs[job_id] = JobSnapshot(
+            job_id=job_id, account_id=account_id, status=status, last_seq=0
+        )
+        self._events[job_id] = []
+
+    async def record(self, event: JobEvent) -> None:
+        """Append an event and wake every waiting stream."""
+        async with self._changed:
+            self.record_nowait(event)
+            self._changed.notify_all()
+
+    def record_nowait(self, event: JobEvent) -> None:
+        """Synchronous variant for setting up state before a stream opens."""
+        snapshot = self._jobs[event.job_id]
+        if event.seq <= snapshot.last_seq:
+            raise ValueError(f"event seq must increase: {event.seq} after {snapshot.last_seq}")
+        self._events[event.job_id].append(event)
+        steps = snapshot.steps
+        if event.step is not None:
+            # Keep one row per (step, attempt): the latest state of that step.
+            steps = tuple(
+                existing
+                for existing in steps
+                if (existing.step, existing.attempt) != (event.step, event.attempt)
+            ) + (event,)
+        self._jobs[event.job_id] = replace(
+            snapshot, status=event.status, last_seq=event.seq, steps=steps
+        )
+
+    async def snapshot(self, job_id: str) -> JobSnapshot | None:
+        return self._jobs.get(job_id)
+
+    async def next_events(
+        self, job_id: str, after_seq: int, timeout_seconds: float
+    ) -> tuple[JobEvent, ...]:
+        async with self._changed:
+            try:
+                await asyncio.wait_for(
+                    self._changed.wait_for(lambda: bool(self._pending(job_id, after_seq))),
+                    timeout_seconds,
+                )
+            except TimeoutError:
+                return ()
+            return self._pending(job_id, after_seq)
+
+    def _pending(self, job_id: str, after_seq: int) -> tuple[JobEvent, ...]:
+        return tuple(event for event in self._events.get(job_id, ()) if event.seq > after_seq)

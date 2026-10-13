@@ -376,6 +376,14 @@ the forge.
 If the team rejects this, the diff viewer on the frontend has no data source, and the
 console shows findings as plain text. That is a product decision, not a technical one.
 
+### 7.5 Live progress over SSE, alongside polling **[D7]**
+
+`GET /jobs/{job_id}/events` streams a job's status and step changes as Server-Sent Events.
+It adds to polling and does not replace it. Each event carries the backend `step` and a
+dashboard `stage` (`collecting_context`, `reviewing`, `validating`, `publishing`), so the
+console's progress bar does not have to know the step set. The API reads events through
+`JobEventsSource`; the format is in [003-publisher-and-sse.md](./003-publisher-and-sse.md).
+
 ---
 
 ## 8. Degradation
@@ -412,6 +420,7 @@ covered by a throughput alert rather than by the UI
 | **D4** | Persist `severity` and `category` on a published finding | migration `0001`, dashboard | No badges, no ordering, no per-severity reporting |
 | **D5** | Persist PR title, author login, head and base ref; return a ready `external_url` | migration `0001`, API | An unreadable review list and forge URL logic in the frontend |
 | **D6** | Two on-demand endpoints serve diff context; nothing is stored | worker/API, dashboard | The diff viewer has no data source |
+| **D7** | SSE stream of job events in addition to polling; events carry a dashboard `stage` | API, dashboard No live progress; the console keeps polling |
 
 D1 is already the implemented design and needs only confirmation. D4 and D5 must be
 settled **before migration `0001` is applied**, which
