@@ -314,3 +314,18 @@ Still open here:
 3. **Revision garbage collection.** Revision rows are immutable and shared, so they
    are only collectable once no job references them — which is really a question
    about `job_retention_days`, not about config.
+
+## 8. Environment: review verifier
+
+The reflection pass of the LLM gateway (issue #29, `adapters/llm/reflection.py`) is
+configured by the process environment, not by the table above: it is a platform setting,
+and its key is a secret. Details: [specs/llm-gateway.md § Rules and reflection](./specs/llm-gateway.md).
+
+| Variable | Default | Meaning |
+| :--- | :--- | :--- |
+| `LLM_REFLECTION_ENABLED` | `true` | Turns the verifier off when `false`. Set it to `false` for private repositories of others: the diff is sent to TypeSafe |
+| `TYPESAFE_API_KEY` | — | Secret. Without it the verifier is disabled. Never logged, never in exceptions or `repr` |
+| `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | The request goes to `{base}/v1/systemone` |
+| `TYPESAFE_MODEL` | `jev-latest` | JEV model id |
+| `REFLECTION_KEEP_THRESHOLD` | `0.5` | A finding is kept when JEV's `noul` is at least this, from 0 to 1 |
+| `REFLECTION_TIMEOUT_SECONDS` | `15` | One request per review, no retries; on timeout every finding is kept |
