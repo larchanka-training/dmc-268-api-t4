@@ -38,7 +38,7 @@ jobs:
           errors="$RUNNER_TEMP/smoke.err"
           # stdout holds the model's findings text: keep it out of the public log and summary.
           .venv/bin/python -m adapters.llm.smoke tests/fixtures/sql_injection.diff \
-            --title "Add a sortable users list" >"$result" 2>"$errors"
+            --title "Add a sortable users list" --rules tests/fixtures/rules/injection_rules.md >"$result" 2>"$errors"
           status=$?
           # stderr: gateway INFO/WARNING lines (provider, model, duration, counts) or the error.
           cat "$errors"
