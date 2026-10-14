@@ -1,0 +1,18 @@
+diff --git a/app/tickets.py b/app/tickets.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/tickets.py
+@@ -0,0 +1,12 @@
++from dataclasses import dataclass
++
++
++@dataclass
++class Ticket:
++    id: int
++    subject: str
++
++
++def add_tag(ticket: Ticket, tag: str, tags: list[str] = []) -> list[str]:
++    tags.append(f"{ticket.id}:{tag}")
++    return tags

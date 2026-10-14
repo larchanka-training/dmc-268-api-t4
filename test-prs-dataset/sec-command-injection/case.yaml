@@ -1,0 +1,13 @@
+id: sec-command-injection
+intent: "detection: a file name reaches a shell command line"
+pattern: "CWE-78 OS command injection through shell=True"
+metrics: detection
+fixture: change.diff
+title: "Generate thumbnails"
+description: "Shells out to ImageMagick for a 200px thumbnail."
+expected:
+  - path: app/thumbs.py
+    line: 9
+    side: new
+    category: security
+    severity: critical

@@ -1,0 +1,13 @@
+id: sec-jwt-signature-skipped
+intent: "detection: the token is decoded with signature verification switched off"
+pattern: "CWE-347 improper verification of a cryptographic signature"
+metrics: detection
+fixture: change.diff
+title: "Read the caller from the bearer token"
+description: "Pulls the user id out of the JWT for the audit log."
+expected:
+  - path: app/identity.py
+    line: 11
+    side: new
+    category: security
+    severity: critical

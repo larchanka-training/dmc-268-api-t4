@@ -1,0 +1,13 @@
+id: cor-swallowed-capture-error
+intent: "detection: a failed payment capture is silenced and the order is marked paid"
+pattern: "exception suppressed around a side effect whose result is relied on"
+metrics: detection
+fixture: change.diff
+title: "Mark orders paid after capture"
+description: "Captures the authorised payment, then flips the order to paid."
+expected:
+  - path: app/orders.py
+    line: 12
+    side: new
+    category: correctness
+    severity: high

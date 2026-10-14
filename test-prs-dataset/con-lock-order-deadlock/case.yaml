@@ -1,0 +1,13 @@
+id: con-lock-order-deadlock
+intent: "detection: two functions take the same two locks in opposite order"
+pattern: "lock-ordering deadlock"
+metrics: detection
+fixture: change.diff
+title: "Audit every transfer"
+description: "Takes the audit lock while a transfer is in flight."
+expected:
+  - path: app/transfers.py
+    line: 18
+    side: new
+    category: concurrency
+    severity: high

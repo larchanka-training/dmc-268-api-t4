@@ -1,0 +1,13 @@
+id: sec-path-traversal
+intent: "detection: a user-supplied file name is joined onto a directory without checks"
+pattern: "CWE-22 path traversal in a download endpoint"
+metrics: detection
+fixture: change.diff
+title: "Serve uploaded files"
+description: "Adds GET /files/{name} so users can fetch what they uploaded."
+expected:
+  - path: app/files.py
+    line: 21
+    side: new
+    category: security
+    severity: high

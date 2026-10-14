@@ -1,0 +1,21 @@
+diff --git a/app/orders.py b/app/orders.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/orders.py
+@@ -0,0 +1,15 @@
++import contextlib
++
++from app.payments import gateway
++
++
++class Order:
++    payment_id: str
++    status: str = "authorised"
++
++
++def settle(order: Order) -> Order:
++    with contextlib.suppress(Exception):
++        gateway.capture(order.payment_id)
++    order.status = "paid"
++    return order

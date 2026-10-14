@@ -1,0 +1,8 @@
+id: fmt-wide-multi-file-change
+intent: "schema-only: a four-file change with several small issues, to stress the output format with a long findings list; nothing is scored beyond validity and drops"
+pattern: "wide change that tempts the model into many findings"
+metrics: schema-only
+fixture: change.diff
+title: "Add notification preferences"
+description: "Users choose how they are notified. Touches the model, service, API and tests."
+expected: []

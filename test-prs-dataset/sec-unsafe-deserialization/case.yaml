@@ -1,0 +1,13 @@
+id: sec-unsafe-deserialization
+intent: "detection: request-controlled bytes reach pickle.loads"
+pattern: "CWE-502 deserialization of untrusted data"
+metrics: detection
+fixture: change.diff
+title: "Restore wizard state from the client"
+description: "The wizard posts its state back so the server stays stateless."
+expected:
+  - path: app/wizard.py
+    line: 16
+    side: new
+    category: security
+    severity: critical
