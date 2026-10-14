@@ -12,6 +12,7 @@ from adapters.llm.prompt import (
     estimate_tokens,
 )
 from adapters.llm.reflection import VerificationReport
+from adapters.llm.rule_screen import RuleScreenReport
 from adapters.llm.rules import Rule, RuleSet, parse_rules
 from adapters.llm.schema import InvalidReviewJSONError, ParsedReview, parse_review
 from domain.errors import (
@@ -41,6 +42,10 @@ class FindingVerifier(Protocol):
     async def verify(
         self, request: ReviewRequest, rules: Sequence[Rule], findings: Sequence[Finding]
     ) -> VerificationReport: ...
+
+
+class RuleScreen(Protocol):
+    async def screen(self, rules: Sequence[Rule]) -> RuleScreenReport: ...
 
 
 async def review_with_provider(
@@ -117,17 +122,20 @@ class FallbackLLMGateway:
         *,
         max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
         verifier: FindingVerifier | None = None,
+        rule_screen: RuleScreen | None = None,
     ) -> None:
         if not providers:
             raise ValueError("FallbackLLMGateway needs at least one provider")
         self._providers = tuple(providers)
         self._max_input_tokens = max_input_tokens
         self._verifier = verifier
+        self._rule_screen = rule_screen
 
     async def review(self, request: ReviewRequest) -> ReviewResult:
         rule_set = parse_rules(request.rules_markdown)
-        _log_dropped_rules(rule_set)
-        rules = rule_set.rules
+        screen = await self._screen_rules(rule_set.rules)
+        _log_rules(rule_set, screen)
+        rules = screen.rules
         estimated = estimate_tokens(build_messages(request, rules))
         if estimated > self._max_input_tokens:
             too_large = LLMInputTooLargeError(estimated, self._max_input_tokens)
@@ -149,6 +157,28 @@ class FallbackLLMGateway:
             rejected_by_verifier=report.rejected,
         )
 
+    async def _screen_rules(self, rules: Sequence[Rule]) -> RuleScreenReport:
+        unchanged = tuple(rules)
+        if not rules:
+            return RuleScreenReport(VerificationOutcome.SKIPPED, unchanged)
+        if self._rule_screen is None:
+            logger.warning(
+                "rule screen disabled (no TypeSafe key or LLM_REFLECTION_ENABLED=false), "
+                "%d rule(s) checked by patterns only",
+                len(rules),
+            )
+            return RuleScreenReport(VerificationOutcome.DISABLED, unchanged)
+        try:
+            return await self._rule_screen.screen(rules)
+        except Exception as exc:
+            # The screen must never fail the review: fall back to the pattern filter alone.
+            logger.warning(
+                "rule screen raised %s, %d rule(s) checked by patterns only",
+                type(exc).__name__,
+                len(rules),
+            )
+            return RuleScreenReport(VerificationOutcome.FAILED, unchanged)
+
     async def _first_pass(self, request: ReviewRequest, rules: Sequence[Rule]) -> ReviewResult:
         causes: list[LLMGatewayError] = []
         for index, provider in enumerate(self._providers):
@@ -165,11 +195,18 @@ class FallbackLLMGateway:
         raise error
 
 
-def _log_dropped_rules(rule_set: RuleSet) -> None:
-    if rule_set.dropped_suspicious or rule_set.dropped_over_limit:
-        logger.warning(
-            "repository rules: kept %d, dropped %d suspicious and %d over the limits",
-            len(rule_set.rules),
-            rule_set.dropped_suspicious,
-            rule_set.dropped_over_limit,
-        )
+def _log_rules(rule_set: RuleSet, screen: RuleScreenReport) -> None:
+    """Counters only: rule texts come from the repository and never reach the logs."""
+    dropped = rule_set.dropped_suspicious + screen.dropped + rule_set.dropped_over_limit
+    if not screen.rules and not dropped:
+        return
+    logger.log(
+        logging.WARNING if dropped else logging.INFO,
+        "repository rules: kept %d, dropped %d by pattern, %d by JEV (screen %s), "
+        "%d over the limits",
+        len(screen.rules),
+        rule_set.dropped_suspicious,
+        screen.dropped,
+        screen.outcome,
+        rule_set.dropped_over_limit,
+    )

@@ -21,6 +21,7 @@ DEFAULT_TYPESAFE_BASE_URL = "https://api.typesafe.ai"
 DEFAULT_TYPESAFE_MODEL = "jev-latest"
 DEFAULT_REFLECTION_KEEP_THRESHOLD = 0.5
 DEFAULT_REFLECTION_TIMEOUT_SECONDS = 15.0
+DEFAULT_RULES_SCREEN_THRESHOLD = 0.5
 
 _TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
 _FALSE_VALUES = frozenset({"false", "0", "no", "off"})
@@ -40,7 +41,8 @@ class ProviderSettings:
 
 @dataclass(frozen=True, slots=True)
 class ReflectionSettings:
-    """The second pass: JEV (TypeSafe System One) scores every first-pass finding."""
+    """JEV (TypeSafe System One): screens repository rules before the first pass and scores
+    every first-pass finding after it."""
 
     enabled: bool = False
     api_key: str = field(default="", repr=False)
@@ -48,6 +50,7 @@ class ReflectionSettings:
     model: str = DEFAULT_TYPESAFE_MODEL
     keep_threshold: float = DEFAULT_REFLECTION_KEEP_THRESHOLD
     timeout_seconds: float = DEFAULT_REFLECTION_TIMEOUT_SECONDS
+    rules_screen_threshold: float = DEFAULT_RULES_SCREEN_THRESHOLD
 
     @property
     def is_active(self) -> bool:
@@ -149,6 +152,12 @@ class _EnvReader:
                 DEFAULT_REFLECTION_TIMEOUT_SECONDS,
                 minimum=0.0,
                 exclusive=True,
+            ),
+            rules_screen_threshold=self._float(
+                "RULES_SCREEN_THRESHOLD",
+                DEFAULT_RULES_SCREEN_THRESHOLD,
+                minimum=0.0,
+                maximum=1.0,
             ),
         )
 

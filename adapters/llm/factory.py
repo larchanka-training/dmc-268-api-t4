@@ -7,6 +7,7 @@ from adapters.llm.gateway import FallbackLLMGateway
 from adapters.llm.keys import Clock, KeyPool
 from adapters.llm.openai_compat import OpenAICompatibleProvider
 from adapters.llm.reflection import JevVerifier
+from adapters.llm.rule_screen import JevRuleScreen
 from domain.ports import LLMGateway
 
 
@@ -27,6 +28,23 @@ def build_gateway(
         providers,
         max_input_tokens=settings.max_input_tokens,
         verifier=_build_verifier(settings, transport=transport),
+        rule_screen=_build_rule_screen(settings, transport=transport),
+    )
+
+
+def _build_rule_screen(
+    settings: LLMSettings, *, transport: httpx.AsyncBaseTransport | None
+) -> JevRuleScreen | None:
+    reflection = settings.reflection
+    if not reflection.is_active:
+        return None
+    return JevRuleScreen(
+        api_key=reflection.api_key,
+        base_url=reflection.base_url,
+        model=reflection.model,
+        drop_threshold=reflection.rules_screen_threshold,
+        timeout_seconds=reflection.timeout_seconds,
+        transport=transport,
     )
 
 

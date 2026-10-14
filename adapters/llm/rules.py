@@ -4,8 +4,10 @@ Interim format until the tech lead's RULES_FORMAT_SPEC.md (#31): a `#`/`##` head
 section, every list item under it is one rule, and everything outside list items is ignored.
 """
 
+import dataclasses
 import re
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 # Limits on what a repository may feed into the prompt; everything over them is dropped.
@@ -14,7 +16,8 @@ RULES_MAX_CHARS = 8000
 DEFAULT_SECTION = "General"
 
 # Rules that look like attempts to steer the model are dropped whole. This is a second line
-# of defence: the first is that rules only ever travel as marked, untrusted data.
+# of defence: the first is that rules only ever travel as marked, untrusted data. The
+# patterns only know English and Russian; the JEV rule screen (rule_screen.py) covers the rest.
 SUSPICIOUS_RULE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -113,6 +116,17 @@ def _split_items(markdown: str) -> list[tuple[str, str]]:
     return items
 
 
+def rule_id(index: int) -> str:
+    return f"R{index}"
+
+
+def renumber_rules(rules: Sequence[Rule]) -> tuple[Rule, ...]:
+    """Ids R1..Rn in order, so the prompt never shows gaps left by dropped rules."""
+    return tuple(
+        dataclasses.replace(rule, id=rule_id(index)) for index, rule in enumerate(rules, start=1)
+    )
+
+
 def parse_rules(markdown: str | None) -> RuleSet:
     """Turn rules.md into numbered rules, enforcing the heuristic filter and the limits."""
     if not markdown or not markdown.strip():
@@ -131,5 +145,5 @@ def parse_rules(markdown: str | None) -> RuleSet:
             over_limit += 1
             continue
         total_chars += len(rule_text)
-        kept.append(Rule(id=f"R{len(kept) + 1}", section=section, text=rule_text))
+        kept.append(Rule(id=rule_id(len(kept) + 1), section=section, text=rule_text))
     return RuleSet(rules=tuple(kept), dropped_suspicious=suspicious, dropped_over_limit=over_limit)
