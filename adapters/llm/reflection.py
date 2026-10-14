@@ -11,10 +11,8 @@ import logging
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict, ValidationError
 
 from adapters.llm.config import (
     DEFAULT_MAX_INPUT_TOKENS,
@@ -23,6 +21,7 @@ from adapters.llm.config import (
     DEFAULT_TYPESAFE_BASE_URL,
     DEFAULT_TYPESAFE_MODEL,
 )
+from adapters.llm.jev import JevClient, JevResponse, describe_jev_error
 from adapters.llm.prompt import estimate_text_tokens, findings_block, untrusted_blocks
 from adapters.llm.rules import Rule
 from domain.models import Finding, VerificationOutcome
@@ -44,20 +43,6 @@ class VerificationReport:
     rejected: int = 0
 
 
-class _JevAnswer(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    noul: float | None = None
-
-
-class _JevResponse(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    model: str
-    answers: dict[str, _JevAnswer]
-    usage: dict[str, Any] | None = None
-
-
 def build_reflection_state(
     request: ReviewRequest, rules: Sequence[Rule], findings: Sequence[Finding]
 ) -> str:
@@ -66,6 +51,12 @@ def build_reflection_state(
 
 def question_id(index: int) -> str:
     return f"finding_{index}"
+
+
+def _questions(count: int) -> dict[str, str]:
+    return {
+        question_id(index): QUESTION_TEMPLATE.format(index=index) for index in range(1, count + 1)
+    }
 
 
 class JevVerifier:
@@ -82,13 +73,15 @@ class JevVerifier:
         max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self._api_key = api_key
-        self._url = f"{base_url.rstrip('/')}/v1/systemone"
-        self._model = model
+        self._client = JevClient(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            transport=transport,
+        )
         self._keep_threshold = keep_threshold
-        self._timeout_seconds = timeout_seconds
         self._max_input_tokens = max_input_tokens
-        self._transport = transport
 
     async def verify(
         self, request: ReviewRequest, rules: Sequence[Rule], findings: Sequence[Finding]
@@ -108,55 +101,24 @@ class JevVerifier:
 
         started = time.monotonic()
         try:
-            response = await self._ask(state, len(findings))
+            response = await self._client.ask_noul(state, _questions(len(findings)))
         except (httpx.HTTPError, ValueError) as exc:
-            status = (
-                f", HTTP {exc.response.status_code}"
-                if isinstance(exc, httpx.HTTPStatusError)
-                else ""
-            )
             logger.warning(
-                "verifier failed (%s%s), keeping all %d finding(s)",
-                type(exc).__name__,
-                status,
+                "verifier failed (%s), keeping all %d finding(s)",
+                describe_jev_error(exc),
                 len(findings),
             )
             return VerificationReport(VerificationOutcome.FAILED, unchanged)
         return self._decide(response, findings, time.monotonic() - started)
 
-    async def _ask(self, state: str, count: int) -> _JevResponse:
-        questions = {
-            question_id(index): {
-                "type": "noul",
-                "instructions": QUESTION_TEMPLATE.format(index=index),
-            }
-            for index in range(1, count + 1)
-        }
-        async with httpx.AsyncClient(
-            transport=self._transport, timeout=httpx.Timeout(self._timeout_seconds)
-        ) as client:
-            response = await client.post(
-                self._url,
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                json={"model": self._model, "state": state, "questions": questions},
-            )
-        response.raise_for_status()
-        try:
-            return _JevResponse.model_validate(response.json())
-        except ValidationError as exc:
-            raise ValueError(
-                f"unexpected verifier response ({exc.error_count()} error(s))"
-            ) from None
-
     def _decide(
-        self, response: _JevResponse, findings: Sequence[Finding], duration: float
+        self, response: JevResponse, findings: Sequence[Finding], duration: float
     ) -> VerificationReport:
         kept: list[Finding] = []
         unanswered = 0
         for index, finding in enumerate(findings, start=1):
-            answer = response.answers.get(question_id(index))
-            score = answer.noul if answer is not None else None
-            if score is None or not 0.0 <= score <= 1.0:
+            score = response.noul(question_id(index))
+            if score is None:
                 unanswered += 1
                 kept.append(finding)
             elif score >= self._keep_threshold:
