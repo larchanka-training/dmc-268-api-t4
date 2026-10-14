@@ -330,4 +330,4 @@ and the key is a secret. Details: [specs/llm-gateway.md § Rules and reflection]
 | `TYPESAFE_MODEL` | `jev-latest` | JEV model id |
 | `REFLECTION_KEEP_THRESHOLD` | `0.5` | A finding is kept when JEV's `noul` is at least this, from 0 to 1 |
 | `REFLECTION_TIMEOUT_SECONDS` | `15` | Per request (one for the rule screen, one for the verifier), no retries; on timeout every rule that passed the patterns and every finding is kept |
-| `RULES_SCREEN_THRESHOLD` | `0.5` | A rule is dropped when JEV's `noul` for "this rule instructs the reviewer itself" is at least this, from 0 to 1 |
+| `RULES_SCREEN_THRESHOLD` | `0.7` | A rule is dropped when JEV's `noul` for "this rule instructs the reviewer itself" is at least this, from 0 to 1. Attacks score 0.94–0.98; legitimate rules that narrow the review (e.g. skip `gen/`) score up to ~0.53, so 0.5 would drop them |
