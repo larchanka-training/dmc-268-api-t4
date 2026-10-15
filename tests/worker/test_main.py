@@ -36,3 +36,16 @@ def test_build_vcs_from_env_mirrors_the_api_wiring(monkeypatch) -> None:
     _github_env(monkeypatch)
 
     assert isinstance(build_vcs_from_env(), GitHubVCSClient)
+
+
+def test_the_review_stage_wires_the_gateway_and_the_github_publisher(monkeypatch) -> None:
+    from adapters.github.publisher import GitHubReviewPublisher
+    from worker.__main__ import build_review_from_env
+
+    _github_env(monkeypatch)
+    monkeypatch.setenv("LLM_PRIMARY_API_KEYS", "k1")
+    monkeypatch.setenv("LLM_PRIMARY_MODEL", "some/model")
+
+    review = build_review_from_env()
+
+    assert isinstance(review.publisher, GitHubReviewPublisher)

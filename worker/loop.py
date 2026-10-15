@@ -18,13 +18,14 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from adapters.db.dsn import to_asyncpg
+from adapters.db.job_events import PostgresStepRecorder
 from adapters.db.repository import PostgresJobStore
 from adapters.db.session import build_engine
-from domain.ports import GitProvider, JobRepository
+from domain.ports import GitProvider, JobRepository, StepRecorder
 from worker.config import DEFAULT_POLL_INTERVAL_SECONDS, WorkerSettings
 from worker.listener import listen_for_jobs
 from worker.periodic import reaper_loop
-from worker.process import process_claimed_job
+from worker.process import ReviewStage, process_claimed_job
 
 #: The production listener plus any test fake: takes the asyncpg DSN and
 #: the shared wake event, runs until cancelled.
@@ -36,6 +37,8 @@ async def claim_and_process_once(
     vcs: GitProvider,
     worker_id: str,
     *,
+    review: ReviewStage | None = None,
+    steps: StepRecorder | None = None,
     logger: logging.Logger | None = None,
 ) -> bool:
     """One claim attempt (WORKFLOW_DESIGN.md §2 Step 4); process if won.
@@ -49,7 +52,7 @@ async def claim_and_process_once(
     if claimed is None:
         return False
     log = logger if logger is not None else logging.getLogger(__name__)
-    await process_claimed_job(claimed, vcs, store, logger=log)
+    await process_claimed_job(claimed, vcs, store, review=review, steps=steps, logger=log)
     return True
 
 
@@ -61,6 +64,8 @@ async def worker_loop(
     stop: asyncio.Event,
     *,
     poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    review: ReviewStage | None = None,
+    steps: StepRecorder | None = None,
     logger: logging.Logger | None = None,
 ) -> None:
     """One concurrency slot's loop (docs/BACKEND_ARCHITECTURE.md § Processes).
@@ -77,7 +82,9 @@ async def worker_loop(
     while not stop.is_set():
         while not stop.is_set():
             try:
-                processed = await claim_and_process_once(store, vcs, worker_id, logger=log)
+                processed = await claim_and_process_once(
+                    store, vcs, worker_id, review=review, steps=steps, logger=log
+                )
             except Exception as err:
                 # A store error (database restarting) must not kill the
                 # slot: log it, fall back to the timed wait, and the next
@@ -106,6 +113,7 @@ async def run_worker(
     listener: ListenerFactory | None = None,
     engine: AsyncEngine | None = None,
     store: JobRepository | None = None,
+    review: ReviewStage | None = None,
 ) -> None:
     """Run one worker process until ``stop`` is set, then drain and exit.
 
@@ -129,6 +137,8 @@ async def run_worker(
     wake = asyncio.Event()
     engine = build_engine(settings.db) if engine is None else engine
     jobs = PostgresJobStore(engine) if store is None else store
+    # Steps go to the same database as the queue; the in-memory store has no table.
+    steps = PostgresStepRecorder(engine) if isinstance(jobs, PostgresJobStore) else None
     dsn = to_asyncpg(settings.db.database_url)
     listen = listener if listener is not None else listen_for_jobs
     slots = [
@@ -140,6 +150,8 @@ async def run_worker(
                 wake,
                 stop,
                 poll_interval=settings.poll_interval_seconds,
+                review=review,
+                steps=steps,
                 logger=log,
             ),
             name=f"worker-loop-{index}",

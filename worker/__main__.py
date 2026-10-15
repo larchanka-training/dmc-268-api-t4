@@ -17,11 +17,16 @@ import signal
 from contextlib import suppress
 
 from adapters.clock import SystemClock
+from adapters.github.app_auth import GitHubAppAuth
 from adapters.github.config import GitHubAppSettings
 from adapters.github.factory import build_vcs_client
+from adapters.github.publisher import GitHubReviewPublisher
+from adapters.llm.config import LLMSettings
+from adapters.llm.factory import build_gateway
 from domain.ports import GitProvider
 from worker.config import WorkerSettings
 from worker.loop import run_worker
+from worker.process import ReviewStage
 
 
 def build_vcs_from_env() -> GitProvider:
@@ -30,7 +35,19 @@ def build_vcs_from_env() -> GitProvider:
     return build_vcs_client(GitHubAppSettings.from_env(), clock=SystemClock())
 
 
-async def _run_until_signalled(settings: WorkerSettings, vcs: GitProvider) -> None:
+def build_review_from_env() -> ReviewStage:
+    """The LLM gateway and the GitHub publisher. A missing LLM or GitHub
+    variable fails here, at startup, naming the variable."""
+    app_settings = GitHubAppSettings.from_env()
+    return ReviewStage(
+        gateway=build_gateway(LLMSettings.from_env()),
+        publisher=GitHubReviewPublisher(app_settings, GitHubAppAuth(app_settings, SystemClock())),
+    )
+
+
+async def _run_until_signalled(
+    settings: WorkerSettings, vcs: GitProvider, review: ReviewStage
+) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -40,7 +57,7 @@ async def _run_until_signalled(settings: WorkerSettings, vcs: GitProvider) -> No
         with suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
     try:
-        await run_worker(settings, vcs, stop=stop)
+        await run_worker(settings, vcs, stop=stop, review=review)
     finally:
         for sig in (signal.SIGTERM, signal.SIGINT):
             with suppress(NotImplementedError):
@@ -53,7 +70,8 @@ def main() -> None:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
     settings = WorkerSettings.from_env()
     vcs = build_vcs_from_env()
-    asyncio.run(_run_until_signalled(settings, vcs))
+    review = build_review_from_env()
+    asyncio.run(_run_until_signalled(settings, vcs, review))
 
 
 if __name__ == "__main__":

@@ -2,12 +2,25 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from domain.auth import Session, SignInAttempt
 from domain.models import ReviewResult
+from domain.publishing import PublishPlan
 from domain.repositories import Repository
 from domain.tenancy import Organization, User
+
+if TYPE_CHECKING:
+    # domain.jobs imports ReviewJobStatus from here; a runtime import would be circular.
+    from domain.jobs import (
+        JobEvent,
+        JobPage,
+        JobQuery,
+        JobSnapshot,
+        JobStep,
+        StepRecord,
+        StepStatus,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +191,8 @@ class JobStats:
     hunks_total: int
     chunks_total: int
     skipped_counts: tuple[tuple[str, int], ...]
+    # Inline comments the review posted on the pull request.
+    findings_published: int = 0
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -185,6 +200,7 @@ class JobStats:
             ("files_reviewable", self.files_reviewable),
             ("hunks_total", self.hunks_total),
             ("chunks_total", self.chunks_total),
+            ("findings_published", self.findings_published),
         ):
             if value < 0:
                 raise ValueError(f"{name} must be >= 0, got {value}")
@@ -256,6 +272,7 @@ class ReviewJob:
     finished_at: datetime | None = None
     retry_count: int = 0
     next_attempt_at: datetime | None = None
+    started_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.job_id.strip():
@@ -339,3 +356,111 @@ class JobRepository(Protocol):
         ...
 
     async def get(self, job_id: str) -> ReviewJob | None: ...
+
+
+# --- Publishing and job progress -------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestTarget:
+    """Where a review is posted. Everything a retry needs to re-authenticate is here."""
+
+    installation_id: int
+    owner: str
+    repo: str
+    number: int
+    head_sha: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExistingCheckRun:
+    """The check run an earlier job for this pull request left (`external_check_id`).
+
+    A check run belongs to one commit, so it is updated in place only while the head SHA
+    is unchanged. After a push the adapter creates a new one on the new head.
+    """
+
+    id: int
+    head_sha: str
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedComment:
+    fingerprint: str
+    external_comment_id: int | None
+    url: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PublishOutcome:
+    """What reached the forge: the check run, the review and each comment's id."""
+
+    check_run_id: int
+    check_run_url: str | None
+    review_id: int | None
+    review_url: str | None
+    comments: tuple[PublishedComment, ...]
+    # True when the forge refused the inline comments and they went into the review
+    # body instead (a position GitHub would not accept).
+    inline_fallback: bool = False
+
+
+class ReviewPublisher(Protocol):
+    """Posts a planned review on one forge."""
+
+    async def publish(
+        self,
+        target: PullRequestTarget,
+        plan: PublishPlan,
+        existing_check: ExistingCheckRun | None = None,
+    ) -> PublishOutcome: ...
+
+
+class JobEventsSource(Protocol):
+    """Where the API reads job progress for the SSE stream."""
+
+    async def snapshot(self, job_id: str) -> "JobSnapshot | None": ...
+
+    async def next_events(
+        self, job_id: str, after_seq: int, timeout_seconds: float
+    ) -> "tuple[JobEvent, ...]":
+        """Events with seq > after_seq; waits up to the timeout, then returns ()."""
+        ...
+
+
+class StepRecorder(Protocol):
+    """Where the worker records pipeline steps (`pr_review_steps`).
+
+    Only the worker holding the job's lease may write; other writes are ignored.
+    """
+
+    async def start(self, job_id: str, attempt: int, step: "JobStep", *, worker_id: str) -> None:
+        """Record the step as RUNNING."""
+        ...
+
+    async def finish(
+        self,
+        job_id: str,
+        attempt: int,
+        step: "JobStep",
+        status: "StepStatus",
+        *,
+        worker_id: str,
+        error_kind: str | None = None,
+    ) -> None:
+        """Record how the running step ended."""
+        ...
+
+
+class JobHistory(Protocol):
+    """What the console reads about review jobs: the list, one job and its steps."""
+
+    async def list_page(self, query: "JobQuery") -> "JobPage": ...
+
+    async def get(self, job_id: str) -> ReviewJob | None: ...
+
+    async def steps(self, job_id: str) -> "tuple[StepRecord, ...]": ...
+
+
+class JobStore(JobRepository, JobHistory, Protocol):
+    """A queue the console can also read: both job stores are one."""
