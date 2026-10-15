@@ -17,6 +17,11 @@ DEFAULT_MAX_TOKENS = 4096
 # provider is called. Fitting context into the budget is the context builder's job.
 DEFAULT_MAX_INPUT_TOKENS = 32000
 MAX_TEMPERATURE = 2.0
+DEFAULT_TYPESAFE_BASE_URL = "https://api.typesafe.ai"
+DEFAULT_TYPESAFE_MODEL = "jev-latest"
+DEFAULT_REFLECTION_KEEP_THRESHOLD = 0.5
+DEFAULT_REFLECTION_TIMEOUT_SECONDS = 15.0
+DEFAULT_RULES_SCREEN_THRESHOLD = 0.7
 
 _TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
 _FALSE_VALUES = frozenset({"false", "0", "no", "off"})
@@ -35,6 +40,24 @@ class ProviderSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ReflectionSettings:
+    """JEV (TypeSafe System One): screens repository rules before the first pass and scores
+    every first-pass finding after it."""
+
+    enabled: bool = False
+    api_key: str = field(default="", repr=False)
+    base_url: str = DEFAULT_TYPESAFE_BASE_URL
+    model: str = DEFAULT_TYPESAFE_MODEL
+    keep_threshold: float = DEFAULT_REFLECTION_KEEP_THRESHOLD
+    timeout_seconds: float = DEFAULT_REFLECTION_TIMEOUT_SECONDS
+    rules_screen_threshold: float = DEFAULT_RULES_SCREEN_THRESHOLD
+
+    @property
+    def is_active(self) -> bool:
+        return self.enabled and bool(self.api_key)
+
+
+@dataclass(frozen=True, slots=True)
 class LLMSettings:
     primary: ProviderSettings
     fallback: ProviderSettings | None
@@ -43,6 +66,7 @@ class LLMSettings:
     json_mode: bool
     max_tokens: int = DEFAULT_MAX_TOKENS
     max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS
+    reflection: ReflectionSettings = field(default_factory=ReflectionSettings)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "LLMSettings":
@@ -108,6 +132,33 @@ class _EnvReader:
             json_mode=self._bool("LLM_JSON_MODE", default=True),
             max_tokens=self._positive_int("LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS),
             max_input_tokens=self._positive_int("LLM_MAX_INPUT_TOKENS", DEFAULT_MAX_INPUT_TOKENS),
+            reflection=self._reflection(),
+        )
+
+    def _reflection(self) -> ReflectionSettings:
+        return ReflectionSettings(
+            enabled=self._bool("LLM_REFLECTION_ENABLED", default=True),
+            api_key=self._text("TYPESAFE_API_KEY"),
+            base_url=self._url("TYPESAFE_BASE_URL", DEFAULT_TYPESAFE_BASE_URL),
+            model=self._text("TYPESAFE_MODEL") or DEFAULT_TYPESAFE_MODEL,
+            keep_threshold=self._float(
+                "REFLECTION_KEEP_THRESHOLD",
+                DEFAULT_REFLECTION_KEEP_THRESHOLD,
+                minimum=0.0,
+                maximum=1.0,
+            ),
+            timeout_seconds=self._float(
+                "REFLECTION_TIMEOUT_SECONDS",
+                DEFAULT_REFLECTION_TIMEOUT_SECONDS,
+                minimum=0.0,
+                exclusive=True,
+            ),
+            rules_screen_threshold=self._float(
+                "RULES_SCREEN_THRESHOLD",
+                DEFAULT_RULES_SCREEN_THRESHOLD,
+                minimum=0.0,
+                maximum=1.0,
+            ),
         )
 
     def _text(self, name: str) -> str:
