@@ -111,7 +111,7 @@ def engine(queue_db_url: str) -> Iterator[AsyncEngine]:
 def pg_e2e(engine: AsyncEngine, auth_clock: FixedClock) -> PgQueueE2E:
     async def truncate() -> None:
         async with engine.begin() as conn:
-            await conn.execute(text("TRUNCATE TABLE pr_review_steps, pr_review_jobs"))
+            await conn.execute(text("TRUNCATE TABLE pr_review_jobs CASCADE"))
 
     asyncio.run(truncate())
     store = PostgresJobStore(engine)

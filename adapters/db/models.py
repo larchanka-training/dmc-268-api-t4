@@ -213,6 +213,77 @@ class ReviewJobORM(Base):
     )
 
 
+class ReviewCommentORM(Base):
+    """One published finding: a row exists only once the comment reached the forge."""
+
+    __tablename__ = "pr_review_comments"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("pr_review_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # sha256 over file_path + normalized content + anchored snippet; no line
+    # number, so an insertion above a finding does not re-post it (docs §1.1).
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    file_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    # DEVIATION from docs §1.1: NOT NULL. Every published finding is anchored
+    # to a line (domain FindingPosition; openapi Finding.line is required).
+    line_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Set for a multi-line comment; line_number is then the last line.
+    start_line: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # DEVIATION from docs §1.1: old/new, not LEFT/RIGHT - the provider-neutral
+    # spelling; the GitHub adapter maps at the edge (PIPELINE_SPEC.md D3).
+    side: Mapped[str] = mapped_column(String(3), nullable=False)
+    # D4 (PIPELINE_SPEC.md §7.1): the dashboard badges and orders by these.
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    category: Mapped[str] = mapped_column(String(16), nullable=False)
+    # The comment as posted, after redaction - never the raw model reply.
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # {"before": [...], "after": [...]} or NULL; openapi Finding.suggestion.
+    suggestion: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+    # NULL when the forge refused the inline comment and the finding went into
+    # the review body instead; external_review_id then anchors the link.
+    external_comment_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    external_review_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # DEVIATION from docs §1.1: NOT NULL. Rows are written in one transaction
+    # after the review is posted (GitHub posts a review as one batch), so an
+    # unposted row never exists.
+    posted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    __table_args__ = (
+        CheckConstraint("side IN ('old','new')", name="ck_pr_review_comments_side"),
+        CheckConstraint(
+            "severity IN ('critical','high','medium','low')",
+            name="ck_pr_review_comments_severity",
+        ),
+        CheckConstraint(
+            "category IN ('security','correctness','concurrency','performance','maintainability')",
+            name="ck_pr_review_comments_category",
+        ),
+        CheckConstraint(
+            "line_number >= 1 AND (start_line IS NULL OR "
+            "(start_line >= 1 AND start_line <= line_number))",
+            name="ck_pr_review_comments_lines",
+        ),
+        # Guards against double-insert within a job. Its leading column also
+        # serves the foreign key, so no separate index on job_id (docs §1.1).
+        UniqueConstraint("job_id", "fingerprint", name="uq_pr_review_comments_job_fingerprint"),
+    )
+
+
 class ReviewStepORM(Base):
     """One row per pipeline stage per attempt. Diagnosis, not audit."""
 

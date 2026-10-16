@@ -1,7 +1,13 @@
 """worker.process_claimed_job with a ReviewStage: parsed diff → LLM → posted review."""
 
+from collections.abc import Sequence
+
+import pytest
+
 from adapters.jobs.memory import MemoryJobStore
+from adapters.memory.review_comments import MemoryReviewCommentStore
 from domain.errors import AllProvidersFailedError, ProviderUnavailableError
+from domain.findings import NewPublishedFinding
 from domain.jobs import JobStep, StepStatus
 from domain.models import (
     Category,
@@ -13,6 +19,7 @@ from domain.models import (
 )
 from domain.ports import (
     ExistingCheckRun,
+    PublishedComment,
     PublishOutcome,
     PullRequestTarget,
     ReviewJobStatus,
@@ -203,3 +210,93 @@ async def test_a_failed_step_write_does_not_stop_the_review() -> None:
 
     assert done is True
     assert len(publisher.calls) == 1
+
+
+# --- published findings -----------------------------------------------------
+
+
+class ReportingPublisher:
+    """Reports every planned comment back as posted, like a forge that took them all."""
+
+    def __init__(self) -> None:
+        self.plans: list[PublishPlan] = []
+
+    async def publish(
+        self,
+        target: PullRequestTarget,
+        plan: PublishPlan,
+        existing_check: ExistingCheckRun | None = None,
+    ) -> PublishOutcome:
+        self.plans.append(plan)
+        return PublishOutcome(
+            check_run_id=1,
+            check_run_url=None,
+            review_id=900,
+            review_url=None,
+            comments=tuple(
+                PublishedComment(comment.fingerprint, 5000 + index, None)
+                for index, comment in enumerate(plan.comments)
+            ),
+        )
+
+
+class BrokenCommentStore(MemoryReviewCommentStore):
+    async def record(self, job_id: str, findings: Sequence[NewPublishedFinding]) -> None:
+        raise RuntimeError("database went away")
+
+
+async def _review_once(
+    store: MemoryJobStore, comments: MemoryReviewCommentStore, delivery_id: str
+) -> tuple[str, ReportingPublisher, bool]:
+    job_id = await enqueue(store, make_payload(delivery_id=delivery_id))
+    claimed = await claim(store)
+    publisher = ReportingPublisher()
+    done = await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(
+            gateway=FakeGateway((finding("app/users.py", 2),)),
+            publisher=publisher,
+            comments=comments,
+        ),
+    )
+    return job_id, publisher, done
+
+
+async def test_posted_findings_are_kept_and_not_posted_again_on_the_same_pull_request() -> None:
+    store = MemoryJobStore()
+    comments = MemoryReviewCommentStore(store)
+
+    first_id, first, done = await _review_once(store, comments, "d-1")
+
+    assert done is True
+    [kept] = await comments.for_job(first_id)
+    [planned] = first.plans[0].comments
+    assert (kept.fingerprint, kept.path, kept.line) == (planned.fingerprint, "app/users.py", 2)
+    assert (kept.external_comment_id, kept.external_review_id) == (5000, 900)
+    assert kept.message == planned.body
+
+    second_id, second, done = await _review_once(store, comments, "d-2")
+
+    assert done is True
+    assert second.plans[0].comments == ()
+    assert second.plans[0].stats.already_posted == 1
+    assert await comments.for_job(second_id) == ()
+
+
+async def test_a_store_failure_after_posting_still_completes_the_job(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = MemoryJobStore()
+
+    with caplog.at_level("ERROR"):
+        job_id, publisher, done = await _review_once(store, BrokenCommentStore(store), "d-1")
+
+    assert done is True
+    assert len(publisher.plans) == 1
+    stored = await store.get(job_id)
+    assert stored is not None and stored.status is ReviewJobStatus.COMPLETED
+    [record] = [r for r in caplog.records if "findings not kept" in r.getMessage()]
+    assert "exc_class=RuntimeError" in record.getMessage()
+    assert "database went away" not in record.getMessage()

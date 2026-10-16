@@ -13,6 +13,7 @@ import contextlib
 import logging
 import uuid
 from collections.abc import Callable, Coroutine
+from dataclasses import replace
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -20,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from adapters.db.dsn import to_asyncpg
 from adapters.db.job_events import PostgresStepRecorder
 from adapters.db.repository import PostgresJobStore
+from adapters.db.review_comments import PostgresReviewCommentStore
 from adapters.db.session import build_engine
 from domain.ports import GitProvider, JobRepository, StepRecorder
 from worker.config import DEFAULT_POLL_INTERVAL_SECONDS, WorkerSettings
@@ -139,6 +141,9 @@ async def run_worker(
     jobs = PostgresJobStore(engine) if store is None else store
     # Steps go to the same database as the queue; the in-memory store has no table.
     steps = PostgresStepRecorder(engine) if isinstance(jobs, PostgresJobStore) else None
+    # Published findings too, unless a test handed the stage its own store.
+    if review is not None and review.comments is None and isinstance(jobs, PostgresJobStore):
+        review = replace(review, comments=PostgresReviewCommentStore(engine))
     dsn = to_asyncpg(settings.db.database_url)
     listen = listener if listener is not None else listen_for_jobs
     slots = [

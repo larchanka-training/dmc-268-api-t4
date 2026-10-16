@@ -83,7 +83,7 @@ def engine(worker_db: tuple[str, str]) -> Iterator[AsyncEngine]:
 def store(engine: AsyncEngine) -> PostgresJobStore:
     async def truncate() -> None:
         async with engine.begin() as conn:
-            await conn.execute(text("TRUNCATE TABLE pr_review_steps, pr_review_jobs"))
+            await conn.execute(text("TRUNCATE TABLE pr_review_jobs CASCADE"))
 
     asyncio.run(truncate())
     return PostgresJobStore(engine)

@@ -43,6 +43,15 @@ INSERT_JOB_SQL = """
          :sha, :sha, 'opened', 'Add payments', :status)
 """
 
+INSERT_COMMENT_SQL = """
+    INSERT INTO pr_review_comments
+        (job_id, fingerprint, file_path, line_number, start_line, side,
+         severity, category, content, posted_at)
+    VALUES
+        (:job_id, :fingerprint, 'app.py', :line, :start_line, :side,
+         :severity, :category, 'Check this.', now())
+"""
+
 
 def _job_params(delivery_id: str, status: str = "QUEUED") -> dict[str, object]:
     return {
@@ -114,6 +123,7 @@ def test_upgrade_head_creates_tables_indexes_and_constraints(migrated_url: str) 
     tables = asyncio.run(_table_names(migrated_url))
     assert "pr_review_jobs" in tables
     assert "pr_review_steps" in tables
+    assert "pr_review_comments" in tables
 
     index_names = {row[0] for row in asyncio.run(_fetch_all(migrated_url, JOB_INDEXES_SQL))}
     for name in JOB_INDEXES:
@@ -149,11 +159,66 @@ def test_updated_at_trigger_overwrites_manual_writes(migrated_url: str) -> None:
     assert rows[0][0] > datetime(2020, 1, 2, tzinfo=UTC)
 
 
+def _comment_params(job_id: object, **overrides: object) -> dict[str, object]:
+    params: dict[str, object] = {
+        "job_id": job_id,
+        "fingerprint": "f" * 64,
+        "line": 10,
+        "start_line": None,
+        "side": "new",
+        "severity": "high",
+        "category": "security",
+    }
+    params.update(overrides)
+    return params
+
+
+def test_review_comments_constraints_and_cascade(migrated_url: str) -> None:
+    asyncio.run(_execute(migrated_url, INSERT_JOB_SQL, _job_params("comments-1")))
+    rows = asyncio.run(
+        _fetch_all(
+            migrated_url,
+            "SELECT id FROM pr_review_jobs WHERE delivery_id = :delivery",
+            {"delivery": "comments-1"},
+        )
+    )
+    job_id = rows[0][0]
+
+    asyncio.run(_execute(migrated_url, INSERT_COMMENT_SQL, _comment_params(job_id)))
+    # One fingerprint per job.
+    asyncio.run(_expect_integrity_error(migrated_url, INSERT_COMMENT_SQL, _comment_params(job_id)))
+    for bad in (
+        {"side": "top"},
+        {"severity": "info"},
+        {"category": "style"},
+        {"line": 0},
+        {"start_line": 11},
+    ):
+        asyncio.run(
+            _expect_integrity_error(
+                migrated_url,
+                INSERT_COMMENT_SQL,
+                _comment_params(job_id, fingerprint="b" * 64, **bad),
+            )
+        )
+
+    asyncio.run(_execute(migrated_url, "DELETE FROM pr_review_jobs WHERE id = :id", {"id": job_id}))
+    left = asyncio.run(
+        _fetch_all(
+            migrated_url,
+            "SELECT count(*) FROM pr_review_comments WHERE job_id = :id",
+            {"id": job_id},
+        )
+    )
+    assert left[0][0] == 0
+
+
 def test_downgrade_base_drops_tables(migrated_url: str) -> None:
     run_alembic(migrated_url, "downgrade", "base")
     tables = asyncio.run(_table_names(migrated_url))
     assert "pr_review_jobs" not in tables
     assert "pr_review_steps" not in tables
+    assert "pr_review_comments" not in tables
 
 
 def test_reupgrade_head_is_repeatable(migrated_url: str) -> None:
@@ -161,5 +226,6 @@ def test_reupgrade_head_is_repeatable(migrated_url: str) -> None:
     tables = asyncio.run(_table_names(migrated_url))
     assert "pr_review_jobs" in tables
     assert "pr_review_steps" in tables
+    assert "pr_review_comments" in tables
     versions = asyncio.run(_fetch_all(migrated_url, "SELECT version_num FROM alembic_version"))
-    assert versions[0][0] == "0001"
+    assert versions[0][0] == "0002"

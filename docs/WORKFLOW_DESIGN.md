@@ -654,11 +654,13 @@ file after a one-line insertion at the top.
 
 On each review:
 
-1. Load fingerprints from the most recent `COMPLETED` job for this PR.
+1. Load the fingerprints already posted by any job for this PR.
 2. Post only findings whose fingerprint is new.
-3. Persist each comment row with its `external_comment_id` and `posted_at`
-   **as it is posted**, not in one batch at the end. A crash after posting but
-   before persisting is the case that causes duplicate comments on retry.
+3. Persist the comment rows with their `external_comment_id` and `posted_at`
+   right after the review is posted. GitHub posts a review as one request, so
+   the rows go in one transaction; a crash between the two is the case that
+   causes duplicate comments on retry
+   ([PIPELINE_SPEC.md §7.6, D8](./PIPELINE_SPEC.md)).
 4. Optionally minimise now-stale comments via the GraphQL `minimizeComment`
    mutation.
 

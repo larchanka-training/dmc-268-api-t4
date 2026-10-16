@@ -320,6 +320,7 @@ def build_test_app(
     vcs: GitProvider | None = None,
     webhook_secret: str = TEST_WEBHOOK_SECRET,
     job_events: Any = None,
+    findings: Any = None,
 ) -> Any:
     service = repositories or RepositoriesService(
         gateway=FakeInstallationGateway(),
@@ -339,6 +340,7 @@ def build_test_app(
         vcs=vcs or RefusingGitProvider(),
         webhook_secret=webhook_secret,
         job_events=job_events,
+        findings=findings,
     )
 
 
