@@ -30,6 +30,7 @@ jobs:
           LLM_PRIMARY_MODEL: ${{ vars.LLM_PRIMARY_MODEL }}
           LLM_PRIMARY_PROVIDER_ORDER: ${{ vars.LLM_PRIMARY_PROVIDER_ORDER }}
           LLM_TIMEOUT_SECONDS: "300"
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
         run: |
           # GitHub runs steps with bash -e; failures are classified below, so -e is off.
           set +e -uo pipefail

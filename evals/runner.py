@@ -10,8 +10,8 @@ from dataclasses import dataclass
 import httpx
 
 from adapters.llm.config import LLMSettings
-from adapters.llm.factory import build_providers
-from adapters.llm.gateway import ChatProvider, FallbackLLMGateway
+from adapters.llm.factory import build_gateway
+from adapters.llm.gateway import ChatProvider
 from adapters.llm.prompt import ChatMessage
 from adapters.llm.schema import InvalidReviewJSONError, parse_review
 from domain.errors import AllProvidersFailedError, LLMGatewayError, LLMOutputError
@@ -84,11 +84,11 @@ class LiveRunner:
         self, settings: LLMSettings, *, transport: httpx.AsyncBaseTransport | None = None
     ) -> None:
         self._recorder = _Recorder()
-        providers = [
-            _RecordingProvider(provider, self._recorder)
-            for provider in build_providers(settings, transport=transport)
-        ]
-        self._gateway = FallbackLLMGateway(providers, max_input_tokens=settings.max_input_tokens)
+        self._gateway = build_gateway(
+            settings,
+            transport=transport,
+            wrap_provider=lambda provider: _RecordingProvider(provider, self._recorder),
+        )
 
     async def run(self, case: Case) -> RunRecord:
         diff_text = case.read_diff()

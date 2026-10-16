@@ -314,3 +314,20 @@ Still open here:
 3. **Revision garbage collection.** Revision rows are immutable and shared, so they
    are only collectable once no job references them — which is really a question
    about `job_retention_days`, not about config.
+
+## 8. Environment: review verifier
+
+The JEV calls of the LLM gateway (issue #29: the rule screen in
+`adapters/llm/rule_screen.py` and the reflection pass in `adapters/llm/reflection.py`) are
+configured by the process environment, not by the table above: they are platform settings,
+and the key is a secret. Details: [specs/llm-gateway.md § Rules and reflection](./specs/llm-gateway.md).
+
+| Variable | Default | Meaning |
+| :--- | :--- | :--- |
+| `LLM_REFLECTION_ENABLED` | `true` | Turns the verifier and the rule screen off when `false` (rules are then checked by patterns only). Set it to `false` for private repositories of others: the diff and the rules are sent to TypeSafe |
+| `TYPESAFE_API_KEY` | — | Secret. Without it the verifier and the rule screen are disabled. Never logged, never in exceptions or `repr` |
+| `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | The request goes to `{base}/v1/systemone` |
+| `TYPESAFE_MODEL` | `jev-latest` | JEV model id |
+| `REFLECTION_KEEP_THRESHOLD` | `0.5` | A finding is kept when JEV's `noul` is at least this, from 0 to 1 |
+| `REFLECTION_TIMEOUT_SECONDS` | `15` | Per request (one for the rule screen, one for the verifier), no retries; on timeout every rule that passed the patterns and every finding is kept |
+| `RULES_SCREEN_THRESHOLD` | `0.7` | A rule is dropped when JEV's `noul` for "this rule instructs the reviewer itself" is at least this, from 0 to 1. Attacks score 0.94–0.98; legitimate rules that narrow the review (e.g. skip `gen/`) score up to ~0.53, so 0.5 would drop them |

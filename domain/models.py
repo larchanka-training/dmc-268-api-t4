@@ -24,6 +24,15 @@ class DiffSide(StrEnum):
     NEW = "new"
 
 
+class VerificationOutcome(StrEnum):
+    """What the second, verifying pass did with the first pass's findings."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    DISABLED = "disabled"
+
+
 @dataclass(frozen=True, slots=True)
 class FindingPosition:
     path: str
@@ -50,6 +59,10 @@ class Finding:
     category: Category
     message: str
     suggestion: FindingSuggestion | None
+    # Id of the repository rule (R1, R2, ...) the finding violates, if any.
+    rule_id: str | None = None
+    # Probability from the verifier that the finding is real; None when it did not run.
+    verifier_score: float | None = None
 
     def __post_init__(self) -> None:
         if not self.message.strip():
@@ -64,3 +77,5 @@ class ReviewResult:
     findings: tuple[Finding, ...]
     provider: str
     model: str
+    verification: VerificationOutcome = VerificationOutcome.DISABLED
+    rejected_by_verifier: int = 0

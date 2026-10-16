@@ -1,4 +1,5 @@
 import time
+from collections.abc import Callable
 
 import httpx
 
@@ -6,22 +7,9 @@ from adapters.llm.config import LLMSettings, ProviderSettings
 from adapters.llm.gateway import ChatProvider, FallbackLLMGateway
 from adapters.llm.keys import Clock, KeyPool
 from adapters.llm.openai_compat import OpenAICompatibleProvider
+from adapters.llm.reflection import JevVerifier
+from adapters.llm.rule_screen import JevRuleScreen
 from domain.ports import LLMGateway
-
-
-def build_providers(
-    settings: LLMSettings,
-    *,
-    transport: httpx.AsyncBaseTransport | None = None,
-    clock: Clock = time.monotonic,
-) -> list[ChatProvider]:
-    configured = [settings.primary]
-    if settings.fallback is not None:
-        configured.append(settings.fallback)
-    return [
-        _build_provider(provider, settings, transport=transport, clock=clock)
-        for provider in configured
-    ]
 
 
 def build_gateway(
@@ -29,9 +17,57 @@ def build_gateway(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
     clock: Clock = time.monotonic,
+    wrap_provider: Callable[[ChatProvider], ChatProvider] | None = None,
 ) -> LLMGateway:
-    providers = build_providers(settings, transport=transport, clock=clock)
-    return FallbackLLMGateway(providers, max_input_tokens=settings.max_input_tokens)
+    """Wire the review pipeline; wrap_provider lets the eval harness observe each provider."""
+    configured = [settings.primary]
+    if settings.fallback is not None:
+        configured.append(settings.fallback)
+    providers: list[ChatProvider] = [
+        _build_provider(provider, settings, transport=transport, clock=clock)
+        for provider in configured
+    ]
+    if wrap_provider is not None:
+        providers = [wrap_provider(provider) for provider in providers]
+    return FallbackLLMGateway(
+        providers,
+        max_input_tokens=settings.max_input_tokens,
+        verifier=_build_verifier(settings, transport=transport),
+        rule_screen=_build_rule_screen(settings, transport=transport),
+    )
+
+
+def _build_rule_screen(
+    settings: LLMSettings, *, transport: httpx.AsyncBaseTransport | None
+) -> JevRuleScreen | None:
+    reflection = settings.reflection
+    if not reflection.is_active:
+        return None
+    return JevRuleScreen(
+        api_key=reflection.api_key,
+        base_url=reflection.base_url,
+        model=reflection.model,
+        drop_threshold=reflection.rules_screen_threshold,
+        timeout_seconds=reflection.timeout_seconds,
+        transport=transport,
+    )
+
+
+def _build_verifier(
+    settings: LLMSettings, *, transport: httpx.AsyncBaseTransport | None
+) -> JevVerifier | None:
+    reflection = settings.reflection
+    if not reflection.is_active:
+        return None
+    return JevVerifier(
+        api_key=reflection.api_key,
+        base_url=reflection.base_url,
+        model=reflection.model,
+        keep_threshold=reflection.keep_threshold,
+        timeout_seconds=reflection.timeout_seconds,
+        max_input_tokens=settings.max_input_tokens,
+        transport=transport,
+    )
 
 
 def _build_provider(

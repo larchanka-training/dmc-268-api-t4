@@ -25,6 +25,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("diff", type=Path, help="path to a unified diff file")
     parser.add_argument("--title", default="Smoke test", help="pull request title")
     parser.add_argument("--description", default="", help="pull request description")
+    parser.add_argument(
+        "--rules", type=Path, default=None, help="repository rules file (.review/rules.md)"
+    )
     return parser.parse_args(argv)
 
 
@@ -41,9 +44,19 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"cannot read diff file {args.diff}: {exc.strerror}", file=sys.stderr)
         return EXIT_CONFIG_ERROR
+    rules_markdown = None
+    if args.rules is not None:
+        try:
+            rules_markdown = args.rules.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"cannot read rules file {args.rules}: {exc.strerror}", file=sys.stderr)
+            return EXIT_CONFIG_ERROR
 
     request = ReviewRequest(
-        diff_text=diff_text, pr_title=args.title, pr_description=args.description
+        diff_text=diff_text,
+        pr_title=args.title,
+        pr_description=args.description,
+        rules_markdown=rules_markdown,
     )
     try:
         result = asyncio.run(build_gateway(settings).review(request))
