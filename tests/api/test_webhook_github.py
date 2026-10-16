@@ -428,6 +428,30 @@ async def test_the_webhook_needs_neither_csrf_headers_nor_a_session(
     assert response.status_code == 204
 
 
+async def test_the_webhook_skips_csrf_behind_the_api_root_path(
+    auth_clock: FixedClock,
+) -> None:
+    # Production runs uvicorn with --root-path /api (Dockerfile), so the request
+    # path the app sees is /api/webhooks/github, not /webhooks/github.
+    app = build_test_app(auth_clock, FakeIdentityProvider())
+    body = opened_body()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, root_path="/api"), base_url=TEST_ORIGIN
+    ) as client:
+        response = await client.post(
+            "/api/webhooks/github",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": sign(body),
+                "X-GitHub-Event": "ping",
+                "X-GitHub-Delivery": DELIVERY,
+            },
+        )
+
+    assert response.status_code == 204
+
+
 async def test_the_secret_never_reaches_logs_or_responses(
     auth_clock: FixedClock, caplog: pytest.LogCaptureFixture
 ) -> None:
