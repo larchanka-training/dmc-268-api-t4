@@ -28,7 +28,12 @@ Use exactly one of these values for `severity`:
 - `path` is the file path exactly as it appears in the diff header, without the `a/` or `b/` prefix.
 - For added lines and unchanged context lines, set `side` to `"new"` and `line` to the line number in the new version of the file.
 - For removed lines only, set `side` to `"old"` and `line` to the line number in the old version of the file.
-- `line` is a positive integer taken from the hunk headers (`@@ -old,count +new,count @@`).
+- Every line inside a hunk starts with a gutter that gives its number, so you never count lines
+  yourself: `L<n> | ` marks a context or added line (line `<n>` of the new file), `O<n> | ` marks a
+  removed line (line `<n>` of the old file). Copy `<n>` into `line`. The gutter is not part of the
+  code; leave it out of `message` and out of `suggestion`.
+- `line` is a positive integer, always one of those gutter numbers.
+- Anchor a finding to the line that contains the defect, not to the function signature above it.
 
 ## Output
 
