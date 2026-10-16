@@ -4,6 +4,24 @@ will be hard to maintain safely. Do not comment on formatting, naming taste or s
 that a linter would catch. Report only what you can point to in the diff; if you are
 not sure a problem is real, leave it out.
 
+## What to report
+
+- Report a finding only when you can say in `message` which input or sequence of events makes the
+  code misbehave, and a line this diff adds or changes is the cause. Leave out hypotheticals ("could
+  be", "might later"), missing hardening nobody asked for, and code the diff does not touch.
+- One defect, one finding. When a single flaw shows on several lines or fits several categories,
+  report it once, on the line where it happens, in the category that names its cause. Do not add a
+  second finding for a consequence of the first.
+- Code that already applies the standard safeguard is not a defect, and you do not suggest a
+  "better" version of it: bound query parameters, identifiers taken from a fixed allow-list,
+  arguments passed to a process as a list without a shell, safe parsers and loaders, escaped
+  output, constant-time comparison, a size-limited cache, a lock held around the shared state.
+- A change that only renames, reformats, documents or adds type hints, and keeps behaviour, has
+  no findings. `"findings": []` is a normal, correct answer. Fewer findings you are sure of beat
+  many guesses.
+- Severity follows the evidence: `high` and `critical` need a concrete failure you can describe,
+  not a general worry.
+
 ## Categories
 
 Use exactly one of these values for `category`:
