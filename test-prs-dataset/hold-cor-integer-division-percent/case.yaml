@@ -1,0 +1,14 @@
+id: hold-cor-integer-division-percent
+intent: "detection (hold-out): integer division makes the percentage jump from 0 to 100"
+pattern: "operator precedence with floor division in a percentage"
+metrics: detection
+fixture: change.diff
+title: "Show upload progress"
+description: "Returns how much of the upload is done, as a percentage."
+tags: [holdout]
+expected:
+  - path: app/progress.py
+    line: 4
+    side: new
+    category: correctness
+    severity: medium

@@ -17,7 +17,7 @@ Target layout: [docs/BACKEND_ARCHITECTURE.md § Planned code layout](docs/BACKEN
 | `api/` | exists | auth, `/repositories`, `/webhooks/github`, app factory; `/v1` routes planned |
 | `worker/` | exists (`process.py` processes one job; `loop.py` claim/LISTEN/poll, `run_worker`; `listener.py` LISTEN; `periodic.py` advisory-lock leader + lease reaper; `config.py`, `__main__.py`) | remaining periodic tasks planned: usage rollover, credential health, retention purge, grace expiry |
 | `ops/` | planned | `replay.py` |
-| `evals/`, `test-prs-dataset/` | exists | LLM eval harness (`python -m evals validate\|run`) and the 25-case gold dataset; see [test-prs-dataset/README.md](test-prs-dataset/README.md) |
+| `evals/`, `test-prs-dataset/` | exists | LLM eval harness (`python -m evals validate\|run`) and the 29-case gold dataset; see [test-prs-dataset/README.md](test-prs-dataset/README.md) |
 | `alembic/` | exists (`0001` review jobs + steps) | migrations; tenancy/billing tables later |
 
 ## Commands

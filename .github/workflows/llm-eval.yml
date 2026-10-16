@@ -20,7 +20,7 @@ concurrency:
 jobs:
   eval:
     runs-on: ubuntu-latest
-    # 25 cases run one after another. One case can take ~10 minutes in the worst case (a 300 s
+    # 29 cases run one after another. One case can take ~10 minutes in the worst case (a 300 s
     # timeout plus one corrective retry); a healthy provider answers in well under a minute.
     timeout-minutes: 90
     steps:

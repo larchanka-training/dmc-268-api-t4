@@ -6,6 +6,7 @@ from typing import Any
 from evals.runner import RunRecord
 from evals.scoring import CorpusScore, aggregate
 
+HOLDOUT_TAG = "holdout"
 RUN_LIMIT_NOTE = (
     "One run per case at temperature 0.0. An identical prompt can still yield different "
     "findings, so read small differences between two runs as noise."
@@ -26,6 +27,7 @@ def corpus_score(records: Sequence[RunRecord]) -> CorpusScore:
 
 def render_summary(records: Sequence[RunRecord]) -> str:
     corpus = corpus_score(records)
+    holdout = [r for r in records if HOLDOUT_TAG in r.case.tags]
     served = sorted({(r.provider, r.model) for r in records if r.provider and r.model})
     lines = ["## LLM eval", ""]
     lines.extend(f"- provider `{provider}`, model `{model}`" for provider, model in served)
@@ -39,6 +41,14 @@ def render_summary(records: Sequence[RunRecord]) -> str:
         f"- recall: **{_percent(corpus.recall)}** (TP {corpus.tp}, FN {corpus.fn})",
         f"- severity errors: {corpus.severity_errors}",
         f"- dropped findings: {corpus.dropped}",
+    ]
+    if holdout:
+        held = corpus_score(holdout)
+        lines.append(
+            f"- hold-out ({held.runs} cases): precision **{_percent(held.precision)}**, "
+            f"recall **{_percent(held.recall)}** (TP {held.tp}, FP {held.fp}, FN {held.fn})"
+        )
+    lines += [
         "",
         f"_{RUN_LIMIT_NOTE}_",
         "",
