@@ -254,6 +254,9 @@ class ReviewJobORM(Base):
 
 
 class ReviewCommentORM(Base):
+    """One published finding. A row exists only once the comment reached the
+    forge, inline or in the review body (PIPELINE_SPEC.md §7.6, D8)."""
+
     __tablename__ = "pr_review_comments"
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -272,20 +275,34 @@ class ReviewCommentORM(Base):
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
 
     file_path: Mapped[str] = mapped_column(String(1024), nullable=False)
-    # Nullable: file-level and PR-level findings have no line.
-    line_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Every published finding is anchored to a line (openapi Finding.line).
+    line_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Set for a multi-line comment; line_number is then the last line.
     start_line: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    side: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    # old/new, the provider-neutral spelling (PIPELINE_SPEC.md D3); the
+    # GitHub adapter maps to LEFT/RIGHT at the edge.
+    side: Mapped[str] = mapped_column(String(3), nullable=False)
+    # D4: the dashboard badges and orders findings by these.
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    category: Mapped[str] = mapped_column(String(16), nullable=False)
+    # The comment as posted, after redaction - never the raw model reply.
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    # {"before": [...], "after": [...]} or NULL.
+    suggestion: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
-    # NULL until the comment actually reaches GitHub. Written per-comment as
-    # it is posted, not batched at the end — a crash between posting and
-    # persisting is what causes duplicate comments on retry.
+    # NULL when the forge refused the inline comment and the finding went
+    # into the review body; external_review_id then anchors the link (D5).
     external_comment_id: Mapped[int | None] = mapped_column(
         BigInteger, nullable=True
     )
-    posted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+    external_review_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
+    )
+    # Written in one transaction right after the review is posted: GitHub
+    # posts a review as one request, so there is no per-comment moment to
+    # persist at (PIPELINE_SPEC.md §7.6, D8).
+    posted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
@@ -294,8 +311,16 @@ class ReviewCommentORM(Base):
     job: Mapped["ReviewJobORM"] = relationship(back_populates="comments")
 
     __table_args__ = (
-        CheckConstraint("side IS NULL OR side IN ('LEFT','RIGHT')",
+        CheckConstraint("side IN ('old','new')",
                         name="ck_pr_review_comments_side"),
+        CheckConstraint("severity IN ('critical','high','medium','low')",
+                        name="ck_pr_review_comments_severity"),
+        CheckConstraint("category IN ('security','correctness','concurrency',"
+                        "'performance','maintainability')",
+                        name="ck_pr_review_comments_category"),
+        CheckConstraint("line_number >= 1 AND (start_line IS NULL OR "
+                        "(start_line >= 1 AND start_line <= line_number))",
+                        name="ck_pr_review_comments_lines"),
         # Guards against double-insert within a job. Its leading column also
         # serves the foreign key, so no separate index on job_id is needed —
         # PostgreSQL does NOT auto-index foreign keys, and without one every
@@ -822,18 +847,24 @@ def upgrade() -> None:
         ["account_id", sa.text("created_at DESC")],
     )
 
+    # Shipped as its own revision, 0002_review_comments, after 0001 had been
+    # applied; the columns below are the 0002 ones.
     op.create_table(
         "pr_review_comments",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("job_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("fingerprint", sa.String(length=64), nullable=False),
         sa.Column("file_path", sa.String(length=1024), nullable=False),
-        sa.Column("line_number", sa.Integer(), nullable=True),
+        sa.Column("line_number", sa.Integer(), nullable=False),
         sa.Column("start_line", sa.Integer(), nullable=True),
-        sa.Column("side", sa.String(length=5), nullable=True),
+        sa.Column("side", sa.String(length=3), nullable=False),
+        sa.Column("severity", sa.String(length=16), nullable=False),
+        sa.Column("category", sa.String(length=16), nullable=False),
         sa.Column("content", sa.Text(), nullable=False),
+        sa.Column("suggestion", postgresql.JSONB(), nullable=True),
         sa.Column("external_comment_id", sa.BigInteger(), nullable=True),
-        sa.Column("posted_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("external_review_id", sa.BigInteger(), nullable=True),
+        sa.Column("posted_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False,
                   server_default=sa.text("now()")),
         sa.PrimaryKeyConstraint("id"),
@@ -841,8 +872,16 @@ def upgrade() -> None:
                                 ondelete="CASCADE"),
         sa.UniqueConstraint("job_id", "fingerprint",
                             name="uq_pr_review_comments_job_fingerprint"),
-        sa.CheckConstraint("side IS NULL OR side IN ('LEFT','RIGHT')",
+        sa.CheckConstraint("side IN ('old','new')",
                            name="ck_pr_review_comments_side"),
+        sa.CheckConstraint("severity IN ('critical','high','medium','low')",
+                           name="ck_pr_review_comments_severity"),
+        sa.CheckConstraint("category IN ('security','correctness',"
+                           "'concurrency','performance','maintainability')",
+                           name="ck_pr_review_comments_category"),
+        sa.CheckConstraint("line_number >= 1 AND (start_line IS NULL OR "
+                           "(start_line >= 1 AND start_line <= line_number))",
+                           name="ck_pr_review_comments_lines"),
     )
 
     op.create_table(
@@ -975,8 +1014,8 @@ UPDATE pr_review_jobs
   — monthly partitioning on `created_at`, or a purge of terminal rows older than N
   days. Decide before the first busy month, not after.
 * **`updated_at` on `pr_review_comments`.** Absent by design: comment rows are
-  written once and only patched with `external_comment_id`/`posted_at`. If comments
-  become editable, add the column and extend the trigger.
+  written once, after the review is posted, and never patched. If comments become
+  editable, add the column and extend the trigger.
 * **The per-author rate limit needs no index of its own.** It counts one
   account's jobs by author over the last day, which `ix_pr_review_jobs_account_history`
   already serves — a day of rows for one account is under a hundred at this
