@@ -1,0 +1,13 @@
+id: perf-unbounded-response-cache
+intent: "detection: a module-level dict grows with every distinct URL and is never evicted"
+pattern: "memory leak through an unbounded in-process cache"
+metrics: detection
+fixture: change.diff
+title: "Cache GET responses"
+description: "Speeds up repeated reads by memoising response bodies per URL."
+expected:
+  - path: app/cache_middleware.py
+    line: 14
+    side: new
+    category: performance
+    severity: medium

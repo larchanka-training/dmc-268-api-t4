@@ -1,0 +1,9 @@
+id: hold-neg-bounded-cache-with-lock
+intent: "negative control (hold-out): a cache that is bounded and a lock that is held correctly"
+pattern: "bounded lru_cache and a single lock; looks like leak/race territory, is not"
+metrics: negative control
+fixture: change.diff
+title: "Memoise exchange-rate lookups"
+description: "Caches at most 256 lookups and serialises counter updates."
+tags: [holdout]
+expected: []

@@ -1,0 +1,8 @@
+id: neg-whitelisted-order-by
+intent: "negative control: an f-string builds ORDER BY, but only from a fixed whitelist"
+pattern: "looks like SQL injection, is not (whitelisted identifier, bound values)"
+metrics: negative control
+fixture: change.diff
+title: "Add a sortable users list"
+description: "The sort column is mapped through a fixed dictionary; filters use bound parameters."
+expected: []

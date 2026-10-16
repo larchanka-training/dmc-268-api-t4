@@ -1,0 +1,18 @@
+diff --git a/app/rates.py b/app/rates.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/rates.py
+@@ -0,0 +1,12 @@
++import requests
++from fastapi import APIRouter
++
++router = APIRouter()
++UPSTREAM = "https://rates.example.com/v1/latest"
++
++
++@router.get("/rates/{currency}")
++async def rate(currency: str):
++    response = requests.get(UPSTREAM, params={"base": currency}, timeout=10)
++    response.raise_for_status()
++    return response.json()

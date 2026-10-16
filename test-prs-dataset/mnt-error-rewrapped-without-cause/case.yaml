@@ -1,0 +1,13 @@
+id: mnt-error-rewrapped-without-cause
+intent: "detection: the original exception type and traceback are discarded"
+pattern: "exception re-raised as a bare Exception without chaining"
+metrics: detection
+fixture: change.diff
+title: "Wrap storage errors"
+description: "Callers should only see one error type from the storage layer."
+expected:
+  - path: app/storage.py
+    line: 9
+    side: new
+    category: maintainability
+    severity: low

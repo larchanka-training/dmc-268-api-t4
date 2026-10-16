@@ -1,0 +1,13 @@
+id: cor-empty-average-division
+intent: "detection: an empty input divides by zero"
+pattern: "unguarded division by len() of a possibly empty sequence"
+metrics: detection
+fixture: change.diff
+title: "Report mean build time"
+description: "Dashboard shows the mean duration of the last builds."
+expected:
+  - path: app/metrics.py
+    line: 6
+    side: new
+    category: correctness
+    severity: medium

@@ -1,0 +1,20 @@
+diff --git a/app/ledger.py b/app/ledger.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/ledger.py
+@@ -0,0 +1,14 @@
++class InsufficientFunds(Exception):
++    pass
++
++
++class Account:
++    def __init__(self, balance: int) -> None:
++        self.balance = balance
++
++
++def withdraw(account: Account, amount: int) -> int:
++    if account.balance > amount:
++        raise InsufficientFunds()
++    account.balance -= amount
++    return account.balance

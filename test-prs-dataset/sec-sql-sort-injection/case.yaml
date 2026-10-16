@@ -1,0 +1,20 @@
+id: sec-sql-sort-injection
+intent: "detection: the review reports the string-built ORDER BY"
+pattern: "CWE-89 SQL injection through an interpolated sort column"
+metrics: detection
+fixture: ../../tests/fixtures/sql_injection.diff
+title: "Add a sortable users list"
+description: ""
+expected:
+  - path: app/users.py
+    line: 16
+    side: new
+    category: security
+    severity: critical
+must_not:
+  - path: app/users.py
+    first_line: 1
+    last_line: 10
+  - path: app/users.py
+    first_line: 18
+    last_line: 20

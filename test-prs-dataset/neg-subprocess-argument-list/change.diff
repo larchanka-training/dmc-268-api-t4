@@ -1,0 +1,22 @@
+diff --git a/app/version.py b/app/version.py
+index 3f2a1c4..9b7e0d2 100644
+--- a/app/version.py
++++ b/app/version.py
+@@ -1 +1,17 @@
++import subprocess
++
+ VERSION = "1.4.0"
++
++
++def git_revision() -> str:
++    completed = subprocess.run(
++        ["git", "rev-parse", "--short", "HEAD"],
++        check=True,
++        capture_output=True,
++        text=True,
++    )
++    return completed.stdout.strip()
++
++
++def full_version() -> str:
++    return f"{VERSION}+{git_revision()}"
