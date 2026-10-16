@@ -40,6 +40,8 @@ jobs:
           LLM_PRIMARY_BASE_URL: ${{ vars.AI_DMC268_URL }}
           LLM_PRIMARY_MODEL: ${{ vars.LLM_PRIMARY_MODEL }}
           LLM_PRIMARY_PROVIDER_ORDER: ${{ vars.LLM_PRIMARY_PROVIDER_ORDER }}
+          # Same verifier as production (deploy.yml) and llm-smoke.yml; unset disables it.
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
           LLM_TIMEOUT_SECONDS: "300"
           LLM_TEMPERATURE: "0.0"
         run: |
