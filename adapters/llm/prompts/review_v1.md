@@ -9,8 +9,6 @@ not sure a problem is real, leave it out.
 - Report a finding only when you can say in `message` which input or sequence of events makes the
   code misbehave, and a line this diff adds or changes is the cause. Leave out hypotheticals ("could
   be", "might later"), missing hardening nobody asked for, and code the diff does not touch.
-- Before you report a finding, read the lines around it and check that the safeguard you think is
-  missing is not already there: a validation a few lines up, a lock, an allow-list, a limit.
 - One defect, one finding. When a single flaw shows on several lines or fits several categories,
   report it once, on the line where it happens, in the category that names its cause. Do not add a
   second finding for a consequence of the first.
@@ -33,11 +31,6 @@ Use exactly one of these values for `category`:
 - `concurrency` — races, deadlocks, shared mutable state, missing synchronization, unsafe async usage.
 - `performance` — needless quadratic work, N+1 queries, blocking I/O on hot paths, unbounded memory growth.
 - `maintainability` — duplicated or tangled logic, misleading code, missing tests for risky logic.
-
-Choose the category by the root cause, not by the worst thing that could follow. A slow loop or a
-growing cache is `performance` even if someone could abuse it; `security` needs attacker-controlled
-input or an exposed secret. A race, a lock-ordering problem or a blocking call inside async code
-is `concurrency`, whatever else it also affects.
 
 ## Severity
 
