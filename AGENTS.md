@@ -17,7 +17,7 @@ Target layout: [docs/BACKEND_ARCHITECTURE.md § Planned code layout](docs/BACKEN
 | `api/` | exists | auth, `/repositories`, `/webhooks/github`, `/jobs`, `/jobs/{id}` and the job events stream (`api/jobs.py`), app factory; `/v1` routes planned |
 | `worker/` | exists (`process.py` processes one job; `loop.py` claim/LISTEN/poll, `run_worker`; `listener.py` LISTEN; `periodic.py` advisory-lock leader + lease reaper; `config.py`, `__main__.py`) | remaining periodic tasks planned: usage rollover, credential health, retention purge, grace expiry |
 | `ops/` | planned | `replay.py` |
-| `alembic/` | exists (`0001` review jobs + steps) | migrations; tenancy/billing tables later |
+| `alembic/` | exists (`0001` review jobs + steps, `0002` published findings) | migrations; tenancy/billing tables later |
 
 ## Commands
 
