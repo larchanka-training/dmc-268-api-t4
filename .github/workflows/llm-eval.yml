@@ -5,6 +5,10 @@ name: LLM eval
 # pass/fail thresholds after the first baseline run.
 on:
   workflow_dispatch:
+  # TEMPORARY: lets the workflow run from this branch before it exists on main (GitHub registers
+  # workflow_dispatch only for files on the default branch). Remove before merging PR #42.
+  push:
+    branches: [feat/27-eval-harness]
 
 permissions:
   contents: read

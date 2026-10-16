@@ -13,10 +13,12 @@ def load(name: str) -> dict:
     return loaded
 
 
-def test_llm_eval_runs_only_on_manual_dispatch() -> None:
+def test_llm_eval_never_runs_on_a_pull_request_or_on_the_default_branch() -> None:
     triggers = load("llm-eval.yml")[True]  # YAML 1.1 reads the key `on` as True
 
-    assert set(triggers) == {"workflow_dispatch"}
+    assert "workflow_dispatch" in triggers
+    assert set(triggers) <= {"workflow_dispatch", "push"}
+    assert "main" not in (triggers.get("push") or {}).get("branches", [])
 
 
 def test_llm_eval_shares_the_smoke_concurrency_group_without_cancelling() -> None:
