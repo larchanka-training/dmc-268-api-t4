@@ -1,10 +1,13 @@
 """GET /jobs and GET /jobs/{job_id} over TestClient, with the in-memory job store."""
 
+import uuid
 from typing import Any
 
 from fastapi.testclient import TestClient
 
 from adapters.jobs.memory import MemoryJobStore
+from adapters.memory.review_comments import MemoryReviewCommentStore
+from domain.models import FindingSuggestion, Severity
 from domain.ports import JobStats, Profile
 from tests.api.test_repositories import sign_in
 from tests.conftest import (
@@ -15,14 +18,18 @@ from tests.conftest import (
     make_organization,
     make_user,
 )
+from tests.ports.test_review_comment_store import make_new
 from tests.worker.test_process import make_payload
 
 ORG = make_organization("acme", "100", installation_id=42)
 
 
-def client_for(clock: FixedClock, store: MemoryJobStore) -> TestClient:
+def client_for(
+    clock: FixedClock, store: MemoryJobStore, findings: MemoryReviewCommentStore | None = None
+) -> TestClient:
     identity = FakeIdentityProvider(Profile(user=make_user(), organizations=(ORG,)))
-    client = TestClient(build_test_app(clock, identity, jobs=store), base_url=TEST_ORIGIN)
+    app = build_test_app(clock, identity, jobs=store, findings=findings)
+    client = TestClient(app, base_url=TEST_ORIGIN)
     sign_in(client)
     return client
 
@@ -111,3 +118,62 @@ async def test_one_job_has_its_steps_and_bad_input_is_rejected(auth_clock: Fixed
     assert client.get("/jobs", params={"cursor": "%%%"}).status_code == 400
     assert client.get("/jobs", params={"limit": 0}).status_code == 400
     assert client.get("/jobs", params={"from": "yesterday"}).status_code == 400
+
+
+async def test_one_job_returns_its_published_findings_most_severe_first(
+    auth_clock: FixedClock,
+) -> None:
+    store = MemoryJobStore(clock=auth_clock)
+    findings = MemoryReviewCommentStore(store, clock=auth_clock)
+    job_id = await seed(auth_clock, store)
+    await findings.record(
+        job_id,
+        [
+            make_new("a" * 64, path="b.py", severity=Severity.LOW),
+            make_new(
+                "b" * 64,
+                path="a.py",
+                line=8,
+                severity=Severity.CRITICAL,
+                suggestion=FindingSuggestion(before=("x = 1",), after=("x = 2",)),
+                start_line=7,
+                comment_id=None,
+                review_id=900,
+            ),
+            make_new("c" * 64, path="c.py", comment_id=None, review_id=None),
+        ],
+    )
+    client = client_for(auth_clock, store, findings)
+
+    detail = client.get(f"/jobs/{job_id}").json()
+
+    pull_request = "https://github.com/octocat/hello-world/pull/7"
+    first, second, third = detail["findings"]
+    assert set(first) == {
+        "id",
+        "path",
+        "line",
+        "start_line",
+        "side",
+        "severity",
+        "category",
+        "message",
+        "suggestion",
+        "published_at",
+        "external_url",
+    }
+    uuid.UUID(first["id"])
+    assert {key: first[key] for key in ("path", "line", "start_line", "side")} == {
+        "path": "a.py",
+        "line": 8,
+        "start_line": 7,
+        "side": "new",
+    }
+    assert (first["severity"], first["category"]) == ("critical", "correctness")
+    assert first["message"] == f"Rendered comment <!-- {'b' * 64} -->"
+    assert first["suggestion"] == {"before": ["x = 1"], "after": ["x = 2"]}
+    assert first["published_at"] == auth_clock.now().isoformat()
+    assert first["external_url"] == f"{pull_request}#pullrequestreview-900"
+    assert second["path"] == "c.py" and second["external_url"] == pull_request
+    assert third["path"] == "b.py" and third["suggestion"] is None
+    assert third["external_url"] == f"{pull_request}#discussion_r5001"

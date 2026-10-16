@@ -14,6 +14,7 @@ from adapters.clock import SystemClock
 from adapters.db.config import DBSettings
 from adapters.db.job_events import PostgresJobEventsSource
 from adapters.db.repository import PostgresJobStore
+from adapters.db.review_comments import PostgresReviewCommentStore
 from adapters.db.session import build_engine
 from adapters.github.app_auth import GitHubAppAuth
 from adapters.github.config import GitHubAppSettings
@@ -25,6 +26,7 @@ from adapters.jobs.memory import MemoryJobStore
 from adapters.memory.auth import InMemorySessionStore, InMemorySignInAttemptStore
 from adapters.memory.job_events import InMemoryJobEventsSource
 from adapters.memory.repositories import InMemoryRepositoriesCache
+from adapters.memory.review_comments import MemoryReviewCommentStore
 from api.auth import router as auth_router
 from api.config import AppSettings
 from api.deps import (
@@ -45,6 +47,7 @@ from domain.ports import (
     IdentityProvider,
     JobEventsSource,
     JobStore,
+    ReviewCommentStore,
     SessionStore,
     SignInAttemptStore,
 )
@@ -89,6 +92,7 @@ def create_app(
     dispatch_inline: bool = True,
     engine: AsyncEngine | None = None,
     job_events: JobEventsSource | None = None,
+    findings: ReviewCommentStore | None = None,
 ) -> FastAPI:
     app = FastAPI(title="DMC-268 API", version="0.1.0", lifespan=_engine_lifespan(engine))
     app.state.services = Services(
@@ -101,6 +105,7 @@ def create_app(
         app_slug=app_slug,
         job_events=job_events if job_events is not None else InMemoryJobEventsSource(),
         jobs=jobs,
+        findings=findings if findings is not None else MemoryReviewCommentStore(jobs),
     )
     app.state.webhooks = GitHubWebhookDeps(
         jobs=jobs,
@@ -198,4 +203,5 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         job_events=(
             InMemoryJobEventsSource() if engine is None else PostgresJobEventsSource(engine)
         ),
+        findings=None if engine is None else PostgresReviewCommentStore(engine),
     )
