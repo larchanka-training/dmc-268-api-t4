@@ -1,0 +1,13 @@
+diff --git a/app/profile.py b/app/profile.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/profile.py
+@@ -0,0 +1,7 @@
++from datetime import UTC, datetime
++
++
++def get_display_name(session, user) -> str:
++    user.last_seen = datetime.now(UTC)
++    session.commit()
++    return user.nickname or user.email.split("@")[0]

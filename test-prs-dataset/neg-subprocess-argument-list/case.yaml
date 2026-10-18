@@ -1,0 +1,8 @@
+id: neg-subprocess-argument-list
+intent: "negative control: a subprocess call that passes an argument list, no shell"
+pattern: "looks like command execution, is safe (fixed argv, no shell, constant command)"
+metrics: negative control
+fixture: change.diff
+title: "Stamp the build with the git revision"
+description: "Reads the current commit once at start-up."
+expected: []

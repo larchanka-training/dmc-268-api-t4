@@ -1,0 +1,13 @@
+diff --git a/app/identity.py b/app/identity.py
+index 3f2a1c4..9b7e0d2 100644
+--- a/app/identity.py
++++ b/app/identity.py
+@@ -5,3 +5,8 @@
+ 
+ def issue(user_id: str) -> str:
+     return jwt.encode({"sub": user_id}, SECRET, algorithm="HS256")
++
++
++def caller_from(token: str) -> str:
++    claims = jwt.decode(token, options={"verify_signature": False})
++    return claims["sub"]

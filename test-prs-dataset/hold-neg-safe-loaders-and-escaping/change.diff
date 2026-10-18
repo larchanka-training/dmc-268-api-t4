@@ -1,0 +1,24 @@
+diff --git a/app/profile_card.py b/app/profile_card.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/profile_card.py
+@@ -0,0 +1,18 @@
++import hmac
++import html
++
++import yaml
++
++
++def parse_settings(raw: str) -> dict:
++    data = yaml.safe_load(raw)
++    return data if isinstance(data, dict) else {}
++
++
++def render_card(settings: dict) -> str:
++    name = html.escape(str(settings.get("display_name", "anonymous")))
++    return f"<div class=\"card\">{name}</div>"
++
++
++def signature_ok(expected: str, received: str) -> bool:
++    return hmac.compare_digest(expected.encode(), received.encode())

@@ -1,0 +1,13 @@
+id: cor-inverted-balance-check
+intent: "detection: the guard rejects the withdrawals it should allow"
+pattern: "inverted comparison in a guard clause"
+metrics: detection
+fixture: change.diff
+title: "Reject overdrafts"
+description: "Raises InsufficientFunds when the account cannot cover the amount."
+expected:
+  - path: app/ledger.py
+    line: 11
+    side: new
+    category: correctness
+    severity: high

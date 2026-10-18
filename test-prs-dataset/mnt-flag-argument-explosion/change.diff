@@ -1,0 +1,27 @@
+diff --git a/app/export.py b/app/export.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/export.py
+@@ -0,0 +1,21 @@
++import csv
++import gzip
++import io
++
++
++def export_rows(rows, as_csv, compress, include_header, legacy_dates, strict, dedupe):
++    if dedupe:
++        rows = list({tuple(row.items()): row for row in rows}.values())
++    if strict and not rows:
++        raise ValueError("nothing to export")
++    buffer = io.StringIO()
++    writer = csv.writer(buffer)
++    if as_csv and include_header and rows:
++        writer.writerow(rows[0].keys())
++    for row in rows:
++        values = list(row.values())
++        if legacy_dates:
++            values = [str(v).replace("-", "/") for v in values]
++        writer.writerow(values)
++    data = buffer.getvalue().encode()
++    return gzip.compress(data) if compress else data

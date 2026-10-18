@@ -1,0 +1,14 @@
+diff --git a/app/importer.py b/app/importer.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/importer.py
+@@ -0,0 +1,8 @@
++def unique_events(events: list[dict]) -> list[dict]:
++    seen_ids: list[str] = []
++    unique: list[dict] = []
++    for event in events:
++        if event["id"] not in seen_ids:
++            seen_ids.append(event["id"])
++            unique.append(event)
++    return unique

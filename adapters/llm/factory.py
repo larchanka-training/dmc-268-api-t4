@@ -1,9 +1,10 @@
 import time
+from collections.abc import Callable
 
 import httpx
 
 from adapters.llm.config import LLMSettings, ProviderSettings
-from adapters.llm.gateway import FallbackLLMGateway
+from adapters.llm.gateway import ChatProvider, FallbackLLMGateway
 from adapters.llm.keys import Clock, KeyPool
 from adapters.llm.openai_compat import OpenAICompatibleProvider
 from adapters.llm.reflection import JevVerifier
@@ -16,14 +17,18 @@ def build_gateway(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
     clock: Clock = time.monotonic,
+    wrap_provider: Callable[[ChatProvider], ChatProvider] | None = None,
 ) -> LLMGateway:
+    """Wire the review pipeline; wrap_provider lets the eval harness observe each provider."""
     configured = [settings.primary]
     if settings.fallback is not None:
         configured.append(settings.fallback)
-    providers = [
+    providers: list[ChatProvider] = [
         _build_provider(provider, settings, transport=transport, clock=clock)
         for provider in configured
     ]
+    if wrap_provider is not None:
+        providers = [wrap_provider(provider) for provider in providers]
     return FallbackLLMGateway(
         providers,
         max_input_tokens=settings.max_input_tokens,

@@ -1,0 +1,15 @@
+diff --git a/app/storage.py b/app/storage.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/storage.py
+@@ -0,0 +1,9 @@
++import json
++from pathlib import Path
++
++
++def load_settings(path: Path) -> dict:
++    try:
++        return json.loads(path.read_text(encoding="utf-8"))
++    except Exception as exc:
++        raise Exception(str(exc))

@@ -1,0 +1,11 @@
+diff --git a/app/progress.py b/app/progress.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/progress.py
+@@ -0,0 +1,5 @@
++def percent_done(done_bytes: int, total_bytes: int) -> int:
++    if total_bytes <= 0:
++        return 0
++    percent = done_bytes // total_bytes * 100
++    return min(percent, 100)

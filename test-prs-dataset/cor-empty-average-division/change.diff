@@ -1,0 +1,11 @@
+diff --git a/app/metrics.py b/app/metrics.py
+index 3f2a1c4..9b7e0d2 100644
+--- a/app/metrics.py
++++ b/app/metrics.py
+@@ -1,2 +1,6 @@
+ def slowest(durations: list[float]) -> float:
+     return max(durations, default=0.0)
++
++
++def mean_duration(durations: list[float]) -> float:
++    return sum(durations) / len(durations)

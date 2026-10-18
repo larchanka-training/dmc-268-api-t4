@@ -1,0 +1,14 @@
+id: hold-sec-ssrf-fetch-user-url
+intent: "detection (hold-out): the server fetches a URL chosen by the caller"
+pattern: "CWE-918 server-side request forgery"
+metrics: detection
+fixture: change.diff
+title: "Add link preview"
+description: "Fetches the page the user pasted and returns its title."
+tags: [holdout]
+expected:
+  - path: app/preview.py
+    line: 12
+    side: new
+    category: security
+    severity: high
