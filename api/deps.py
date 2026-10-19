@@ -10,7 +10,14 @@ from fastapi.responses import JSONResponse
 
 from api.config import AppSettings
 from domain.auth import Session, hash_session_id
-from domain.ports import Clock, IdentityProvider, SessionStore, SignInAttemptStore
+from domain.ports import (
+    Clock,
+    IdentityProvider,
+    JobEventsSource,
+    JobHistory,
+    SessionStore,
+    SignInAttemptStore,
+)
 from domain.repositories import RepositoriesService
 
 SESSION_COOKIE = "__Host-session"
@@ -51,6 +58,8 @@ class Services:
     clock: Clock
     repositories: RepositoriesService
     app_slug: str
+    job_events: JobEventsSource
+    jobs: JobHistory
 
 
 def services(request: Request) -> Services:

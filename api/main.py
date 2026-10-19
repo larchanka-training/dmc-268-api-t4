@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from adapters.clock import SystemClock
 from adapters.db.config import DBSettings
+from adapters.db.job_events import PostgresJobEventsSource
 from adapters.db.repository import PostgresJobStore
 from adapters.db.session import build_engine
 from adapters.github.app_auth import GitHubAppAuth
@@ -22,6 +23,7 @@ from adapters.identity.config import GitHubIdentitySettings
 from adapters.identity.github import GitHubIdentityProvider
 from adapters.jobs.memory import MemoryJobStore
 from adapters.memory.auth import InMemorySessionStore, InMemorySignInAttemptStore
+from adapters.memory.job_events import InMemoryJobEventsSource
 from adapters.memory.repositories import InMemoryRepositoriesCache
 from api.auth import router as auth_router
 from api.config import AppSettings
@@ -33,6 +35,7 @@ from api.deps import (
     enforce_csrf,
 )
 from api.github_setup import router as github_setup_router
+from api.jobs import router as jobs_router
 from api.repositories import router as repositories_router
 from api.webhooks.github import GitHubWebhookDeps
 from api.webhooks.github import router as github_webhook_router
@@ -40,7 +43,8 @@ from domain.ports import (
     Clock,
     GitProvider,
     IdentityProvider,
-    JobRepository,
+    JobEventsSource,
+    JobStore,
     SessionStore,
     SignInAttemptStore,
 )
@@ -79,11 +83,12 @@ def create_app(
     clock: Clock,
     repositories: RepositoriesService,
     app_slug: str,
-    jobs: JobRepository,
+    jobs: JobStore,
     vcs: GitProvider,
     webhook_secret: str,
     dispatch_inline: bool = True,
     engine: AsyncEngine | None = None,
+    job_events: JobEventsSource | None = None,
 ) -> FastAPI:
     app = FastAPI(title="DMC-268 API", version="0.1.0", lifespan=_engine_lifespan(engine))
     app.state.services = Services(
@@ -94,6 +99,8 @@ def create_app(
         clock=clock,
         repositories=repositories,
         app_slug=app_slug,
+        job_events=job_events if job_events is not None else InMemoryJobEventsSource(),
+        jobs=jobs,
     )
     app.state.webhooks = GitHubWebhookDeps(
         jobs=jobs,
@@ -126,6 +133,7 @@ def create_app(
     app.include_router(repositories_router)
     app.include_router(github_setup_router)
     app.include_router(github_webhook_router)
+    app.include_router(jobs_router)
     return app
 
 
@@ -148,7 +156,7 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     settings = AppSettings.from_env()
     app_settings = GitHubAppSettings.from_env()
     app_auth = GitHubAppAuth(app_settings, clock, transport=transport)
-    jobs: JobRepository
+    jobs: JobStore
     dispatch_inline: bool
     engine: AsyncEngine | None = None
     if "DATABASE_URL" in os.environ:
@@ -186,4 +194,8 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         webhook_secret=app_settings.webhook_secret,
         dispatch_inline=dispatch_inline,
         engine=engine,
+        # Without PostgreSQL no steps are recorded, so every stream answers 404.
+        job_events=(
+            InMemoryJobEventsSource() if engine is None else PostgresJobEventsSource(engine)
+        ),
     )
