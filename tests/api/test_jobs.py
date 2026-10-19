@@ -1,12 +1,15 @@
 """GET /jobs and GET /jobs/{job_id} over TestClient, with the in-memory job store."""
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi.testclient import TestClient
 
+import api.jobs
 from adapters.jobs.memory import MemoryJobStore
 from adapters.memory.review_comments import MemoryReviewCommentStore
+from domain.jobs import JobStep, StepRecord, StepStatus
 from domain.models import FindingSuggestion, Severity
 from domain.ports import JobStats, Profile
 from tests.api.test_repositories import sign_in
@@ -113,11 +116,25 @@ async def test_one_job_has_its_steps_and_bad_input_is_rejected(auth_clock: Fixed
 
     assert detail["id"] == job_id
     assert detail["steps"] == [] and detail["findings"] == []
+    assert detail["stage"] is None
     assert client.get("/jobs/nope").status_code == 404
     assert client.get("/jobs", params={"status": "DONE"}).status_code == 400
     assert client.get("/jobs", params={"cursor": "%%%"}).status_code == 400
     assert client.get("/jobs", params={"limit": 0}).status_code == 400
     assert client.get("/jobs", params={"from": "yesterday"}).status_code == 400
+
+
+def test_a_step_and_the_job_s_current_stage_use_the_console_vocabulary() -> None:
+    # The in-memory store records no steps (see MemoryJobStore.steps), so the mapping
+    # from a step to its console stage is exercised directly instead of over TestClient.
+    at = datetime(2026, 1, 1, tzinfo=UTC)
+    first = StepRecord(step=JobStep.BUILD_CONTEXT, attempt=1, status=StepStatus.OK, started_at=at)
+    latest = StepRecord(step=JobStep.LLM_CALL, attempt=1, status=StepStatus.RUNNING, started_at=at)
+
+    assert api.jobs._step_json(latest)["stage"] == "reviewing"
+    # jobs.steps() orders by (attempt, seq): the last element is the most recent step.
+    assert api.jobs._current_stage((first, latest)) == "reviewing"
+    assert api.jobs._current_stage(()) is None
 
 
 async def test_one_job_returns_its_published_findings_most_severe_first(
