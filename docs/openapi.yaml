@@ -857,8 +857,18 @@ components:
       allOf:
         - $ref: "#/components/schemas/Job"
         - type: object
-          required: [steps, findings]
+          required: [stage, steps, findings]
           properties:
+            stage:
+              type: [string, "null"]
+              enum: [collecting_context, reviewing, validating, publishing, null]
+              description: |
+                The console's progress-bar stage of the most recent step (the last entry
+                of `steps`), for a console that polls this endpoint instead of the event
+                stream. Null before the first step is recorded. It is where the pipeline
+                got to, not whether it is still running: a COMPLETED job reads
+                publishing, a job SKIPPED at GATE reads reviewing, and a RETRYING job
+                keeps the stage of the step that failed. Use `status` for that.
             summary:
               type: [string, "null"]
               description: The summary comment posted on the pull request.
@@ -878,13 +888,17 @@ components:
 
     JobStep:
       type: object
-      required: [step, status, started_at]
+      required: [step, status, stage, started_at]
       properties:
         step:
           type: string
           enum:
             [CLAIMED, AUTH, FETCH_DIFF, BUILD_CONTEXT, REDACT, GATE, LLM_CALL, POSTPROCESS, POST_FEEDBACK, METER]
         status: { type: string, enum: [RUNNING, OK, FAILED, SKIPPED] }
+        stage:
+          type: string
+          enum: [collecting_context, reviewing, validating, publishing]
+          description: The console's progress-bar stage for this step, the same mapping as `JobEvent.stage`.
         attempt: { type: integer, minimum: 0 }
         started_at: { type: string, format: date-time }
         finished_at: { type: [string, "null"], format: date-time }
