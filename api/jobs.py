@@ -1,8 +1,10 @@
 """Review jobs for the console: the list, one job, and its live progress.
 
 `GET /jobs` lists the current organisation's jobs, newest first, keyset-paged.
-`GET /jobs/{job_id}` returns one job with its pipeline steps and published findings. A job
-is visible to a session that has an organisation on the job's installation; any other job
+`GET /jobs/{job_id}` returns one job with its pipeline steps and published findings, plus a
+top-level `stage` — the same 4-value console stage as the SSE events below, taken from the
+most recent step, for a console that only polls this endpoint and never opens the stream. A
+job is visible to a session that has an organisation on the job's installation; any other job
 answers 404.
 
 `GET /jobs/{job_id}/events` streams the job's status and step changes until it reaches a
@@ -26,7 +28,7 @@ Wire format, one block per event:
 import json
 import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -117,6 +119,8 @@ async def read_job(
     pull_request_url = _pull_request_url(job)
     return {
         **_job_json(job),
+        # The console's 4-stage progress bar; null before the first step is recorded.
+        "stage": _current_stage(steps),
         # Not stored yet: the summary, the diagnostic log and the check run link.
         "summary": None,
         "error_log": None,
@@ -291,9 +295,20 @@ def _step_json(step: StepRecord) -> dict[str, Any]:
     return {
         "step": str(step.step),
         "status": str(step.status),
+        "stage": str(ui_stage(step.step)),
         "attempt": step.attempt,
         "started_at": step.started_at.isoformat(),
         "finished_at": _iso(step.finished_at),
         "error_kind": step.error_kind,
         "metrics": {},
     }
+
+
+def _current_stage(steps: Sequence[StepRecord]) -> str | None:
+    """The stage the console's progress bar should highlight: the most recent step's.
+
+    `jobs.steps` orders by `(attempt, seq)` (adapters/db/repository.py), so the last
+    element is the most recent step of the most recent attempt. `None` before the first
+    step is recorded, which is the same "not started yet" the SSE snapshot shows.
+    """
+    return None if not steps else str(ui_stage(steps[-1].step))
