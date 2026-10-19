@@ -1,8 +1,9 @@
 """Review jobs for the console: the list, one job, and its live progress.
 
 `GET /jobs` lists the current organisation's jobs, newest first, keyset-paged.
-`GET /jobs/{job_id}` returns one job with its pipeline steps. A job is visible to a
-session that has an organisation on the job's installation; any other job answers 404.
+`GET /jobs/{job_id}` returns one job with its pipeline steps and published findings. A job
+is visible to a session that has an organisation on the job's installation; any other job
+answers 404.
 
 `GET /jobs/{job_id}/events` streams the job's status and step changes until it reaches a
 terminal status. It adds to polling of `/jobs` and does not replace it.
@@ -24,6 +25,7 @@ Wire format, one block per event:
 
 import json
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Annotated, Any
@@ -33,6 +35,7 @@ from fastapi.responses import StreamingResponse
 
 from api.deps import NO_STORE, ApiError, current_session, services
 from domain.auth import Session
+from domain.findings import PublishedFinding
 from domain.jobs import (
     ACTIVE_STATUSES,
     JobEvent,
@@ -110,15 +113,16 @@ async def read_job(
     if job is None or job.payload.installation_id not in visible:
         raise ApiError(404, "not_found")
     steps = await jobs.steps(job_id)
+    findings = await services(request).findings.for_job(job_id)
+    pull_request_url = _pull_request_url(job)
     return {
         **_job_json(job),
-        # Not stored yet: the summary, the diagnostic log, the check run link and the
-        # published findings.
+        # Not stored yet: the summary, the diagnostic log and the check run link.
         "summary": None,
         "error_log": None,
         "external_check_url": None,
         "steps": [_step_json(step) for step in steps],
-        "findings": [],
+        "findings": [_finding_json(finding, pull_request_url) for finding in findings],
     }
 
 
@@ -236,7 +240,7 @@ def _job_json(job: ReviewJob) -> dict[str, Any]:
             "head_ref": payload.head_ref or "",
             "base_ref": payload.base_ref or "",
             "head_sha": payload.head_sha or "",
-            "url": f"https://github.com/{payload.repo_full_name}/pull/{payload.pr_number}",
+            "url": _pull_request_url(job),
         },
         "status": str(job.status),
         "trigger": "command" if payload.event_action == "command" else "webhook",
@@ -248,6 +252,39 @@ def _job_json(job: ReviewJob) -> dict[str, Any]:
         "retry_count": job.retry_count,
         "next_attempt_at": _iso(job.next_attempt_at),
     }
+
+
+def _pull_request_url(job: ReviewJob) -> str:
+    payload = job.payload
+    return f"https://github.com/{payload.repo_full_name}/pull/{payload.pr_number}"
+
+
+def _finding_json(finding: PublishedFinding, pull_request_url: str) -> dict[str, Any]:
+    suggestion = finding.suggestion
+    return {
+        "id": str(uuid.UUID(finding.id)),
+        "path": finding.path,
+        "line": finding.line,
+        "start_line": finding.start_line,
+        "side": str(finding.side),
+        "severity": str(finding.severity),
+        "category": str(finding.category),
+        "message": finding.message,
+        "suggestion": None
+        if suggestion is None
+        else {"before": list(suggestion.before), "after": list(suggestion.after)},
+        "published_at": finding.posted_at.isoformat(),
+        "external_url": _finding_url(finding, pull_request_url),
+    }
+
+
+def _finding_url(finding: PublishedFinding, pull_request_url: str) -> str:
+    """The inline comment, else the review whose body carries the finding (D5)."""
+    if finding.external_comment_id is not None:
+        return f"{pull_request_url}#discussion_r{finding.external_comment_id}"
+    if finding.external_review_id is not None:
+        return f"{pull_request_url}#pullrequestreview-{finding.external_review_id}"
+    return pull_request_url
 
 
 def _step_json(step: StepRecord) -> dict[str, Any]:

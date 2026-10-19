@@ -15,6 +15,7 @@ from domain.ports import (
     IdentityProvider,
     JobEventsSource,
     JobHistory,
+    ReviewCommentStore,
     SessionStore,
     SignInAttemptStore,
 )
@@ -60,6 +61,7 @@ class Services:
     app_slug: str
     job_events: JobEventsSource
     jobs: JobHistory
+    findings: ReviewCommentStore
 
 
 def services(request: Request) -> Services:

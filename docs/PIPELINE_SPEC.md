@@ -357,6 +357,10 @@ saves a forge round-trip per row afterwards.
 differently on each forge. The API returns a ready `external_url`; assembling provider
 URLs in the dashboard would put forge knowledge in the one place that should have none.
 
+When the forge refused the inline comments and the findings went into the review body,
+there is no comment id; `external_review_id` is stored on every row, and the link points
+at the review instead (`#pullrequestreview-<id>` on GitHub).
+
 ### 7.4 Diff context is computed, never stored **[D6]**
 
 The dashboard renders each finding against the code it points at, with unfoldable context.
@@ -384,6 +388,31 @@ dashboard `stage` (`collecting_context`, `reviewing`, `validating`, `publishing`
 console's progress bar does not have to know the step set. The worker records steps in
 `pr_review_steps`, and the API rebuilds the events from them; the format is in
 [003-publisher-and-sse.md](./003-publisher-and-sse.md).
+
+---
+
+### 7.6 Published findings are written once, after the review is posted **[D8]**
+
+Two points of [WORKFLOW_DESIGN.md §5](./WORKFLOW_DESIGN.md) change with the implementation:
+
+1. **One transaction after posting, not a row per comment as it is posted.** GitHub posts
+   a review and its inline comments as one request, so there is no moment between two
+   comments to persist at. The rows are inserted together right after the request returns,
+   with the ids the forge reported. A crash between the request and the insert makes a
+   retry post again; pre-inserting pending rows would not help, because after a crash
+   nothing tells whether the forge accepted the request.
+2. **Already-posted fingerprints come from every job of the pull request**, not only the
+   most recent `COMPLETED` one. A job stores only what it posted itself, so a finding
+   posted two jobs ago would otherwise return. The lookup is keyed on
+   `(provider, installation_id, repo_id, pr_number)` and served by
+   `ix_pr_review_jobs_pr_history`; findings older than the job retention can be posted
+   again, which is acceptable.
+
+Only findings that reached the forge get a row. Those dropped as outside the diff, below
+the threshold, over the limit or already posted remain counts (`PublishStats`), shown in
+the review summary.
+If the insert fails after the review was posted, the job still ends `COMPLETED` and the
+failure is logged: retrying would post the whole review a second time.
 
 ---
 
@@ -422,6 +451,7 @@ covered by a throughput alert rather than by the UI
 | **D5** | Persist PR title, author login, head and base ref; return a ready `external_url` | migration `0001`, API | An unreadable review list and forge URL logic in the frontend |
 | **D6** | Two on-demand endpoints serve diff context; nothing is stored | worker/API, dashboard | The diff viewer has no data source |
 | **D7** | SSE stream of job events in addition to polling; events carry a dashboard `stage` | API, dashboard No live progress; the console keeps polling |
+| **D8** | Published findings are written in one transaction after posting; posted fingerprints span all of a PR's jobs | worker, `pr_review_comments` | Duplicate comments on every re-review |
 
 D1 is already the implemented design and needs only confirmation. D4 and D5 must be
 settled **before migration `0001` is applied**, which

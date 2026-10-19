@@ -47,7 +47,7 @@ def pg_engine() -> Iterator[AsyncEngine]:
 def engine(pg_engine: AsyncEngine) -> AsyncEngine:
     async def truncate() -> None:
         async with pg_engine.begin() as conn:
-            await conn.execute(text("TRUNCATE TABLE pr_review_steps, pr_review_jobs"))
+            await conn.execute(text("TRUNCATE TABLE pr_review_jobs CASCADE"))
 
     asyncio.run(truncate())
     return pg_engine

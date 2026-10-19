@@ -38,6 +38,7 @@ from domain.errors import (
     PrNotFoundError,
     ProviderUnavailableError,
 )
+from domain.findings import NewPublishedFinding, published_findings
 from domain.jobs import JobStep, StepStatus
 from domain.ports import (
     ClaimedJob,
@@ -46,6 +47,7 @@ from domain.ports import (
     JobStats,
     LLMGateway,
     PullRequestTarget,
+    ReviewCommentStore,
     ReviewJobStatus,
     ReviewPublisher,
     ReviewRequest,
@@ -64,6 +66,9 @@ class ReviewStage:
     gateway: LLMGateway
     publisher: ReviewPublisher
     policy: PublishPolicy = DEFAULT_POLICY
+    # Where published findings are kept, and what tells a re-review which ones the
+    # pull request already has. Without it every review posts every finding again.
+    comments: ReviewCommentStore | None = None
 
 
 #: Dev-only escape hatch: when "1", the fetched diff text is logged verbatim
@@ -235,11 +240,22 @@ async def process_claimed_job(
                     pr_description=context.description,
                 )
             )
+            posted = (
+                frozenset()
+                if review.comments is None
+                else await review.comments.posted_fingerprints(
+                    provider=payload.provider,
+                    installation_id=payload.installation_id,
+                    repo_id=payload.repo_id,
+                    pr_number=payload.pr_number,
+                )
+            )
             plan = build_plan(
                 result.findings,
                 model_summary=result.summary,
                 lines=CommentableLines.from_files(filtered.kept),
                 policy=review.policy,
+                posted_fingerprints=posted,
             )
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                 return False
@@ -256,6 +272,10 @@ async def process_claimed_job(
                 plan,
             )
             stats = replace(stats, findings_published=len(outcome.comments))
+            if review.comments is not None:
+                await _keep_findings(
+                    review.comments, claimed, published_findings(plan, outcome), log
+                )
         await progress.end(StepStatus.OK)
     except Exception as err:
         error_kind, retryable = _classify(err)
@@ -300,6 +320,31 @@ async def process_claimed_job(
         (time.monotonic() - started) * 1000,
     )
     return True
+
+
+async def _keep_findings(
+    comments: ReviewCommentStore,
+    claimed: ClaimedJob,
+    findings: tuple[NewPublishedFinding, ...],
+    log: logging.Logger,
+) -> None:
+    """Record what was posted. A failure here does not fail the job: the review is on
+    the forge already, and a retry would post it a second time. The dashboard misses
+    these findings and the next review may repeat them; the log says so."""
+    try:
+        await comments.record(claimed.job_id, findings)
+    except Exception as err:
+        payload = claimed.payload
+        log.error(
+            "review job findings not kept: job_id=%s provider=%s repo=%s pr_number=%s "
+            "findings=%d exc_class=%s",
+            claimed.job_id,
+            payload.provider,
+            payload.repo_full_name,
+            payload.pr_number,
+            len(findings),
+            type(err).__name__,
+        )
 
 
 async def _record_failure(

@@ -1,4 +1,5 @@
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -11,6 +12,9 @@ from domain.repositories import Repository
 from domain.tenancy import Organization, User
 
 if TYPE_CHECKING:
+    # domain.findings imports PublishOutcome from here; same reason as below.
+    from domain.findings import NewPublishedFinding, PublishedFinding
+
     # domain.jobs imports ReviewJobStatus from here; a runtime import would be circular.
     from domain.jobs import (
         JobEvent,
@@ -464,3 +468,25 @@ class JobHistory(Protocol):
 
 class JobStore(JobRepository, JobHistory, Protocol):
     """A queue the console can also read: both job stores are one."""
+
+
+class ReviewCommentStore(Protocol):
+    """Where published findings are kept (`pr_review_comments`).
+
+    `record` takes no lease: the comments are on the forge whether or not this
+    worker still owns the job, and the next review must know they are there.
+    """
+
+    async def record(self, job_id: str, findings: "Sequence[NewPublishedFinding]") -> None:
+        """Store the job's published findings in one transaction; all or none."""
+        ...
+
+    async def posted_fingerprints(
+        self, *, provider: str, installation_id: int, repo_id: int, pr_number: int
+    ) -> frozenset[str]:
+        """Fingerprints already posted on this pull request, by any of its jobs."""
+        ...
+
+    async def for_job(self, job_id: str) -> "tuple[PublishedFinding, ...]":
+        """The job's findings, most severe first (`domain.findings.reading_order`)."""
+        ...
