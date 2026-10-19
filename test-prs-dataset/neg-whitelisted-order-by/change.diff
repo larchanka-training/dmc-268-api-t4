@@ -1,0 +1,24 @@
+diff --git a/app/users.py b/app/users.py
+index 3f2a1c4..9b7e0d2 100644
+--- a/app/users.py
++++ b/app/users.py
+@@ -1,7 +1,19 @@
+ import sqlite3
+ 
+ DB_PATH = "app.db"
++SORT_COLUMNS = {"name": "name", "created": "created_at", "email": "email"}
+ 
+ 
+ def get_connection() -> sqlite3.Connection:
+     return sqlite3.connect(DB_PATH)
++
++
++def list_users(sort: str = "name", domain: str | None = None) -> list[tuple]:
++    column = SORT_COLUMNS.get(sort, "name")
++    query = "SELECT id, name, email FROM users"
++    params: list[str] = []
++    if domain:
++        query += " WHERE email LIKE ?"
++        params.append(f"%@{domain}")
++    query += f" ORDER BY {column}"
++    return get_connection().execute(query, params).fetchall()

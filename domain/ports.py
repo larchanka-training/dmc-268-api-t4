@@ -32,6 +32,7 @@ class ReviewRequest:
     diff_text: str
     pr_title: str
     pr_description: str
+    rules_markdown: str | None = None
 
 
 class LLMGateway(Protocol):

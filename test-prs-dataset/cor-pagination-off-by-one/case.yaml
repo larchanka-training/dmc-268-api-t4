@@ -1,0 +1,13 @@
+id: cor-pagination-off-by-one
+intent: "detection: the slice returns one more row than the page size"
+pattern: "off-by-one in a page slice"
+metrics: detection
+fixture: change.diff
+title: "Paginate the audit list"
+description: "Returns `size` rows per page."
+expected:
+  - path: app/pagination.py
+    line: 12
+    side: new
+    category: correctness
+    severity: medium

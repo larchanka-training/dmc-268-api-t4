@@ -1,0 +1,8 @@
+id: neg-rename-and-docstrings
+intent: "negative control: a rename plus type hints and docstrings; behaviour is unchanged"
+pattern: "clean refactor with no defect"
+metrics: negative control
+fixture: change.diff
+title: "Clarify the totals helper"
+description: "Renames calc to calculate_total, adds type hints and docstrings. No behaviour change."
+expected: []

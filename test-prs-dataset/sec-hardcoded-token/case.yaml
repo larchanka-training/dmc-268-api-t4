@@ -1,0 +1,13 @@
+id: sec-hardcoded-token
+intent: "detection: a credential is committed in source"
+pattern: "CWE-798 hard-coded credential in an integration client"
+metrics: detection
+fixture: change.diff
+title: "Add billing client"
+description: "Charges a customer through the internal billing service."
+expected:
+  - path: app/integrations/billing.py
+    line: 4
+    side: new
+    category: security
+    severity: high

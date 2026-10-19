@@ -157,7 +157,10 @@ def enforce_csrf(request: Request) -> JSONResponse | None:
     # reject every legitimate delivery. Their authentication is the
     # delivery signature, verified in the route
     # (docs/WORKFLOW_DESIGN.md §2 Step 2).
-    if request.url.path.startswith(_WEBHOOK_PREFIX):
+    # Behind uvicorn --root-path /api the request path carries the prefix
+    # (/api/webhooks/github), so match on the path the router sees.
+    route_path = request.scope["path"].removeprefix(request.scope.get("root_path", ""))
+    if route_path.startswith(_WEBHOOK_PREFIX):
         return None
     if request.method in _SAFE_METHODS:
         return None

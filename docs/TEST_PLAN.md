@@ -108,7 +108,7 @@ python -m adapters.llm.smoke tests/fixtures/sql_injection.diff \
 
 with `LLM_PRIMARY_API_KEYS` from secret `AI_DMC268_T4`, `LLM_PRIMARY_BASE_URL` from `vars.AI_DMC268_URL`, `LLM_PRIMARY_MODEL` from `vars.LLM_PRIMARY_MODEL`, and `LLM_TIMEOUT_SECONDS=300`. Standard output, which holds the findings text, goes to a runner temp file. Standard error, which holds provider, model, duration, counts, or the error line, is printed. The job summary records provider, model, finding count, and counts by severity and category. The finding message stays out of the summary. Exit is failure when the process fails or when `findings` is empty.
 
-The corpus and harness from issue #27 run on this same stand and score each case with [LLM quality method](#3-llm-quality-method). One case remains the SQL-injection fixture above; the harness adds the rest of the corpus around it.
+The corpus and harness from issue #27 run on this same stand and score each case with [LLM quality method](#3-llm-quality-method). The manual workflow [`llm-eval.yml`](../.github/workflows/llm-eval.yml) runs `python -m evals run test-prs-dataset`; it shares the `llm-smoke` concurrency group and writes only counts and finding keys to the job summary and the results artifact. Version 1 prints the numbers and does not gate on them. One case remains the SQL-injection fixture above; the harness adds the rest of the corpus around it.
 
 ## 3. LLM quality method
 
@@ -142,6 +142,7 @@ Changed hunks are the lines the diff marks added or removed. A finding on a cont
 - **Precision** = TP / (TP + FP). When TP + FP = 0, precision is 1.
 - **Recall** = TP / (TP + FN).
 - A case with an empty expected set is a **negative control**. Report precision and the hallucination count. Recall on that case is 1 when FP = 0. When FP > 0, omit recall for that case and leave the case out of corpus recall.
+- A run that returns no review counts as not schema-valid, whatever the cause. A run whose replies never parsed is **schema-invalid**; a run that failed on infrastructure (timeout, 5xx, exhausted keys, oversized input) is **errored**. Report the two separately. Either way the case contributes its expected defects as FN and no FP.
 - **Schema-valid rate** = (runs whose reply parses to `ReviewOut` after the gateway’s one corrective retry) / (runs). `parse_review` accepts a fenced ` ```json ` body. A reply that is not a review object is `InvalidReviewJSONError`. The gateway retries that error once, then moves on.
 - **Dropped-finding count** = findings the parser discarded (unknown severity or category, `line` < 1, empty message, path or suggestion over the schema limit, or the overflow past `FINDINGS_MAX`). Record a dropped finding in this count. A dropped finding is a parser event, separate from “the model found no bug.”
 

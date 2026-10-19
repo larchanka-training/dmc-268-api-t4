@@ -1,0 +1,13 @@
+id: mnt-flag-argument-explosion
+intent: "detection: a public function takes six interacting boolean flags"
+pattern: "boolean flag parameters that multiply code paths"
+metrics: detection
+fixture: change.diff
+title: "Add a report exporter"
+description: "One entry point for every export the product offers."
+expected:
+  - path: app/export.py
+    line: 6
+    side: new
+    category: maintainability
+    severity: low

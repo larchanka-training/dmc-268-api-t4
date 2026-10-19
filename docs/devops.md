@@ -166,8 +166,11 @@ gh workflow run deploy.yml -R larchanka-training/dmc-268-api-t4 --ref main -f im
     обязателен: без него сертификат перевыпускался бы на каждом деплое и упёрся бы в лимиты
     Let's Encrypt. Первый выпуск занимает до минуты, поэтому smoke делает повторы.
     **В настройках GitHub App** нужно указать адреса на https: Callback URL
-    `https://<site>/api/auth/github/callback` и Setup URL `https://<site>/api/github/setup`.
-    Если появится свой домен, меняется только `SITE_ADDRESS` (и эти два URL).
+    `https://<site>/api/auth/github/callback`, Setup URL `https://<site>/api/github/setup`
+    и Webhook URL `https://<site>/api/webhooks/github`. Префикс `/api` обязателен: без него
+    Caddy отдаёт запрос фронтенду, и GitHub получает 405. В коде и в `openapi.yaml` путь
+    записан без префикса (`/webhooks/github`), потому что Caddy срезает `/api`.
+    Если появится свой домен, меняется только `SITE_ADDRESS` (и эти три URL).
 19. **Старый адрес `http://<IP>` ведёт на имя сайта.** Сертификата на голый IP нет, поэтому
     стандартный редирект Caddy на `https://<IP>` в браузере давал ошибку. В Caddyfile отдельный
     блок `http://{$SERVER_IP}` отвечает 308 на `https://<site>{uri}`. `SERVER_IP` пишет в `.env`

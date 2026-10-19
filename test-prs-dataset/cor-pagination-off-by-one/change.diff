@@ -1,0 +1,18 @@
+diff --git a/app/pagination.py b/app/pagination.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/pagination.py
+@@ -0,0 +1,12 @@
++from collections.abc import Sequence
++from typing import TypeVar
++
++T = TypeVar("T")
++
++MAX_PAGE_SIZE = 100
++
++
++def page_of(items: Sequence[T], page: int, size: int) -> list[T]:
++    size = min(size, MAX_PAGE_SIZE)
++    start = page * size
++    return list(items[start : start + size + 1])

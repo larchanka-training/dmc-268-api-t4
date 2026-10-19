@@ -1,0 +1,61 @@
+name: LLM eval
+
+# Scores the gold dataset (test-prs-dataset/) with a live model: docs/TEST_PLAN.md § LLM quality
+# method. Manual only, like llm-smoke: ci.yml never receives an LLM key. Report-only for now; set
+# pass/fail thresholds after the first baseline run.
+on:
+  workflow_dispatch:
+  # TEMPORARY: lets the workflow run from this branch before it exists on main (GitHub registers
+  # workflow_dispatch only for files on the default branch). Remove before merging PR #42.
+  push:
+    branches: [feat/27-eval-harness]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: llm-smoke
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    # 29 cases run one after another. One case can take ~10 minutes in the worst case (a 300 s
+    # timeout plus one corrective retry); a healthy provider answers in well under a minute.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet ".[eval]"
+
+      - name: Validate the dataset
+        run: .venv/bin/python -m evals validate test-prs-dataset
+
+      - name: Score the dataset with the live key
+        env:
+          LLM_PRIMARY_API_KEYS: ${{ secrets.AI_DMC268_T4 }}
+          LLM_PRIMARY_BASE_URL: ${{ vars.AI_DMC268_URL }}
+          LLM_PRIMARY_MODEL: ${{ vars.LLM_PRIMARY_MODEL }}
+          LLM_PRIMARY_PROVIDER_ORDER: ${{ vars.LLM_PRIMARY_PROVIDER_ORDER }}
+          # Same verifier as production (deploy.yml) and llm-smoke.yml; unset disables it.
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          LLM_TIMEOUT_SECONDS: "300"
+          LLM_TEMPERATURE: "0.0"
+        run: |
+          # The summary and the results file hold counts and finding keys only (path, line, side,
+          # category, severity): never a message, a suggestion or a model reply.
+          .venv/bin/python -m evals run test-prs-dataset \
+            --summary "$RUNNER_TEMP/eval-summary.md" \
+            --results "$RUNNER_TEMP/eval-results.json" >/dev/null
+          cat "$RUNNER_TEMP/eval-summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the keys-only results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llm-eval-results
+          path: ${{ runner.temp }}/eval-results.json
+          if-no-files-found: ignore

@@ -1,0 +1,13 @@
+id: con-blocking-call-in-async
+intent: "detection: a synchronous HTTP call blocks the event loop"
+pattern: "blocking I/O inside an async handler"
+metrics: detection
+fixture: change.diff
+title: "Proxy the exchange rate"
+description: "Fetches the rate from the upstream provider."
+expected:
+  - path: app/rates.py
+    line: 10
+    side: new
+    category: concurrency
+    severity: medium

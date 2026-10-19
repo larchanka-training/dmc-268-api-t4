@@ -19,7 +19,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+eval = [
+    "pyyaml>=6",
+]
 dev = [
+    "pyyaml>=6",
+    "types-pyyaml",
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
@@ -28,7 +33,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["domain*", "adapters*", "api*", "worker*"]
+include = ["domain*", "adapters*", "api*", "worker*", "evals*"]
 
 [tool.setuptools.package-data]
 "adapters.llm" = ["prompts/*.md"]
