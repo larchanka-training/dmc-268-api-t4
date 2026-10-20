@@ -92,10 +92,29 @@ The implementation lives in `adapters/context/`. Parsing is CPU-only and does no
 | Java | `.java` |
 | Rust | `.rs` |
 
-In Rust there are no classes: a `fn` is a `function`, or a `method` inside an `impl` or
-`trait` block; `struct`, `enum`, `trait` and `impl` blocks count as `class`. A Rust doc
-comment (`///`) sits above the item, so it is the item's docstring and `start_line` begins
-at it rather than at the `fn` line.
+How each language's code maps onto the three kinds, and where a symbol's span starts:
+
+- **Python.** A `def` or `async def` is a `function`, or a `method` inside a `class`;
+  `class` is `class`. The span starts at the first decorator. The docstring is the first
+  string literal of the body, so it falls within `signature_end_line`.
+- **TypeScript, JavaScript.** A function declaration, or an arrow function or function
+  expression assigned to a `const`/`let`, is a `function`; a method, constructor, getter
+  or setter of a class is a `method`; `class`, and in TypeScript `interface` and `enum`,
+  count as `class`. The span starts at a JSDoc comment (`/** */`) directly above, or at
+  the first decorator.
+- **Go.** A `func` is a `function`, or a `method` when it has a receiver; a `type`
+  declaration of a `struct` or `interface` counts as `class`. The doc comment (`//` lines
+  directly above) is the docstring, so the span starts at it.
+- **Java.** There are no free functions: methods and constructors are `method`; `class`,
+  `interface`, `enum` and `record` count as `class`. The span starts at a Javadoc comment
+  (`/** */`) directly above, or at the first annotation.
+- **Rust.** A `fn` is a `function`, or a `method` inside an `impl` or `trait` block;
+  `struct`, `enum`, `trait` and `impl` blocks count as `class`. The doc comment (`///`)
+  sits above the item, so it is the docstring and the span starts at it; so do attributes
+  (`#[...]`).
+
+Anonymous lambdas and closures are never symbols of their own (an arrow function bound to
+a name is, as above): a change inside one belongs to the symbol that contains it.
 
 **Fallback.** An unsupported language, a parse with errors at the hunk, or a file over
 the size cap gets the hunk's lines plus 20 lines either side instead of tier 1, and no
