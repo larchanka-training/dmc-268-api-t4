@@ -38,9 +38,10 @@ sources:
 # Repository Rules Format Specification
 
 A repository can tell the reviewer what matters to it by committing `.review/rules.md`.
-The file is written by the repository's maintainers, which makes it tenant-supplied text:
-more trusted than a diff from a stranger, never trusted enough to steer the reviewer.
-Everything below follows from that.
+The file is read from the pull request's own branch (§1), so whoever writes the branch
+writes the rules: usually the repository's maintainers, sometimes the PR author, a
+stranger in the case of a fork. It is untrusted text: never trusted enough to steer the
+reviewer. Everything below follows from that.
 
 PR #40 shipped an interim parser (`adapters/llm/rules.py`) and the prompt isolation for
 rules. Where this document says **(PR #40)**, it confirms that behaviour as the
@@ -51,24 +52,28 @@ Decisions are marked **[R1]**–**[R12]**.
 
 ---
 
-## 1. Source: the base revision only **[R1]**
+## 1. Source: the pull request's own branch **[R1]**
 
-The rules are read from the pull request's **base** revision, at the base SHA the review
-is computed against:
+The rules are read from the pull request's **head** revision, at the head SHA the review
+is computed against, which is the same revision the diff and the code context come from
+([CONTEXT_AND_VERIFICATION_SPEC.md §1.3](./CONTEXT_AND_VERIFICATION_SPEC.md#13-source-c3)):
 
 ```
-GET /repos/{owner}/{repo}/contents/.review/rules.md?ref={base_sha}
+GET /repos/{owner}/{repo}/contents/.review/rules.md?ref={head_sha}
 Accept: application/vnd.github.raw+json
 ```
 
-A pull request's own edit to `.review/rules.md` does **not** apply to that pull request.
-The head branch belongs to the PR author; if the head revision applied, a PR could add
-`path: src/**` to `# Ignore` and pass its own review unchecked. The edit takes effect
-once it is merged, and until then the changed `rules.md` is reviewed like any other file
-in the diff.
+A pull request's own edit to `.review/rules.md` therefore applies to that pull request
+immediately. That is the point: a team that changes its rules sees them at work on the PR
+that changes them, and a branch can carry rules that suit it.
 
-For a pull request from a fork the base is the upstream repository, so the upstream's
-rules apply. This is the same property, not a special case.
+The cost is that the PR author controls the rules their own PR is reviewed by. They can
+add `path: src/**` to `# Ignore`, or drop a rule, and pass their own review unchecked. For
+a pull request from a fork, the fork's version applies, so a stranger can do the same.
+What stays out of their reach is level 1 of §3: security findings cannot be muted, and no
+rule can change the output or the bot's behaviour. The rest is made **visible** rather than
+prevented: when the diff touches `.review/rules.md`, the Check Run says so (§7), so the
+human reviewer sees that the PR was reviewed by rules it changed itself.
 
 ## 2. Syntax
 
@@ -137,8 +142,10 @@ reach the prompt, and are applied by code:
   `skip_no_reviewable_files` ([WORKFLOW_DESIGN.md §3](./WORKFLOW_DESIGN.md)).
 - At most 100 directives; the rest are dropped and counted.
 
-Inline markers in source code (`# review-ignore` and the like) are **not** supported:
-they live in head-branch code, which is exactly what §1 keeps out of control. **[R4]**
+Inline markers in source code (`# review-ignore` and the like) are **not** supported.
+Everything that narrows a review stays in one file, which the Check Run names when a PR
+changes it (§7); markers scattered through the source would be neither visible in one
+place nor flagged. **[R4]**
 
 ### 2.4 What the file does not configure **[R5]**
 
@@ -154,7 +161,7 @@ Three levels, strictly ordered. A lower level cannot override a higher one.
 | :--- | :--- | :--- |
 | 1. Base safety | Output schema, untrusted-data handling, "output is only comment text", no prompt disclosure, the security category is never muted | Us, in the versioned system prompt |
 | 2. Base review criteria | What counts as a defect, severities, "no style comments a linter would catch" | Us, in the versioned system prompt |
-| 3. Repository rules | `rules.md` | The repository's maintainers |
+| 3. Repository rules | `rules.md` | Whoever writes the PR's branch (§1) |
 
 What a repository rule can do:
 
@@ -239,7 +246,8 @@ The `BUILD_CONTEXT` step records, in `metrics`, counts and digests only
 | Key | Value |
 | :--- | :--- |
 | `rules_status` | `absent`, `applied`, `rejected:<reason>`, `ignored:forbidden` |
-| `rules_ref` | The base SHA the file was read at |
+| `rules_ref` | The head SHA the file was read at |
+| `rules_changed_in_pr` | `true` when the diff touches `.review/rules.md` (§1) |
 | `rules_digest` | sha256 of the raw file |
 | `rules_sections` | Recognised section names present, e.g. `["Security", "Ignore"]`; other sections are counted, not named |
 | `rules_kept`, `dropped_pattern`, `dropped_jev`, `dropped_over_limit` | PR #40 counters |
@@ -254,7 +262,11 @@ reading logs: **[R11]**
 ```
 Rules: .review/rules.md @ 3f2a9c1 — 6 rules, 2 ignore paths, 1 muted category; 1 rule dropped as suspicious.
 Rules: .review/rules.md @ 3f2a9c1 ignored — not valid UTF-8.
+Rules: .review/rules.md @ 3f2a9c1 — changed in this pull request; 5 rules, 3 ignore paths.
 ```
+
+When `rules_changed_in_pr` is true, the line always says "changed in this pull request",
+so the review is never read as if it ran under the rules the branch started from.
 
 No line when the file is absent.
 
@@ -262,7 +274,7 @@ No line when the file is absent.
 
 | Area | PR #40 | This specification |
 | :--- | :--- | :--- |
-| Source revision | Not fetched yet (`ReviewRequest.rules_markdown` is filled by the caller) | Base SHA (§1) |
+| Source revision | Not fetched yet (`ReviewRequest.rules_markdown` is filled by the caller) | Head SHA, the PR's own branch (§1) |
 | Recognised sections | Any heading is a free section | Same, plus the meanings in §2.2 |
 | `# Ignore` | Its items would become rules | Directives, never sent to a model (§2.3) |
 | Raw size, encoding | Not checked | 64 KB, strict UTF-8 (§4) |
