@@ -90,6 +90,12 @@ The implementation lives in `adapters/context/`. Parsing is CPU-only and does no
 | TypeScript, JavaScript | `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs` |
 | Go | `.go` |
 | Java | `.java` |
+| Rust | `.rs` |
+
+In Rust there are no classes: a `fn` is a `function`, or a `method` inside an `impl` or
+`trait` block; `struct`, `enum`, `trait` and `impl` blocks count as `class`. A Rust doc
+comment (`///`) sits above the item, so it is the item's docstring and `start_line` begins
+at it rather than at the `fn` line.
 
 **Fallback.** An unsupported language, a parse with errors at the hunk, or a file over
 the size cap gets the hunk's lines plus 20 lines either side instead of tier 1, and no
