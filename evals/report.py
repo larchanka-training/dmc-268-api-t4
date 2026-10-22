@@ -43,7 +43,7 @@ def _volume_lines(records: Sequence[RunRecord]) -> list[str]:
         f"- findings per case: **{_per_case(kept, runs)}** "
         f"(before the verifier {_per_case(before, runs)})",
         f"- verifier dropped: **{share}** ({rejected} of {before})",
-        f"- input tokens (estimated, chars/3): **{_per_case(tokens, runs)} per case** "
+        f"- input tokens (estimated, chars/3): **{tokens / max(runs, 1):.0f} per case** "
         f"({tokens} total over {calls} LLM call(s))",
         f"- near misses (right defect, wrong line or category): {misses}",
     ]
