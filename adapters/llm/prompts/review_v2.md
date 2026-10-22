@@ -30,8 +30,7 @@ release risk; tell the human reviewer what to check.
   `L<n> | ` is line n of the new file (context or added: `side` "new"), `O<n> | ` is line n
   of the old file (removed: `side` "old"). Copy n into `line`; never count lines. Keep the
   gutter out of `message` and `suggestion`.
-- `suggestion`: `{"before": [current lines verbatim], "after": [new lines]}` whenever the
-  fix fits in a few lines; `null` only when there is no concrete fix.
+- `suggestion`: `{"before": [current lines verbatim], "after": [new lines]}` or `null`.
 - `rule_id`: the repository rule (`R1`, ...) the finding violates, or `null`.
 - `risk` of merging the change: `high` (a critical/high defect, or auth, payments, migrations
   or concurrency changes), `medium` (a real defect or behaviour change in shared code), `low`
