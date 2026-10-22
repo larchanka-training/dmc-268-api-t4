@@ -228,3 +228,47 @@ def _parse_checklist(value: Any) -> tuple[tuple[str, ...], int, int]:
 def _failed_field(error: ValidationError) -> str:
     location = error.errors()[0]["loc"]
     return str(location[0]) if location else "finding"
+
+
+class _SummaryEnvelope(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    summary: str
+    risk: Any = None
+    checklist: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedSummary:
+    """The executive-summary agent's reply (prompts/summary_v1.md)."""
+
+    summary: str
+    risk: RiskLevel | None
+    checklist: tuple[str, ...]
+    risk_invalid: bool = False
+    checklist_invalid_items: int = 0
+    checklist_trimmed: int = 0
+
+
+def parse_summary(raw_reply: str) -> ParsedSummary:
+    """Validate a summary reply; raise InvalidReviewJSONError when it has no usable summary."""
+    try:
+        payload = json.loads(strip_code_fence(raw_reply))
+    except json.JSONDecodeError as exc:
+        raise InvalidReviewJSONError(f"reply is not valid JSON ({exc.msg})") from None
+    try:
+        envelope = _SummaryEnvelope.model_validate(payload)
+    except ValidationError as exc:
+        raise InvalidReviewJSONError(
+            f"reply does not match the summary schema ({exc.error_count()} error(s))"
+        ) from None
+    risk, risk_invalid = _parse_risk(envelope.risk)
+    checklist, invalid_items, trimmed_items = _parse_checklist(envelope.checklist)
+    return ParsedSummary(
+        summary=envelope.summary.strip()[:SUMMARY_MAX_LENGTH],
+        risk=risk,
+        checklist=checklist,
+        risk_invalid=risk_invalid,
+        checklist_invalid_items=invalid_items,
+        checklist_trimmed=trimmed_items,
+    )

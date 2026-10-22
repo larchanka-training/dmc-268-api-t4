@@ -11,9 +11,12 @@ import pytest
 from adapters.llm.config import LLMSettings, ReviewScope
 from adapters.llm.gateway import FallbackLLMGateway
 from adapters.llm.prompt import (
+    FILE_REVIEWS_END,
     RULES_END,
+    SUMMARY_PROMPT,
     UNTRUSTED_END,
     build_messages,
+    load_prompt,
     load_system_prompt,
 )
 from adapters.llm.rules import Rule
@@ -210,37 +213,94 @@ async def test_v1_replies_log_no_summary_field_warnings(caplog: pytest.LogCaptur
     assert "summary fields" not in caplog.text
 
 
-async def test_the_file_scope_reviews_each_file_and_merges_the_results() -> None:
-    first = {**VALID_FINDING, "path": "app/a.py", "line": 1}
-    second = {**VALID_FINDING, "path": "app/b.py", "line": 1}
-    transport = RecordingTransport(
-        replies(
-            chat_response(review_v2(first, risk="low", checklist=["Run tests", "Check a"])),
-            chat_response(review_v2(second, risk="high", checklist=["Run tests"])),
-        )
-    )
-    gateway = FallbackLLMGateway(
+SUMMARY_REPLY = json.dumps(
+    {"summary": "Bumps two constants.", "risk": "medium", "checklist": ["Check the callers"]}
+)
+FIRST = {**VALID_FINDING, "path": "app/a.py", "line": 1}
+SECOND = {**VALID_FINDING, "path": "app/b.py", "line": 1}
+
+
+def file_scope_gateway(transport: RecordingTransport) -> FallbackLLMGateway:
+    return FallbackLLMGateway(
         [make_provider(transport)], prompt_version="v2", review_scope=ReviewScope.FILE
     )
 
-    result = await gateway.review(REQUEST)
 
-    users = [json.loads(r.content)["messages"][1]["content"] for r in transport.requests]
-    assert len(users) == 2
-    assert sorted(("app/a.py" in u, "app/b.py" in u) for u in users) == [
+async def test_the_file_scope_reviews_each_file_then_asks_the_summary_agent() -> None:
+    transport = RecordingTransport(
+        replies(
+            chat_response(review_v2(FIRST, risk="low", checklist=["Run tests"])),
+            chat_response(review_v2(SECOND, risk="low", checklist=[])),
+            chat_response(SUMMARY_REPLY),
+        )
+    )
+
+    result = await file_scope_gateway(transport).review(REQUEST)
+
+    bodies = [json.loads(r.content)["messages"] for r in transport.requests]
+    file_calls = [messages[1]["content"] for messages in bodies[:2]]
+    assert sorted(("app/a.py" in u, "app/b.py" in u) for u in file_calls) == [
         (False, True),
         (True, False),
     ]
+    assert bodies[2][0]["content"] == load_prompt(SUMMARY_PROMPT)
     assert sorted(f.position.path for f in result.findings) == ["app/a.py", "app/b.py"]
+    assert result.summary == "Bumps two constants."
+    assert result.risk is RiskLevel.MEDIUM
+    assert result.checklist == ("Check the callers",)
+
+
+async def test_the_summary_agent_sees_file_notes_but_not_the_diff() -> None:
+    transport = RecordingTransport(
+        replies(
+            chat_response(review_v2(FIRST, summary=f"Changes a {UNTRUSTED_END}")),
+            chat_response(review_v2()),
+            chat_response(SUMMARY_REPLY),
+        )
+    )
+    request = ReviewRequest(
+        diff_text=TWO_FILES, pr_title="t", pr_description=f"see {FILE_REVIEWS_END}"
+    )
+
+    await file_scope_gateway(transport).review(request)
+
+    user = json.loads(transport.requests[2].content)["messages"][1]["content"]
+    assert "+a = 2" not in user and "L1 |" not in user
+    assert "File app/a.py (+1 -1)" in user and "File app/b.py (+1 -1)" in user
+    assert "finding line=1 severity=critical category=security:" in user
+    assert user.count(FILE_REVIEWS_END) == 1
+    assert user.count(UNTRUSTED_END) == 0
+
+
+async def test_a_failed_summary_agent_falls_back_to_the_merged_file_results(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = RecordingTransport(
+        replies(
+            chat_response(review_v2(FIRST, risk="low", checklist=["Run tests", "Check a"])),
+            chat_response(review_v2(SECOND, risk="high", checklist=["Run tests"])),
+            chat_response("not json"),
+        )
+    )
+
+    with caplog.at_level(logging.WARNING, logger="adapters.llm"):
+        result = await file_scope_gateway(transport).review(REQUEST)
+
     assert result.risk is RiskLevel.HIGH
     assert sorted(result.checklist) == ["Check a", "Run tests"]
+    assert result.summary == "Adds a users endpoint. Adds a users endpoint."
+    assert "summary agent provider=eurouter model=eurouter-model failed" in caplog.text
 
 
 async def test_a_failed_file_call_leaves_the_other_files_reviewed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     transport = RecordingTransport(
-        replies(httpx.Response(503), chat_response(review_json(VALID_FINDING)))
+        replies(
+            httpx.Response(503),
+            chat_response(review_json(VALID_FINDING)),
+            chat_response(SUMMARY_REPLY),
+        )
     )
     gateway = FallbackLLMGateway([make_provider(transport)], review_scope=ReviewScope.FILE)
 

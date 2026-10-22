@@ -13,8 +13,10 @@ from adapters.llm.config import (
 )
 from adapters.llm.prompt import (
     ChatMessage,
+    FileReview,
     build_correction_messages,
     build_messages,
+    build_summary_messages,
     estimate_tokens,
 )
 from adapters.llm.reflection import VerificationReport
@@ -24,11 +26,14 @@ from adapters.llm.schema import (
     CHECKLIST_MAX_ITEMS,
     InvalidReviewJSONError,
     ParsedReview,
+    ParsedSummary,
     parse_review,
+    parse_summary,
 )
-from domain.diff import split_by_file
+from domain.diff import DiffLineKind, parse_diff, split_by_file
 from domain.errors import (
     AllProvidersFailedError,
+    DiffFormatError,
     LLMGatewayError,
     LLMInputTooLargeError,
     LLMOutputError,
@@ -197,7 +202,7 @@ class FallbackLLMGateway:
         if len(parts) == 1:
             result = await self._first_pass(parts[0], rules)
         else:
-            result = await self._first_pass_by_file(parts, rules)
+            result = await self._first_pass_by_file(request, parts, rules)
         if self._verifier is None:
             return result
         try:
@@ -244,9 +249,13 @@ class FallbackLLMGateway:
         )
 
     async def _first_pass_by_file(
-        self, parts: Sequence[ReviewRequest], rules: Sequence[Rule]
+        self, request: ReviewRequest, parts: Sequence[ReviewRequest], rules: Sequence[Rule]
     ) -> ReviewResult:
-        """One first-pass call per file; a file whose call fails is left out, not the review."""
+        """One first-pass call per file, then the summary agent over the per-file results.
+
+        A file whose call fails is left out, not the review; a failed summary call falls back
+        to the merged per-file summary, risk and checklist.
+        """
         limit = asyncio.Semaphore(FILE_CALLS_CONCURRENCY)
 
         async def one(part: ReviewRequest) -> ReviewResult:
@@ -267,7 +276,60 @@ class FallbackLLMGateway:
                 len(failures),
                 len(parts),
             )
-        return merge_file_results(results)
+        merged = merge_file_results(results)
+        reviews = [
+            file_review(part, outcome)
+            for part, outcome in zip(parts, outcomes, strict=True)
+            if isinstance(outcome, ReviewResult)
+        ]
+        summary = await self._summarize(request, reviews)
+        if summary is None:
+            return merged
+        return dataclasses.replace(
+            merged, summary=summary.summary, risk=summary.risk, checklist=summary.checklist
+        )
+
+    async def _summarize(
+        self, request: ReviewRequest, reviews: Sequence[FileReview]
+    ) -> ParsedSummary | None:
+        """The executive summary of the whole pull request; None when no provider gives one."""
+        messages = build_summary_messages(request, reviews)
+        estimated = estimate_tokens(messages)
+        if estimated > self._max_input_tokens:
+            logger.warning(
+                "summary agent skipped: ~%d tokens over the %d-token input budget",
+                estimated,
+                self._max_input_tokens,
+            )
+            return None
+        for provider in self._providers:
+            started = time.monotonic()
+            try:
+                parsed = parse_summary(await provider.complete(messages))
+            except (LLMGatewayError, InvalidReviewJSONError) as exc:
+                logger.warning(
+                    "summary agent provider=%s model=%s failed (%s)",
+                    provider.name,
+                    provider.model,
+                    type(exc).__name__,
+                )
+                continue
+            logger.info(
+                "summary agent provider=%s model=%s duration=%.2fs files=%d risk=%s "
+                "checklist=%d risk_invalid=%s checklist_invalid=%d checklist_trimmed=%d",
+                provider.name,
+                provider.model,
+                time.monotonic() - started,
+                len(reviews),
+                parsed.risk or "none",
+                len(parsed.checklist),
+                parsed.risk_invalid,
+                parsed.checklist_invalid_items,
+                parsed.checklist_trimmed,
+            )
+            return parsed
+        logger.warning("summary agent failed on every provider, using the merged file summaries")
+        return None
 
     async def _first_pass(self, request: ReviewRequest, rules: Sequence[Rule]) -> ReviewResult:
         causes: list[LLMGatewayError] = []
@@ -285,6 +347,22 @@ class FallbackLLMGateway:
         error = AllProvidersFailedError(causes)
         logger.error("%s", error)
         raise error
+
+
+def file_review(part: ReviewRequest, result: ReviewResult) -> FileReview:
+    """What the summary agent learns about one file: path, size of the change, the result."""
+    try:
+        files = parse_diff(part.diff_text)
+    except DiffFormatError:
+        files = ()
+    lines = [line for file in files for hunk in file.hunks for line in hunk.lines]
+    return FileReview(
+        path=(files[0].new_path or files[0].old_path) if files else "(unparsed diff)",
+        added=sum(line.kind is DiffLineKind.ADDED for line in lines),
+        deleted=sum(line.kind is DiffLineKind.DELETED for line in lines),
+        summary=result.summary,
+        findings=result.findings,
+    )
 
 
 def merge_file_results(results: Sequence[ReviewResult]) -> ReviewResult:
