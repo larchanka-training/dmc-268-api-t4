@@ -19,6 +19,18 @@ class Category(StrEnum):
     MAINTAINABILITY = "maintainability"
 
 
+class RiskLevel(StrEnum):
+    """Release risk of a whole pull request, for the human reviewer (issue #55)."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+# Lowest first, so max(..., key=RISK_ORDER.index) picks the higher risk.
+RISK_ORDER: tuple[RiskLevel, ...] = (RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH)
+
+
 class DiffSide(StrEnum):
     OLD = "old"
     NEW = "new"
@@ -79,3 +91,7 @@ class ReviewResult:
     model: str
     verification: VerificationOutcome = VerificationOutcome.DISABLED
     rejected_by_verifier: int = 0
+    # The model's own assessment (prompt v2). None when it gave none or an invalid one;
+    # publishing then falls back to the risk the findings imply.
+    risk: RiskLevel | None = None
+    checklist: tuple[str, ...] = ()

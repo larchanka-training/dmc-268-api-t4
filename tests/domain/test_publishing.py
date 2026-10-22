@@ -8,16 +8,20 @@ from domain.models import (
     Finding,
     FindingPosition,
     FindingSuggestion,
+    RiskLevel,
     Severity,
 )
 from domain.publishing import (
+    NO_ISSUES_LINE,
     SUMMARY_FILES_SHOWN,
     SUMMARY_MARKER,
+    SUMMARY_MAX_LENGTH,
     CheckConclusion,
     CommentableLines,
     PublishPolicy,
     ReviewEvent,
     Verdict,
+    assess_risk,
     at_least,
     build_plan,
     fingerprint,
@@ -306,3 +310,98 @@ def test_redaction_applies_to_everything_that_leaves() -> None:
     assert secret not in plan.summary
     assert secret not in plan.comments[0].body
     assert "[REDACTED]" in plan.comments[0].body
+
+
+# --- Smart summary: risk and checklist (issue #55) ---------------------------
+
+
+def test_a_critical_finding_lifts_a_low_model_risk_to_high() -> None:
+    plan = build_plan(
+        [finding(severity=Severity.CRITICAL)],
+        model_summary="Adds sorting.",
+        lines=lines(),
+        model_risk=RiskLevel.LOW,
+    )
+
+    assert plan.risk is RiskLevel.HIGH
+    assert "**Risk: High**" in plan.summary
+    assert "the model said Low" in plan.summary
+
+
+@pytest.mark.parametrize(
+    ("severities", "model_risk", "expected"),
+    [
+        ((Severity.HIGH,), RiskLevel.LOW, RiskLevel.MEDIUM),
+        ((Severity.HIGH,), RiskLevel.HIGH, RiskLevel.HIGH),
+        ((Severity.MEDIUM, Severity.LOW), RiskLevel.LOW, RiskLevel.LOW),
+        ((Severity.MEDIUM,), None, RiskLevel.LOW),
+        ((Severity.CRITICAL,), None, RiskLevel.HIGH),
+        ((), RiskLevel.MEDIUM, RiskLevel.MEDIUM),
+    ],
+)
+def test_the_risk_is_never_below_what_the_findings_imply(
+    severities: tuple[Severity, ...], model_risk: RiskLevel | None, expected: RiskLevel
+) -> None:
+    findings = [finding(severity=severity) for severity in severities]
+
+    assert assess_risk(model_risk, findings) is expected
+
+
+def test_without_a_model_risk_the_summary_says_where_the_risk_came_from() -> None:
+    plan = build_plan([finding(severity=Severity.HIGH)], model_summary="", lines=lines())
+
+    assert "**Risk: Medium** (from the findings' severity)" in plan.summary
+
+
+def test_no_findings_says_so_in_the_summary() -> None:
+    plan = build_plan([], model_summary="Renames a helper.", lines=lines())
+
+    assert NO_ISSUES_LINE in plan.summary
+    assert "No issues found in this review" in plan.summary
+    assert "**Risk: Low**" in plan.summary
+
+
+def test_findings_below_the_threshold_still_count_as_no_issues() -> None:
+    plan = build_plan(
+        [finding(severity=Severity.LOW)],
+        model_summary="",
+        lines=lines(),
+        policy=PublishPolicy(min_severity=Severity.MEDIUM),
+    )
+
+    assert NO_ISSUES_LINE in plan.summary
+
+
+def test_the_summary_shows_the_summary_risk_and_checklist_in_order() -> None:
+    plan = build_plan(
+        [finding()],
+        model_summary="Adds a sortable users list.",
+        lines=lines(),
+        model_risk=RiskLevel.MEDIUM,
+        checklist=("Check the sort whitelist", "Run the users tests"),
+        redact=lambda text: text.replace("whitelist", "allow-list"),
+    )
+
+    summary = plan.summary
+    order = [
+        summary.index("Adds a sortable users list."),
+        summary.index("**Risk: Medium**"),
+        summary.index("### Checklist for the reviewer"),
+        summary.index("- Check the sort allow-list"),
+        summary.index("- Run the users tests"),
+        summary.index("### Risks"),
+    ]
+    assert order == sorted(order)
+    assert NO_ISSUES_LINE not in summary
+
+
+def test_the_summary_stays_under_the_check_run_cap_with_a_long_model_summary() -> None:
+    plan = build_plan(
+        [finding()],
+        model_summary="word " * 50_000,
+        lines=lines(),
+        checklist=tuple("x" * 200 for _ in range(5)),
+    )
+
+    assert len(plan.summary) <= SUMMARY_MAX_LENGTH < 65_535
+    assert plan.summary.startswith(SUMMARY_MARKER)

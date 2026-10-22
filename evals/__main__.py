@@ -2,13 +2,16 @@
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import logging
 import sys
+import tempfile
 from pathlib import Path
 
 from adapters.llm.config import LLMSettings
 from domain.errors import LLMConfigurationError
+from evals.bundle import build_bundle
 from evals.loader import DatasetError, load_dataset
 from evals.models import Case
 from evals.report import render_summary, results_json
@@ -32,6 +35,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     run.add_argument("--only", action="append", default=[], metavar="ID", help="run this case only")
     run.add_argument("--summary", type=Path, help="write the Markdown summary here")
     run.add_argument("--results", type=Path, help="write the keys-only JSON results here")
+    run.add_argument(
+        "--bundle",
+        action="store_true",
+        help="review every scored case as one large pull request instead of case by case",
+    )
     return parser.parse_args(argv)
 
 
@@ -52,6 +60,16 @@ async def _run_all(runner: LiveRunner, cases: list[Case]) -> list[RunRecord]:
     return records
 
 
+def describe(settings: LLMSettings, *, bundle: bool) -> str:
+    """The factors a run varies, so every summary says what it measured."""
+    reflection = settings.reflection
+    verifier = f"on, keep >= {reflection.keep_threshold}" if reflection.is_active else "off"
+    return (
+        f"prompt {settings.prompt_version}, scope {settings.review_scope}, verifier {verifier}, "
+        f"max_tokens {settings.max_tokens}, dataset {'bundle' if bundle else 'cases'}"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     cases = _load(args.dataset)
@@ -69,13 +87,20 @@ def main(argv: list[str] | None = None) -> int:
         cases = [case for case in cases if case.id in args.only]
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     try:
-        runner = LiveRunner(LLMSettings.from_env())
+        settings = LLMSettings.from_env()
+        runner = LiveRunner(settings)
     except LLMConfigurationError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return EXIT_BAD_INPUT
 
-    records = asyncio.run(_run_all(runner, cases))
-    summary = render_summary(records)
+    with tempfile.TemporaryDirectory() as workdir:
+        if args.bundle:
+            fixture = Path(workdir) / "bundle.diff"
+            bundle, diff_text = build_bundle(cases, fixture)
+            fixture.write_text(diff_text, encoding="utf-8")
+            cases = [dataclasses.replace(bundle, fixture=fixture)]
+        records = asyncio.run(_run_all(runner, cases))
+    summary = render_summary(records, config=describe(settings, bundle=args.bundle))
     print(summary)
     if args.summary:
         args.summary.write_text(summary, encoding="utf-8")

@@ -1,4 +1,5 @@
 import json
+import logging
 
 import httpx
 import pytest
@@ -182,3 +183,20 @@ async def test_null_content_is_returned_as_empty_text() -> None:
 )
 def test_parse_retry_after(header: str | None, seconds: float) -> None:
     assert parse_retry_after(header) == seconds
+
+
+async def test_a_reply_cut_at_max_tokens_is_logged_with_counts_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    body = {
+        "choices": [{"message": {"content": '{"summary": "cut'}, "finish_reason": "length"}],
+        "usage": {"prompt_tokens": 900, "completion_tokens": 4096},
+    }
+    provider = make_provider(RecordingTransport(replies(httpx.Response(200, json=body))))
+
+    with caplog.at_level(logging.INFO, logger="adapters.llm"):
+        await provider.complete([{"role": "user", "content": "x"}])
+
+    assert "reply cut at max_tokens=" in caplog.text
+    assert "input_tokens=900 output_tokens=4096 finish_reason=length" in caplog.text
+    assert "cut" not in caplog.text.replace("reply cut at", "")
