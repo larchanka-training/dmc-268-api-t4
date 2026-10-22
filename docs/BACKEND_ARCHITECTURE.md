@@ -858,6 +858,8 @@ the row. The retention purge therefore also drops sessions past `expires_at`.
 
 ### Prompt injection
 
+Detailed for repository rules in [RULES_FORMAT_SPEC.md §6](./RULES_FORMAT_SPEC.md#6-prompt-injection-defence-r9) and for code context in [CONTEXT_AND_VERIFICATION_SPEC.md §1.5](./CONTEXT_AND_VERIFICATION_SPEC.md#15-the-context-block-is-untrusted-c5) (proposed).
+
 The bot feeds attacker-controlled text — diff content, PR titles, commit
 messages — into an LLM whose output is then posted to a repository using a
 credential with write access. A PR can contain `ignore previous instructions and

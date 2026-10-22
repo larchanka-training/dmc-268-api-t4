@@ -462,6 +462,8 @@ GitHub / GitLab
 
 ### 5.1 Context Builder
 
+Подробно: [docs/CONTEXT_AND_VERIFICATION_SPEC.md §1](docs/CONTEXT_AND_VERIFICATION_SPEC.md#1-extended-context), правила репозитория: [docs/RULES_FORMAT_SPEC.md](docs/RULES_FORMAT_SPEC.md) (proposed).
+
 Context Builder формирует контекст, необходимый для качественного
 анализа.
 
@@ -573,6 +575,8 @@ Domain/application logic не зависит от конкретного LLM pro
 Результат --- структурированный набор findings и review summary.
 
 ### 5.6 Result Validator
+
+Подробно: [docs/CONTEXT_AND_VERIFICATION_SPEC.md §3–4](docs/CONTEXT_AND_VERIFICATION_SPEC.md#3-mapping-a-finding-to-github-c8) (proposed).
 
 До публикации результаты проходят postprocessing:
 

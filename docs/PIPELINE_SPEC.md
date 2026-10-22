@@ -293,6 +293,8 @@ Pydantic models in `adapters/llm/schema.py` (PR #8) and the frontend type
 
 ### 6.2 Validation
 
+Detailed in [CONTEXT_AND_VERIFICATION_SPEC.md §4](./CONTEXT_AND_VERIFICATION_SPEC.md#4-hallucination-filtering) (proposed).
+
 Validation is mandatory and happens before anything reaches a pull request
 ([AGENTS.md rule 5](../AGENTS.md)):
 
