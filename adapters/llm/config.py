@@ -13,7 +13,9 @@ DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_TEMPERATURE = 0.0
 # Providers that receive no max_tokens may reserve the whole context window for the reply
 # and reject the request outright, so a reply budget is always sent.
-DEFAULT_MAX_TOKENS = 4096
+# 4096 cut the JSON reply of a 29-file eval bundle mid-string (21 findings took 4837
+# tokens), and a cut reply fails parsing twice, so the review failed outright (issue #55).
+DEFAULT_MAX_TOKENS = 16384
 # Hard input budget, as recommended for qwen3-coder: a bigger prompt is refused before any
 # provider is called. Fitting context into the budget is the context builder's job.
 DEFAULT_MAX_INPUT_TOKENS = 32000
