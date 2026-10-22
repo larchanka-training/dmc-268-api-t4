@@ -35,6 +35,8 @@ class RunRecord:
     # case made, corrective retries included.
     input_tokens: int = 0
     llm_calls: int = 0
+    # Published findings that carry a suggested change: a count, never the change itself.
+    with_suggestion: int = 0
 
 
 class _Recorder:
@@ -147,4 +149,5 @@ class LiveRunner:
             verifier_rejected=result.rejected_by_verifier,
             input_tokens=self._recorder.input_tokens,
             llm_calls=self._recorder.calls,
+            with_suggestion=sum(finding.suggestion is not None for finding in result.findings),
         )

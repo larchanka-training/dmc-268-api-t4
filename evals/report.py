@@ -39,6 +39,8 @@ def _volume_lines(records: Sequence[RunRecord]) -> list[str]:
     calls = sum(record.llm_calls for record in records)
     share = "n/a" if before == 0 else _percent(rejected / before)
     misses = sum(near_misses(record.case, record.score) for record in records)
+    suggested = sum(record.with_suggestion for record in records)
+    suggested_share = "n/a" if kept == 0 else _percent(suggested / kept)
     return [
         f"- findings per case: **{_per_case(kept, runs)}** "
         f"(before the verifier {_per_case(before, runs)})",
@@ -46,6 +48,7 @@ def _volume_lines(records: Sequence[RunRecord]) -> list[str]:
         f"- input tokens (estimated, chars/3): **{tokens / max(runs, 1):.0f} per case** "
         f"({tokens} total over {calls} LLM call(s))",
         f"- near misses (right defect, wrong line or category): {misses}",
+        f"- findings with a suggested change: {suggested_share} ({suggested} of {kept})",
     ]
 
 
@@ -140,6 +143,7 @@ def results_json(records: Sequence[RunRecord]) -> dict[str, Any]:
             "input_tokens": sum(r.input_tokens for r in records),
             "llm_calls": sum(r.llm_calls for r in records),
             "near_misses": sum(near_misses(r.case, r.score) for r in records),
+            "with_suggestion": sum(r.with_suggestion for r in records),
         },
         "cases": [
             {
@@ -158,6 +162,7 @@ def results_json(records: Sequence[RunRecord]) -> dict[str, Any]:
                 "input_tokens": record.input_tokens,
                 "llm_calls": record.llm_calls,
                 "near_misses": near_misses(record.case, record.score),
+                "with_suggestion": record.with_suggestion,
                 "findings": [
                     {
                         "path": scored.finding.path,
