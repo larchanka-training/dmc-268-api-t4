@@ -288,3 +288,24 @@ def test_prompt_version_and_scope_are_read_from_the_environment() -> None:
 def test_unknown_prompt_version_or_scope_is_a_configuration_error(name: str, value: str) -> None:
     with pytest.raises(LLMConfigurationError, match=name):
         LLMSettings.from_env({**ENV, name: value})
+
+
+def test_the_smoke_renders_the_check_run_summary_the_worker_would_publish() -> None:
+    from adapters.llm.smoke import check_run_summary
+    from domain.models import ReviewResult
+
+    finding = parse_review(review_json({**VALID_FINDING, "path": "app/a.py", "line": 1}))
+    result = ReviewResult(
+        summary="Bumps two constants.",
+        findings=finding.review.to_domain(),
+        provider="p",
+        model="m",
+        risk=RiskLevel.LOW,
+        checklist=("Run the tests",),
+    )
+
+    summary = check_run_summary(result, TWO_FILES)
+
+    assert "Bumps two constants." in summary
+    assert "**Risk: High** (the model said Low; the findings set the floor)" in summary
+    assert "- Run the tests" in summary

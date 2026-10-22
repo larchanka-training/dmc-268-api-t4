@@ -2,6 +2,12 @@ name: LLM smoke
 
 on:
   workflow_dispatch:
+    inputs:
+      prompt_version:
+        description: System prompt and output schema version (default = adapters/llm/config.py)
+        type: choice
+        options: [default, v1, v2]
+        default: default
 
 permissions:
   contents: read
@@ -31,6 +37,7 @@ jobs:
           LLM_PRIMARY_PROVIDER_ORDER: ${{ vars.LLM_PRIMARY_PROVIDER_ORDER }}
           LLM_TIMEOUT_SECONDS: "300"
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          LLM_PROMPT_VERSION: ${{ inputs.prompt_version != 'default' && inputs.prompt_version || '' }}
         run: |
           # GitHub runs steps with bash -e; failures are classified below, so -e is off.
           set +e -uo pipefail
@@ -38,7 +45,8 @@ jobs:
           errors="$RUNNER_TEMP/smoke.err"
           # stdout holds the model's findings text: keep it out of the public log and summary.
           .venv/bin/python -m adapters.llm.smoke tests/fixtures/sql_injection.diff \
-            --title "Add a sortable users list" >"$result" 2>"$errors"
+            --title "Add a sortable users list" --check-run "$RUNNER_TEMP/check-run.md" \
+            >"$result" 2>"$errors"
           status=$?
           # stderr: gateway INFO/WARNING lines (provider, model, duration, counts) or the error.
           cat "$errors"
@@ -71,6 +79,27 @@ jobs:
               counts = collections.Counter((f["severity"], f["category"]) for f in findings)
               for (severity, category), count in sorted(counts.items()):
                   print(f"| {severity} | {category} | {count} |")
+          PY
+          # The Check Run summary as the worker would publish it, model text masked: headings,
+          # the risk line, the no-issues line and the reviewed paths stay, every other line
+          # becomes its length.
+          .venv/bin/python - "$RUNNER_TEMP/check-run.md" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import sys
+
+          print("\n### Check Run summary (model text masked)\n")
+          print("```text")
+          section = ""
+          for line in open(sys.argv[1], encoding="utf-8").read().splitlines():
+              if line.startswith("#"):
+                  section = line
+                  print(line)
+              elif line.startswith(("**Risk:", "No issues found", "<!--")) or not line.strip():
+                  print(line)
+              elif section.startswith("### Files reviewed"):
+                  print(line)
+              else:
+                  print(f"{line[:2] if line.startswith('- ') else ''}<{len(line)} chars of model text>")
+          print("```")
           PY
           count=$(.venv/bin/python -c "import json,sys; print(len(json.load(open(sys.argv[1]))['findings']))" "$result")
           if [ "$count" -eq 0 ]; then
