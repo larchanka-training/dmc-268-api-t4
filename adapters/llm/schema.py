@@ -66,6 +66,12 @@ class FindingOut(BaseModel):
     suggestion: SuggestionOut | None = None
     rule_id: str | None = None
 
+    @field_validator("side", "severity", "category", mode="before")
+    @classmethod
+    def _enum_as_lowercase(cls, value: Any) -> Any:
+        # "High" or " security" is the right value in the wrong case: keep the finding.
+        return value.strip().lower() if isinstance(value, str) else value
+
     @field_validator("rule_id", mode="before")
     @classmethod
     def _rule_id_as_text(cls, value: Any) -> Any:
