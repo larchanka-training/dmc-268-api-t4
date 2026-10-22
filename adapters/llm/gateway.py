@@ -20,7 +20,12 @@ from adapters.llm.prompt import (
 from adapters.llm.reflection import VerificationReport
 from adapters.llm.rule_screen import RuleScreenReport
 from adapters.llm.rules import Rule, RuleSet, parse_rules
-from adapters.llm.schema import InvalidReviewJSONError, ParsedReview, parse_review
+from adapters.llm.schema import (
+    CHECKLIST_MAX_ITEMS,
+    InvalidReviewJSONError,
+    ParsedReview,
+    parse_review,
+)
 from domain.diff import split_by_file
 from domain.errors import (
     AllProvidersFailedError,
@@ -29,10 +34,13 @@ from domain.errors import (
     LLMOutputError,
     ProviderUnavailableError,
 )
-from domain.models import Finding, ReviewResult, VerificationOutcome
+from domain.models import RISK_ORDER, Finding, ReviewResult, VerificationOutcome
 from domain.ports import ReviewRequest
 
 logger = logging.getLogger("adapters.llm")
+
+# Prompt versions whose output schema carries risk and checklist (schema v2, issue #55).
+PROMPTS_WITH_RISK = frozenset({"v2"})
 
 # Per-file review: calls in flight at once, so a 30-file pull request does not open 30
 # connections to one provider key.
@@ -106,6 +114,8 @@ async def review_with_provider(
             provider.model,
             parsed.unknown_rule_ids,
         )
+    if prompt_version in PROMPTS_WITH_RISK:
+        _log_summary_fields(provider, parsed)
     findings = parsed.review.to_domain()
     logger.info(
         "provider=%s model=%s duration=%.2fs findings=%d",
@@ -119,7 +129,26 @@ async def review_with_provider(
         findings=findings,
         provider=provider.name,
         model=provider.model,
+        risk=parsed.review.risk,
+        checklist=parsed.review.checklist,
     )
+
+
+def _log_summary_fields(provider: ChatProvider, parsed: ParsedReview) -> None:
+    """Counters only: a missing or bad risk falls back to the rule-based one when publishing."""
+    risk_problem = (
+        "invalid" if parsed.risk_invalid else "missing" if parsed.review.risk is None else None
+    )
+    if risk_problem or parsed.checklist_invalid_items or parsed.checklist_trimmed:
+        logger.warning(
+            "provider=%s model=%s summary fields: risk %s, checklist %d invalid item(s), "
+            "%d over the limit",
+            provider.name,
+            provider.model,
+            risk_problem or "ok",
+            parsed.checklist_invalid_items,
+            parsed.checklist_trimmed,
+        )
 
 
 def _parse_final(provider: ChatProvider, reply: str, rule_ids: frozenset[str]) -> ParsedReview:
@@ -259,12 +288,16 @@ class FallbackLLMGateway:
 
 
 def merge_file_results(results: Sequence[ReviewResult]) -> ReviewResult:
-    """Findings of every file in order; the file summaries joined into one."""
+    """Findings of every file in order, the highest risk, the first checklist items."""
     first = results[0]
+    risks = [result.risk for result in results if result.risk is not None]
+    checklist = dict.fromkeys(item for result in results for item in result.checklist)
     return dataclasses.replace(
         first,
         summary=" ".join(result.summary for result in results if result.summary),
         findings=tuple(finding for result in results for finding in result.findings),
+        risk=max(risks, key=RISK_ORDER.index) if risks else None,
+        checklist=tuple(checklist)[:CHECKLIST_MAX_ITEMS],
     )
 
 
