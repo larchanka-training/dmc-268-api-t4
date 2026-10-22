@@ -367,3 +367,19 @@ def split_into_chunks(
     if current:
         chunks.append(_chunk_of(current))
     return tuple(chunks)
+
+
+_FILE_START = re.compile(r"^(?=diff --git )", re.MULTILINE)
+
+
+def split_by_file(text: str) -> tuple[str, ...]:
+    """The raw text of each file's diff, in order, so each can be reviewed on its own.
+
+    A hunk body line always starts with ' ', '+', '-' or '\\', so `diff --git ` at the start
+    of a line is a file header. Text before the first header stays with the first file; text
+    with no header at all comes back whole.
+    """
+    pieces = _FILE_START.split(text)
+    if len(pieces) > 1 and pieces[0]:
+        pieces[1] = pieces[0] + pieces[1]
+    return tuple(piece for piece in pieces[1:] if piece) if len(pieces) > 1 else (text,)

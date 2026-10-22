@@ -1,6 +1,7 @@
 import json
 import re
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from typing import Annotated, Any
 
 from pydantic import (
@@ -108,6 +109,8 @@ class ParsedReview:
     dropped_findings: int
     trimmed_findings: int = 0
     unknown_rule_ids: int = 0
+    # Schema field that failed first, per dropped finding: names only, never values.
+    dropped_fields: dict[str, int] = field(default_factory=dict)
 
 
 def strip_code_fence(text: str) -> str:
@@ -143,11 +146,12 @@ def parse_review(raw_reply: str, rule_ids: frozenset[str] = frozenset()) -> Pars
         ) from None
 
     valid: list[FindingOut] = []
+    failed_fields: Counter[str] = Counter()
     for item in envelope.findings:
         try:
             valid.append(FindingOut.model_validate(item))
-        except ValidationError:
-            continue
+        except ValidationError as exc:
+            failed_fields[_failed_field(exc)] += 1
     valid, unknown_rule_ids = _known_rule_ids(valid, rule_ids)
     kept = valid
     if len(valid) > FINDINGS_MAX:
@@ -160,4 +164,10 @@ def parse_review(raw_reply: str, rule_ids: frozenset[str] = frozenset()) -> Pars
         dropped_findings=len(envelope.findings) - len(valid),
         trimmed_findings=len(valid) - len(kept),
         unknown_rule_ids=unknown_rule_ids,
+        dropped_fields=dict(failed_fields),
     )
+
+
+def _failed_field(error: ValidationError) -> str:
+    location = error.errors()[0]["loc"]
+    return str(location[0]) if location else "finding"

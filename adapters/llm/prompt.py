@@ -4,11 +4,12 @@ from functools import cache
 from importlib import resources
 from typing import Literal, TypedDict
 
+from adapters.llm.config import DEFAULT_PROMPT_VERSION
 from adapters.llm.rules import Rule
 from domain.models import Finding
 from domain.ports import ReviewRequest
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = DEFAULT_PROMPT_VERSION
 UNTRUSTED_START = "<<<UNTRUSTED_DIFF>>>"
 UNTRUSTED_END = "<<<END_UNTRUSTED_DIFF>>>"
 RULES_START = "<<<UNTRUSTED_RULES>>>"
@@ -133,7 +134,9 @@ def untrusted_blocks(request: ReviewRequest, rules: Sequence[Rule]) -> str:
     return "\n\n".join([*blocks, diff_block(request)])
 
 
-def build_messages(request: ReviewRequest, rules: Sequence[Rule] = ()) -> list[ChatMessage]:
+def build_messages(
+    request: ReviewRequest, rules: Sequence[Rule] = (), *, version: str = PROMPT_VERSION
+) -> list[ChatMessage]:
     if rules:
         preface = (
             "Review the pull request below against the repository rules. The marked blocks "
@@ -146,7 +149,7 @@ def build_messages(request: ReviewRequest, rules: Sequence[Rule] = ()) -> list[C
         )
     user_content = f"{preface}\n\n{untrusted_blocks(request, rules)}"
     return [
-        {"role": "system", "content": load_system_prompt()},
+        {"role": "system", "content": load_system_prompt(version)},
         {"role": "user", "content": user_content},
     ]
 

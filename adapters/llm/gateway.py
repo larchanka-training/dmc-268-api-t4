@@ -1,10 +1,16 @@
+import asyncio
 import dataclasses
 import logging
 import time
 from collections.abc import Sequence
 from typing import Protocol
 
-from adapters.llm.config import DEFAULT_MAX_INPUT_TOKENS
+from adapters.llm.config import (
+    DEFAULT_MAX_INPUT_TOKENS,
+    DEFAULT_PROMPT_VERSION,
+    DEFAULT_REVIEW_SCOPE,
+    ReviewScope,
+)
 from adapters.llm.prompt import (
     ChatMessage,
     build_correction_messages,
@@ -15,6 +21,7 @@ from adapters.llm.reflection import VerificationReport
 from adapters.llm.rule_screen import RuleScreenReport
 from adapters.llm.rules import Rule, RuleSet, parse_rules
 from adapters.llm.schema import InvalidReviewJSONError, ParsedReview, parse_review
+from domain.diff import split_by_file
 from domain.errors import (
     AllProvidersFailedError,
     LLMGatewayError,
@@ -26,6 +33,10 @@ from domain.models import Finding, ReviewResult, VerificationOutcome
 from domain.ports import ReviewRequest
 
 logger = logging.getLogger("adapters.llm")
+
+# Per-file review: calls in flight at once, so a 30-file pull request does not open 30
+# connections to one provider key.
+FILE_CALLS_CONCURRENCY = 4
 
 
 class ChatProvider(Protocol):
@@ -49,12 +60,16 @@ class RuleScreen(Protocol):
 
 
 async def review_with_provider(
-    provider: ChatProvider, request: ReviewRequest, rules: Sequence[Rule] = ()
+    provider: ChatProvider,
+    request: ReviewRequest,
+    rules: Sequence[Rule] = (),
+    *,
+    prompt_version: str = DEFAULT_PROMPT_VERSION,
 ) -> ReviewResult:
     """One provider's review: request, validate, and retry once if the reply is not JSON."""
     started = time.monotonic()
     rule_ids = frozenset(rule.id for rule in rules)
-    messages = build_messages(request, rules)
+    messages = build_messages(request, rules, version=prompt_version)
     reply = await provider.complete(messages)
     try:
         parsed = parse_review(reply, rule_ids)
@@ -78,10 +93,11 @@ async def review_with_provider(
         )
     if parsed.dropped_findings:
         logger.warning(
-            "provider=%s model=%s dropped %d finding(s) that failed schema validation",
+            "provider=%s model=%s dropped %d finding(s) that failed schema validation (%s)",
             provider.name,
             provider.model,
             parsed.dropped_findings,
+            ", ".join(f"{name}={count}" for name, count in sorted(parsed.dropped_fields.items())),
         )
     if parsed.unknown_rule_ids:
         logger.warning(
@@ -123,6 +139,8 @@ class FallbackLLMGateway:
         max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
         verifier: FindingVerifier | None = None,
         rule_screen: RuleScreen | None = None,
+        prompt_version: str = DEFAULT_PROMPT_VERSION,
+        review_scope: ReviewScope = DEFAULT_REVIEW_SCOPE,
     ) -> None:
         if not providers:
             raise ValueError("FallbackLLMGateway needs at least one provider")
@@ -130,18 +148,27 @@ class FallbackLLMGateway:
         self._max_input_tokens = max_input_tokens
         self._verifier = verifier
         self._rule_screen = rule_screen
+        self._prompt_version = prompt_version
+        self._review_scope = review_scope
 
     async def review(self, request: ReviewRequest) -> ReviewResult:
         rule_set = parse_rules(request.rules_markdown)
         screen = await self._screen_rules(rule_set.rules)
         _log_rules(rule_set, screen)
         rules = screen.rules
-        estimated = estimate_tokens(build_messages(request, rules))
+        parts = self._split(request)
+        estimated = max(
+            estimate_tokens(build_messages(part, rules, version=self._prompt_version))
+            for part in parts
+        )
         if estimated > self._max_input_tokens:
             too_large = LLMInputTooLargeError(estimated, self._max_input_tokens)
             logger.warning("%s", too_large)
             raise too_large
-        result = await self._first_pass(request, rules)
+        if len(parts) == 1:
+            result = await self._first_pass(parts[0], rules)
+        else:
+            result = await self._first_pass_by_file(parts, rules)
         if self._verifier is None:
             return result
         try:
@@ -179,11 +206,47 @@ class FallbackLLMGateway:
             )
             return RuleScreenReport(VerificationOutcome.FAILED, unchanged)
 
+    def _split(self, request: ReviewRequest) -> tuple[ReviewRequest, ...]:
+        if self._review_scope is ReviewScope.PR:
+            return (request,)
+        return tuple(
+            dataclasses.replace(request, diff_text=file_diff)
+            for file_diff in split_by_file(request.diff_text)
+        )
+
+    async def _first_pass_by_file(
+        self, parts: Sequence[ReviewRequest], rules: Sequence[Rule]
+    ) -> ReviewResult:
+        """One first-pass call per file; a file whose call fails is left out, not the review."""
+        limit = asyncio.Semaphore(FILE_CALLS_CONCURRENCY)
+
+        async def one(part: ReviewRequest) -> ReviewResult:
+            async with limit:
+                return await self._first_pass(part, rules)
+
+        outcomes = await asyncio.gather(*(one(part) for part in parts), return_exceptions=True)
+        results = [outcome for outcome in outcomes if isinstance(outcome, ReviewResult)]
+        failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
+        for failure in failures:
+            if not isinstance(failure, LLMGatewayError):
+                raise failure
+        if not results:
+            raise failures[0]
+        if failures:
+            logger.warning(
+                "per-file review: %d of %d file call(s) failed, their files have no findings",
+                len(failures),
+                len(parts),
+            )
+        return merge_file_results(results)
+
     async def _first_pass(self, request: ReviewRequest, rules: Sequence[Rule]) -> ReviewResult:
         causes: list[LLMGatewayError] = []
         for index, provider in enumerate(self._providers):
             try:
-                return await review_with_provider(provider, request, rules)
+                return await review_with_provider(
+                    provider, request, rules, prompt_version=self._prompt_version
+                )
             except (ProviderUnavailableError, LLMOutputError) as exc:
                 causes.append(exc)
                 if index + 1 < len(self._providers):
@@ -193,6 +256,16 @@ class FallbackLLMGateway:
         error = AllProvidersFailedError(causes)
         logger.error("%s", error)
         raise error
+
+
+def merge_file_results(results: Sequence[ReviewResult]) -> ReviewResult:
+    """Findings of every file in order; the file summaries joined into one."""
+    first = results[0]
+    return dataclasses.replace(
+        first,
+        summary=" ".join(result.summary for result in results if result.summary),
+        findings=tuple(finding for result in results for finding in result.findings),
+    )
 
 
 def _log_rules(rule_set: RuleSet, screen: RuleScreenReport) -> None:
