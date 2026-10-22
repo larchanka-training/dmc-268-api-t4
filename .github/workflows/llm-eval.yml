@@ -20,7 +20,7 @@ on:
       verifier:
         description: JEV reflection pass
         type: choice
-        options: [on, off]
+        options: ["on", "off"]
         default: "on"
       keep_threshold:
         description: JEV keep threshold (empty = the default in adapters/llm/config.py)
