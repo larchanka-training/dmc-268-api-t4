@@ -47,7 +47,7 @@ Reply with one JSON object only, no prose or code fences:
  "checklist": ["<check>"],
  "findings": [{"path": "app/users.py", "line": 12, "side": "new", "severity": "high",
    "category": "security", "message": "<what is wrong, why, how to fix; max 2000 chars>",
-   "suggestion": null, "rule_id": null}]}
+   "suggestion": {"before": ["<line>"], "after": ["<fixed line>"]}, "rule_id": null}]}
 
 ## Repository rules
 

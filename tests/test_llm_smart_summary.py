@@ -206,11 +206,25 @@ async def test_a_missing_risk_under_v2_logs_a_counter_without_content(
 async def test_v1_replies_log_no_summary_field_warnings(caplog: pytest.LogCaptureFixture) -> None:
     transport = RecordingTransport(replies(chat_response(review_json(VALID_FINDING))))
 
+    gateway = FallbackLLMGateway([make_provider(transport)], prompt_version="v1")
+
+    with caplog.at_level(logging.WARNING, logger="adapters.llm"):
+        result = await gateway.review(REQUEST)
+
+    assert result.risk is None
+    assert "summary fields" not in caplog.text
+
+
+async def test_a_reply_without_risk_under_the_default_v2_logs_it_as_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = RecordingTransport(replies(chat_response(review_json(VALID_FINDING))))
+
     with caplog.at_level(logging.WARNING, logger="adapters.llm"):
         result = await FallbackLLMGateway([make_provider(transport)]).review(REQUEST)
 
     assert result.risk is None
-    assert "summary fields" not in caplog.text
+    assert "summary fields: risk missing, checklist 0 invalid item(s)" in caplog.text
 
 
 SUMMARY_REPLY = json.dumps(
@@ -330,16 +344,16 @@ async def test_the_pr_scope_sends_one_call_for_many_files() -> None:
 # --- Settings -------------------------------------------------------------------------------
 
 
-def test_prompt_version_and_scope_default_to_v1_and_pr() -> None:
+def test_prompt_version_and_scope_default_to_v2_and_pr() -> None:
     settings = LLMSettings.from_env(ENV)
 
-    assert (settings.prompt_version, settings.review_scope) == ("v1", ReviewScope.PR)
+    assert (settings.prompt_version, settings.review_scope) == ("v2", ReviewScope.PR)
 
 
 def test_prompt_version_and_scope_are_read_from_the_environment() -> None:
-    settings = LLMSettings.from_env({**ENV, "LLM_PROMPT_VERSION": "V2", "LLM_REVIEW_SCOPE": "file"})
+    settings = LLMSettings.from_env({**ENV, "LLM_PROMPT_VERSION": "V1", "LLM_REVIEW_SCOPE": "file"})
 
-    assert (settings.prompt_version, settings.review_scope) == ("v2", ReviewScope.FILE)
+    assert (settings.prompt_version, settings.review_scope) == ("v1", ReviewScope.FILE)
 
 
 @pytest.mark.parametrize(

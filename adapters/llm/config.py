@@ -28,7 +28,7 @@ DEFAULT_RULES_SCREEN_THRESHOLD = 0.7
 
 # The system prompt and output schema travel together (PIPELINE_SPEC.md §10).
 PROMPT_VERSIONS = ("v1", "v2")
-DEFAULT_PROMPT_VERSION = "v1"
+DEFAULT_PROMPT_VERSION = "v2"
 
 
 class ReviewScope(StrEnum):
