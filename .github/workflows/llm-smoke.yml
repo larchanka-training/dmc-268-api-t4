@@ -83,7 +83,7 @@ jobs:
           # The Check Run summary as the worker would publish it, model text masked: headings,
           # the risk line, the no-issues line and the reviewed paths stay, every other line
           # becomes its length.
-          .venv/bin/python - "$RUNNER_TEMP/check-run.md" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          .venv/bin/python - "$RUNNER_TEMP/check-run.md" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import sys
 
           print("\n### Check Run summary (model text masked)\n")
