@@ -140,13 +140,38 @@ class OpenAICompatibleProvider:
 
     def _extract_content(self, response: httpx.Response) -> str:
         try:
-            content = response.json()["choices"][0]["message"]["content"]
+            payload = response.json()
+            choice = payload["choices"][0]
+            content = choice["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError):
             raise ProviderUnavailableError(
                 self._name, "malformed chat completion response"
             ) from None
+        self._log_usage(payload, choice)
         if content is None:
             return ""
         if not isinstance(content, str):
             raise ProviderUnavailableError(self._name, "chat completion content is not text")
         return content
+
+    def _log_usage(self, payload: Any, choice: Any) -> None:
+        """Token counts and why the reply ended; a reply cut at max_tokens is not valid JSON."""
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        usage = usage if isinstance(usage, dict) else {}
+        finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+        if finish_reason == "length":
+            logger.warning(
+                "provider=%s model=%s reply cut at max_tokens=%d (output_tokens=%s)",
+                self._name,
+                self._model,
+                self._max_tokens,
+                usage.get("completion_tokens", "n/a"),
+            )
+        logger.info(
+            "provider=%s model=%s input_tokens=%s output_tokens=%s finish_reason=%s",
+            self._name,
+            self._model,
+            usage.get("prompt_tokens", "n/a"),
+            usage.get("completion_tokens", "n/a"),
+            finish_reason[:32] if isinstance(finish_reason, str) else "n/a",
+        )
