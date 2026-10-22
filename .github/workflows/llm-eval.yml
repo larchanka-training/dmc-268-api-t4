@@ -5,10 +5,32 @@ name: LLM eval
 # pass/fail thresholds after the first baseline run.
 on:
   workflow_dispatch:
-  # TEMPORARY: lets the workflow run from this branch before it exists on main (GitHub registers
-  # workflow_dispatch only for files on the default branch). Remove before merging PR #42.
-  push:
-    branches: [feat/27-eval-harness]
+    # One factor per run (issue #55): the defaults reproduce production.
+    inputs:
+      prompt_version:
+        description: System prompt and output schema version
+        type: choice
+        options: [default, v1, v2]
+        default: default
+      review_scope:
+        description: First-pass LLM calls per pull request (pr = one, file = one per file)
+        type: choice
+        options: [default, pr, file]
+        default: default
+      verifier:
+        description: JEV reflection pass
+        type: choice
+        options: [on, off]
+        default: "on"
+      keep_threshold:
+        description: JEV keep threshold (empty = the default in adapters/llm/config.py)
+        type: string
+        default: ""
+      dataset:
+        description: cases = case by case; bundle = every scored case as one large PR
+        type: choice
+        options: [cases, bundle]
+        default: cases
 
 permissions:
   contents: read
@@ -44,10 +66,17 @@ jobs:
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
           LLM_TIMEOUT_SECONDS: "300"
           LLM_TEMPERATURE: "0.0"
+          LLM_REFLECTION_ENABLED: ${{ inputs.verifier == 'off' && 'false' || 'true' }}
+          REFLECTION_KEEP_THRESHOLD: ${{ inputs.keep_threshold }}
+          LLM_PROMPT_VERSION: ${{ inputs.prompt_version != 'default' && inputs.prompt_version || '' }}
+          LLM_REVIEW_SCOPE: ${{ inputs.review_scope != 'default' && inputs.review_scope || '' }}
+          DATASET_MODE: ${{ inputs.dataset }}
         run: |
+          bundle=()
+          if [ "$DATASET_MODE" = "bundle" ]; then bundle=(--bundle); fi
           # The summary and the results file hold counts and finding keys only (path, line, side,
           # category, severity): never a message, a suggestion or a model reply.
-          .venv/bin/python -m evals run test-prs-dataset \
+          .venv/bin/python -m evals run test-prs-dataset "${bundle[@]}" \
             --summary "$RUNNER_TEMP/eval-summary.md" \
             --results "$RUNNER_TEMP/eval-results.json" >/dev/null
           cat "$RUNNER_TEMP/eval-summary.md" >> "$GITHUB_STEP_SUMMARY"

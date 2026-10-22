@@ -1,7 +1,7 @@
 """Run cases through the live LLM gateway. The only module in evals/ that reaches a model.
 
-The model reply is held in memory just long enough to count the findings the parser dropped;
-it is never written anywhere (AGENTS.md hard rule 3).
+Each model reply is held in memory just long enough to count the findings the parser dropped;
+it is never kept or written anywhere (AGENTS.md hard rule 3).
 """
 
 from collections.abc import Sequence
@@ -12,7 +12,7 @@ import httpx
 from adapters.llm.config import LLMSettings
 from adapters.llm.factory import build_gateway
 from adapters.llm.gateway import ChatProvider
-from adapters.llm.prompt import ChatMessage
+from adapters.llm.prompt import ChatMessage, estimate_tokens
 from adapters.llm.schema import InvalidReviewJSONError, parse_review
 from domain.errors import AllProvidersFailedError, LLMGatewayError, LLMOutputError
 from domain.models import Finding
@@ -29,11 +29,32 @@ class RunRecord:
     provider: str | None = None
     model: str | None = None
     error: str | None = None  # the exception class name only
+    findings_before_verifier: int = 0
+    verifier_rejected: int = 0
+    # Estimated like the gateway's input budget (characters / 3), summed over every call the
+    # case made, corrective retries included.
+    input_tokens: int = 0
+    llm_calls: int = 0
 
 
 class _Recorder:
+    """Per-case counters across every provider call: one per file in per-file mode."""
+
     def __init__(self) -> None:
-        self.last_reply: str | None = None
+        self.dropped = 0
+        self.input_tokens = 0
+        self.calls = 0
+
+    def reset(self) -> None:
+        self.dropped = 0
+        self.input_tokens = 0
+        self.calls = 0
+
+    def count_dropped(self, reply: str) -> None:
+        try:
+            self.dropped += parse_review(reply).dropped_findings
+        except InvalidReviewJSONError:
+            return
 
 
 class _RecordingProvider:
@@ -50,8 +71,10 @@ class _RecordingProvider:
         return self._inner.model
 
     async def complete(self, messages: Sequence[ChatMessage]) -> str:
+        self._recorder.calls += 1
+        self._recorder.input_tokens += estimate_tokens(list(messages))
         reply = await self._inner.complete(messages)
-        self._recorder.last_reply = reply
+        self._recorder.count_dropped(reply)
         return reply
 
 
@@ -96,7 +119,7 @@ class LiveRunner:
         request = ReviewRequest(
             diff_text=diff_text, pr_title=case.title, pr_description=case.description
         )
-        self._recorder.last_reply = None
+        self._recorder.reset()
         try:
             result = await self._gateway.review(request)
         except LLMGatewayError as exc:
@@ -106,8 +129,10 @@ class LiveRunner:
                 case=case,
                 score=score_case(case, changed, outcome),
                 error=type(exc).__name__,
+                input_tokens=self._recorder.input_tokens,
+                llm_calls=self._recorder.calls,
             )
-        dropped = self._dropped()
+        dropped = self._recorder.dropped
         outcome = ReviewOutcome(
             status=RunStatus.OK,
             findings=tuple(predicted(finding) for finding in result.findings),
@@ -118,14 +143,8 @@ class LiveRunner:
             score=score_case(case, changed, outcome),
             provider=result.provider,
             model=result.model,
+            findings_before_verifier=len(result.findings) + result.rejected_by_verifier,
+            verifier_rejected=result.rejected_by_verifier,
+            input_tokens=self._recorder.input_tokens,
+            llm_calls=self._recorder.calls,
         )
-
-    def _dropped(self) -> int:
-        reply = self._recorder.last_reply
-        self._recorder.last_reply = None
-        if reply is None:
-            return 0
-        try:
-            return parse_review(reply).dropped_findings
-        except InvalidReviewJSONError:
-            return 0
