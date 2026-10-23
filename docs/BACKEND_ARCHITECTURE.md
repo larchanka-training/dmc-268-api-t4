@@ -773,6 +773,7 @@ repository that cannot be called without a tenant scope cannot forget it.
 | `GET` | `/repositories` | Cursor-paginated, 10 per page, sorted by `owner/name`. Read **live from the forge** and cached for a minute, which is what keeps "no `repositories` table" true. `400 bad_cursor`, `502 forge_unavailable` |
 | `GET` | `/repositories/connect-url` | Where to send the user to connect one: the installation's settings page, or the App's install page when it is installed nowhere |
 | `GET` | `/repositories/{id}/disconnect-url` | Where to remove that repository from the installation, or `404 not_found`. The URL is the same settings page `connect-url` returns — GitHub has no per-repository removal URL, so the 404 is what this endpoint adds |
+| `GET` | `/repositories/{id}/rules` | `.review/rules.md` on `?ref=` (default branch when omitted): `status` (`absent`, `applied`, `rejected:*`, `ignored:forbidden`) and the parsed rules, read live through the installation. `400 bad_ref`, `404 not_found`, `502 forge_unavailable` |
 | `GET` | `/github/setup` | The App's **Setup URL**, reached by GitHub's redirect rather than by the SPA. No session required |
 | `GET` | `/jobs` | Cursor-paginated; filters on repo, status, date |
 | `GET` | `/jobs/{id}` | Includes findings and error detail |

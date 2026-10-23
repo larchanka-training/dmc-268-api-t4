@@ -31,6 +31,8 @@ tags:
     description: Forge OAuth login, session and linked identities
   - name: account
     description: The caller's account and its forge installations
+  - name: repositories
+    description: Repositories connected through the forge installation
   - name: jobs
     description: Review jobs, their findings and the diff context behind them
   - name: billing
@@ -204,6 +206,43 @@ paths:
           description: Integration removed.
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /repositories/{repository_id}/rules:
+    get:
+      tags: [repositories]
+      summary: The repository's `.review/rules.md` on a ref, parsed read-only
+      description: |
+        Read live from the forge on every call and parsed by the same parser the review
+        prompt uses, so `rules` is what a review on that ref would apply
+        ([RULES_FORMAT_SPEC.md](./RULES_FORMAT_SPEC.md)). Limits and statuses follow
+        §4, §5 and §7 there. Rule text is returned but never logged.
+      parameters:
+        - name: repository_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: ref
+          in: query
+          required: false
+          schema: { type: string, minLength: 1, maxLength: 255 }
+          description: Branch, tag or SHA. Defaults to the repository's default branch.
+      responses:
+        "200":
+          description: The rules status and preview.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RulesPreview" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          description: The forge could not be reached (`forge_unavailable`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /jobs:
     get:
@@ -1136,3 +1175,33 @@ components:
           type: string
           format: uri
           description: Stripe-hosted page to redirect to; short-lived.
+
+    RulesPreview:
+      type: object
+      required:
+        [path, ref, status, file_url, rules, dropped_suspicious, dropped_over_limit]
+      properties:
+        path: { type: string, const: .review/rules.md }
+        ref: { type: string, description: The ref that was read. }
+        status:
+          type: string
+          enum: [absent, applied, "rejected:too_large", "rejected:encoding", "ignored:forbidden"]
+          description: |
+            `absent`: no file, the default rules apply. `applied`: parsed, see `rules`.
+            `rejected:*`: the file is ignored whole (over 64 KB, not UTF-8).
+            `ignored:forbidden`: the installation may not read repository contents.
+        file_url:
+          type: string
+          format: uri
+          description: The file on the forge, or the page that creates it when `absent`.
+        rules:
+          type: array
+          items:
+            type: object
+            required: [id, section, text]
+            properties:
+              id: { type: string, description: "R1, R2, ... after filtering" }
+              section: { type: string }
+              text: { type: string }
+        dropped_suspicious: { type: integer, minimum: 0 }
+        dropped_over_limit: { type: integer, minimum: 0 }

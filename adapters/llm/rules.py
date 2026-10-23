@@ -10,6 +10,8 @@ import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from domain.repository_rules import ParsedRules, PreviewRule
+
 # Limits on what a repository may feed into the prompt; everything over them is dropped.
 RULES_MAX = 50
 RULES_MAX_CHARS = 8000
@@ -147,3 +149,18 @@ def parse_rules(markdown: str | None) -> RuleSet:
         total_chars += len(rule_text)
         kept.append(Rule(id=rule_id(len(kept) + 1), section=section, text=rule_text))
     return RuleSet(rules=tuple(kept), dropped_suspicious=suspicious, dropped_over_limit=over_limit)
+
+
+class MarkdownRulesParser:
+    """Implements domain.ports.RulesParser with the parser the review prompt uses."""
+
+    def parse(self, markdown: str) -> ParsedRules:
+        rule_set = parse_rules(markdown)
+        return ParsedRules(
+            rules=tuple(
+                PreviewRule(id=rule.id, section=rule.section, text=rule.text)
+                for rule in rule_set.rules
+            ),
+            dropped_suspicious=rule_set.dropped_suspicious,
+            dropped_over_limit=rule_set.dropped_over_limit,
+        )
