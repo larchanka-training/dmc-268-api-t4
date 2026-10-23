@@ -350,7 +350,7 @@ def build_test_app(
     webhook_secret: str = TEST_WEBHOOK_SECRET,
     job_events: Any = None,
     findings: Any = None,
-    repository_rules: Any = None,
+    job_rules: Any = None,
 ) -> Any:
     service = repositories or RepositoriesService(
         gateway=FakeInstallationGateway(),
@@ -371,7 +371,7 @@ def build_test_app(
         webhook_secret=webhook_secret,
         job_events=job_events,
         findings=findings,
-        repository_rules=repository_rules,
+        job_rules=job_rules,
     )
 
 

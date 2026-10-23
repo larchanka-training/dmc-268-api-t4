@@ -207,44 +207,6 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
-  /repositories/{repository_id}/rules:
-    get:
-      tags: [repositories]
-      summary: The repository's `.review/rules.md` on a ref, parsed read-only
-      description: |
-        Read live from the forge on every call and parsed by the same parser the review
-        prompt uses, so `rules` is what the prompt receives from that ref once the
-        worker loads rules.md (issue #37; until then reviews use the base rules only)
-        ([RULES_FORMAT_SPEC.md](./RULES_FORMAT_SPEC.md)). Limits and statuses follow
-        §4, §5 and §7 there. Rule text is returned but never logged.
-      parameters:
-        - name: repository_id
-          in: path
-          required: true
-          schema: { type: string }
-        - name: ref
-          in: query
-          required: false
-          schema: { type: string, minLength: 1, maxLength: 255 }
-          description: Branch, tag or SHA. Defaults to the repository's default branch.
-      responses:
-        "200":
-          description: The rules status and preview.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/RulesPreview" }
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "502":
-          description: The forge could not be reached (`forge_unavailable`).
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-
   /jobs:
     get:
       tags: [jobs]
@@ -315,6 +277,38 @@ paths:
               schema: { $ref: "#/components/schemas/JobDetail" }
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /jobs/{job_id}/rules:
+    get:
+      tags: [jobs]
+      summary: "`.review/rules.md` at the job's pull request head, parsed read-only"
+      description: |
+        Read live from the forge at the job's head SHA, the revision reviews read rules
+        from ([RULES_FORMAT_SPEC.md §1](./RULES_FORMAT_SPEC.md)), and parsed by the same
+        parser the review prompt uses, so `rules` is what the prompt receives once the
+        worker loads rules.md (issue #37; until then reviews use the base rules only).
+        Limits and statuses follow §4, §5 and §7 there. Rule text is returned but never
+        logged. A job on an installation the session has no organisation for is `404`.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The rules status and preview.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RulesPreview" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          description: The forge could not be reached (`forge_unavailable`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /jobs/{job_id}/rerun:
     post:
@@ -1183,7 +1177,7 @@ components:
         [path, ref, status, file_url, rules, dropped_suspicious, dropped_over_limit]
       properties:
         path: { type: string, const: .review/rules.md }
-        ref: { type: string, description: The ref that was read. }
+        ref: { type: string, description: The head SHA that was read. }
         status:
           type: string
           enum: [absent, applied, "rejected:too_large", "rejected:encoding", "ignored:forbidden"]
@@ -1192,9 +1186,11 @@ components:
             `rejected:*`: the file is ignored whole (over 64 KB, not UTF-8).
             `ignored:forbidden`: the installation may not read repository contents.
         file_url:
-          type: string
+          type: [string, "null"]
           format: uri
-          description: The file on the forge, or the page that creates it when `absent`.
+          description: |
+            The file at the head SHA, or, when `absent`, the page that creates it on the
+            pull request's branch; null when absent and the branch name is not known.
         rules:
           type: array
           items:

@@ -8,14 +8,13 @@ from fastapi import APIRouter, Depends, Request
 
 from api.deps import ApiError, current_session, services
 from domain.auth import Session
-from domain.errors import ForgeUnavailableError, InstallationGoneError
+from domain.errors import ForgeUnavailableError
 from domain.repositories import (
     Repository,
     RepositoryPage,
     connect_url,
     installation_settings_url,
 )
-from domain.repository_rules import RULES_PATH, RulesPreview
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -72,53 +71,6 @@ async def read_disconnect_url(
     if await service.repositories.find(session, repository_id) is None:
         raise ApiError(404, "not_found")
     return {"url": installation_settings_url(organization)}
-
-
-@router.get("/repositories/{repository_id}/rules")
-async def read_rules(
-    repository_id: str,
-    request: Request,
-    session: Annotated[Session, Depends(current_session)],
-    ref: str | None = None,
-) -> dict[str, Any]:
-    """Whether `ref` (the default branch when omitted) carries `.review/rules.md`, and
-    the rules the review prompt would receive from it (docs/RULES_FORMAT_SPEC.md); the
-    worker does not load the file yet (issue #37).
-
-    Read live from the forge on every call: the file changes with every push and the
-    console asks for it only when the repository screen opens.
-    """
-    service = services(request).repository_rules
-    if service is None:
-        raise ApiError(502, "forge_unavailable")
-    try:
-        preview = await service.preview(session, repository_id, ref)
-    except ValueError:
-        # A malformed ref. The value is echoed nowhere.
-        raise ApiError(400, "bad_ref") from None
-    except InstallationGoneError:
-        raise ApiError(404, "not_found") from None
-    except ForgeUnavailableError as failure:
-        logger.warning("rules fetch failed", extra={"reason": failure.reason})
-        raise ApiError(502, "forge_unavailable") from None
-    if preview is None:
-        raise ApiError(404, "not_found")
-    return _rules_json(preview)
-
-
-def _rules_json(preview: RulesPreview) -> dict[str, Any]:
-    return {
-        "path": RULES_PATH,
-        "ref": preview.ref,
-        "status": preview.status.value,
-        "file_url": preview.file_url,
-        "rules": [
-            {"id": rule.id, "section": rule.section, "text": rule.text}
-            for rule in preview.parsed.rules
-        ],
-        "dropped_suspicious": preview.parsed.dropped_suspicious,
-        "dropped_over_limit": preview.parsed.dropped_over_limit,
-    }
 
 
 def _page_json(page: RepositoryPage) -> dict[str, Any]:

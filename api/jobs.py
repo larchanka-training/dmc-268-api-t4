@@ -37,6 +37,7 @@ from fastapi.responses import StreamingResponse
 
 from api.deps import NO_STORE, ApiError, current_session, services
 from domain.auth import Session
+from domain.errors import ForgeUnavailableError, InstallationGoneError
 from domain.findings import PublishedFinding
 from domain.jobs import (
     ACTIVE_STATUSES,
@@ -50,6 +51,7 @@ from domain.jobs import (
     ui_stage,
 )
 from domain.ports import ReviewJob, ReviewJobStatus
+from domain.repository_rules import RULES_PATH, RulesPreview
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -127,6 +129,48 @@ async def read_job(
         "external_check_url": None,
         "steps": [_step_json(step) for step in steps],
         "findings": [_finding_json(finding, pull_request_url) for finding in findings],
+    }
+
+
+@router.get("/jobs/{job_id}/rules")
+async def read_job_rules(
+    job_id: str,
+    request: Request,
+    session: Annotated[Session, Depends(current_session)],
+) -> dict[str, Any]:
+    """`.review/rules.md` at the job's pull request head, the revision reviews read rules
+    from (docs/RULES_FORMAT_SPEC.md §1), and the rules the parser keeps from it.
+
+    Read live from the forge on every call; the worker does not load the file into
+    reviews yet (issue #37).
+    """
+    service = services(request).job_rules
+    if service is None:
+        raise ApiError(502, "forge_unavailable")
+    try:
+        preview = await service.preview(session, job_id)
+    except InstallationGoneError:
+        raise ApiError(404, "not_found") from None
+    except ForgeUnavailableError as failure:
+        logger.warning("rules fetch failed", extra={"reason": failure.reason})
+        raise ApiError(502, "forge_unavailable") from None
+    if preview is None:
+        raise ApiError(404, "not_found")
+    return _rules_json(preview)
+
+
+def _rules_json(preview: RulesPreview) -> dict[str, Any]:
+    return {
+        "path": RULES_PATH,
+        "ref": preview.ref,
+        "status": preview.status.value,
+        "file_url": preview.file_url,
+        "rules": [
+            {"id": rule.id, "section": rule.section, "text": rule.text}
+            for rule in preview.parsed.rules
+        ],
+        "dropped_suspicious": preview.parsed.dropped_suspicious,
+        "dropped_over_limit": preview.parsed.dropped_over_limit,
     }
 
 

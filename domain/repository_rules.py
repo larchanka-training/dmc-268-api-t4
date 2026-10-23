@@ -1,9 +1,10 @@
-"""What `.review/rules.md` in a connected repository holds, for the console.
+"""What `.review/rules.md` holds at a review job's pull request head, for the console.
 
-The console's repository screen shows whether a branch carries a rules file and a
-read-only preview of the rules a review would apply. The file is fetched through the
-`RepositoryContents` port and parsed through the `RulesParser` port, the same parser
-the review prompt uses, so the preview is what the model would see.
+The run screen shows whether the pull request's own branch carries a rules file and a
+read-only preview of the parsed rules. The file is read at the job's head SHA, the
+revision docs/RULES_FORMAT_SPEC.md §1 says reviews read rules from, through the
+`RepositoryContents` port, and parsed through the `RulesParser` port, the same parser
+the review prompt uses.
 
 Limits and statuses follow docs/RULES_FORMAT_SPEC.md §4, §5 and §7. Rule text is
 returned to the console but never logged.
@@ -18,13 +19,14 @@ from domain.auth import Session
 from domain.errors import ForgePermissionError
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
-    from domain.ports import RepositoryContents, RulesParser
-    from domain.repositories import RepositoriesService, Repository
+    from domain.ports import JobHistory, RepositoryContents, ReviewJob, RulesParser
 
 RULES_PATH = ".review/rules.md"
 # docs/RULES_FORMAT_SPEC.md §4: a larger file is ignored whole.
 RULES_MAX_BYTES = 64 * 1024
-REF_MAX_LENGTH = 255
+
+# A github.com URL shape, like the ones in domain/repositories.py.
+_REPOSITORY_URL = "https://github.com/{owner}/{name}"
 
 
 class RulesStatus(StrEnum):
@@ -56,21 +58,10 @@ class ParsedRules:
 class RulesPreview:
     ref: str
     status: RulesStatus
-    file_url: str
+    # The file on the forge, or the page that creates it on the pull request's branch;
+    # None when the file is absent and the branch name is not known.
+    file_url: str | None
     parsed: ParsedRules = ParsedRules()
-
-
-def validate_ref(ref: str) -> str:
-    """A branch, tag or SHA as typed by the user. It travels as a query parameter,
-    so only shape is checked: no control characters, no spaces, bounded length.
-
-    Raises ValueError; the API turns that into 400 {"error": "bad_ref"}.
-    """
-    if not ref or len(ref) > REF_MAX_LENGTH:
-        raise ValueError("ref must be 1 to 255 characters")
-    if any(char.isspace() or not char.isprintable() for char in ref):
-        raise ValueError("ref must not contain whitespace or control characters")
-    return ref
 
 
 def decode_rules_file(raw: bytes) -> str | RulesStatus:
@@ -83,79 +74,85 @@ def decode_rules_file(raw: bytes) -> str | RulesStatus:
         return RulesStatus.REJECTED_ENCODING
 
 
-def rules_file_url(repository: "Repository", ref: str, *, exists: bool) -> str:
-    """The file on github.com, or the page that creates it when it is absent.
+def rules_file_url(repo_full_name: str, ref: str) -> str:
+    """The rules file at `ref` on github.com."""
+    return f"{_repository_url(repo_full_name)}/blob/{quote(ref, safe='')}/{RULES_PATH}"
 
-    A github.com URL shape, like the ones in domain/repositories.py.
-    """
-    base = repository.html_url.rstrip("/") or (
-        f"https://github.com/{quote(repository.owner)}/{quote(repository.name)}"
+
+def new_rules_file_url(repo_full_name: str, branch: str) -> str:
+    """GitHub's page that creates the rules file on `branch`."""
+    return (
+        f"{_repository_url(repo_full_name)}/new/{quote(branch, safe='')}"
+        f"?filename={quote(RULES_PATH, safe='')}"
     )
-    encoded_ref = quote(ref, safe="")
-    if exists:
-        return f"{base}/blob/{encoded_ref}/{RULES_PATH}"
-    return f"{base}/new/{encoded_ref}?filename={quote(RULES_PATH, safe='')}"
 
 
-class RepositoryRulesService:
-    """Reads and parses one repository's rules file for the console."""
+def _repository_url(repo_full_name: str) -> str:
+    owner, _, name = repo_full_name.partition("/")
+    return _REPOSITORY_URL.format(owner=quote(owner, safe=""), name=quote(name, safe=""))
+
+
+class JobRulesService:
+    """Reads and parses the rules file at a review job's pull request head."""
 
     def __init__(
         self,
-        repositories: "RepositoriesService",
+        jobs: "JobHistory",
         contents: "RepositoryContents",
         parser: "RulesParser",
     ) -> None:
-        self._repositories = repositories
+        self._jobs = jobs
         self._contents = contents
         self._parser = parser
 
-    async def preview(
-        self, session: Session, repository_id: str, ref: str | None = None
-    ) -> RulesPreview | None:
-        """The rules on `ref` (the default branch when None), or None when the
-        repository is not connected to the session's organisation.
+    async def preview(self, session: Session, job_id: str) -> RulesPreview | None:
+        """The rules at the job's head SHA, or None when the session cannot see the job
+        (missing, or on an installation of no organisation the session has).
 
-        Raises ValueError for a malformed ref, and the forge errors of the port
-        other than a permission refusal, which is a status of its own.
+        Raises the forge errors of the port other than a permission refusal, which is a
+        status of its own.
         """
-        organization = session.current_organization
-        if organization is None:
+        job = await self._jobs.get(job_id)
+        visible = {organization.installation_id for organization in session.organizations}
+        if job is None or job.payload.installation_id not in visible:
             return None
-        if ref is not None:
-            validate_ref(ref)
-        repository = await self._repositories.find(session, repository_id)
-        if repository is None:
-            return None
-        resolved_ref = ref if ref is not None else repository.default_branch
+        return await self._read(job)
 
+    async def _read(self, job: "ReviewJob") -> RulesPreview:
+        payload = job.payload
+        head_sha = payload.head_sha
         try:
             raw = await self._contents.read_file(
-                organization.installation_id,
-                repository.full_name,
+                payload.installation_id,
+                payload.repo_full_name,
                 RULES_PATH,
-                resolved_ref,
+                head_sha,
                 max_bytes=RULES_MAX_BYTES,
             )
         except ForgePermissionError:
             return RulesPreview(
-                ref=resolved_ref,
+                ref=head_sha,
                 status=RulesStatus.IGNORED_FORBIDDEN,
-                file_url=rules_file_url(repository, resolved_ref, exists=True),
+                file_url=rules_file_url(payload.repo_full_name, head_sha),
             )
         if raw is None:
             return RulesPreview(
-                ref=resolved_ref,
+                ref=head_sha,
                 status=RulesStatus.ABSENT,
-                file_url=rules_file_url(repository, resolved_ref, exists=False),
+                # A file cannot be created at a SHA, only on a branch.
+                file_url=(
+                    None
+                    if not payload.head_ref
+                    else new_rules_file_url(payload.repo_full_name, payload.head_ref)
+                ),
             )
 
-        file_url = rules_file_url(repository, resolved_ref, exists=True)
+        file_url = rules_file_url(payload.repo_full_name, head_sha)
         decoded = decode_rules_file(raw)
         if isinstance(decoded, RulesStatus):
-            return RulesPreview(ref=resolved_ref, status=decoded, file_url=file_url)
+            return RulesPreview(ref=head_sha, status=decoded, file_url=file_url)
         return RulesPreview(
-            ref=resolved_ref,
+            ref=head_sha,
             status=RulesStatus.APPLIED,
             file_url=file_url,
             parsed=self._parser.parse(decoded),

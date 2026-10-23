@@ -54,7 +54,7 @@ from domain.ports import (
     SignInAttemptStore,
 )
 from domain.repositories import RepositoriesService
-from domain.repository_rules import RepositoryRulesService
+from domain.repository_rules import JobRulesService
 
 Next = Callable[[Request], Awaitable[Response]]
 
@@ -96,7 +96,7 @@ def create_app(
     engine: AsyncEngine | None = None,
     job_events: JobEventsSource | None = None,
     findings: ReviewCommentStore | None = None,
-    repository_rules: RepositoryRulesService | None = None,
+    job_rules: JobRulesService | None = None,
 ) -> FastAPI:
     app = FastAPI(title="DMC-268 API", version="0.1.0", lifespan=_engine_lifespan(engine))
     app.state.services = Services(
@@ -110,7 +110,7 @@ def create_app(
         job_events=job_events if job_events is not None else InMemoryJobEventsSource(),
         jobs=jobs,
         findings=findings if findings is not None else MemoryReviewCommentStore(jobs),
-        repository_rules=repository_rules,
+        job_rules=job_rules,
     )
     app.state.webhooks = GitHubWebhookDeps(
         jobs=jobs,
@@ -184,12 +184,6 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         logger.info("queue: in-memory (no DATABASE_URL); worker process not used")
         jobs = MemoryJobStore(clock=clock)
         dispatch_inline = True
-    repositories = RepositoriesService(
-        gateway=GitHubInstallationGateway(app_settings, app_auth, transport=transport),
-        cache=InMemoryRepositoriesCache(clock),
-        clock=clock,
-        cache_ttl=settings.repositories_cache_ttl,
-    )
     return create_app(
         settings=settings,
         identity_provider=GitHubIdentityProvider(
@@ -198,7 +192,12 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         session_store=InMemorySessionStore(clock),
         attempt_store=InMemorySignInAttemptStore(clock),
         clock=clock,
-        repositories=repositories,
+        repositories=RepositoriesService(
+            gateway=GitHubInstallationGateway(app_settings, app_auth, transport=transport),
+            cache=InMemoryRepositoriesCache(clock),
+            clock=clock,
+            cache_ttl=settings.repositories_cache_ttl,
+        ),
         app_slug=app_settings.app_slug,
         jobs=jobs,
         vcs=build_vcs_client(app_settings, transport=transport, clock=clock),
@@ -210,8 +209,8 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             InMemoryJobEventsSource() if engine is None else PostgresJobEventsSource(engine)
         ),
         findings=None if engine is None else PostgresReviewCommentStore(engine),
-        repository_rules=RepositoryRulesService(
-            repositories=repositories,
+        job_rules=JobRulesService(
+            jobs=jobs,
             contents=GitHubRepositoryContents(app_settings, app_auth, transport=transport),
             parser=MarkdownRulesParser(),
         ),
