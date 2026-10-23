@@ -213,7 +213,8 @@ paths:
       summary: The repository's `.review/rules.md` on a ref, parsed read-only
       description: |
         Read live from the forge on every call and parsed by the same parser the review
-        prompt uses, so `rules` is what a review on that ref would apply
+        prompt uses, so `rules` is what the prompt receives from that ref once the
+        worker loads rules.md (issue #37; until then reviews use the base rules only)
         ([RULES_FORMAT_SPEC.md](./RULES_FORMAT_SPEC.md)). Limits and statuses follow
         §4, §5 and §7 there. Rule text is returned but never logged.
       parameters:

@@ -82,7 +82,8 @@ async def read_rules(
     ref: str | None = None,
 ) -> dict[str, Any]:
     """Whether `ref` (the default branch when omitted) carries `.review/rules.md`, and
-    the rules a review would apply from it (docs/RULES_FORMAT_SPEC.md).
+    the rules the review prompt would receive from it (docs/RULES_FORMAT_SPEC.md); the
+    worker does not load the file yet (issue #37).
 
     Read live from the forge on every call: the file changes with every push and the
     console asks for it only when the repository screen opens.
