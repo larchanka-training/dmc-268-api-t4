@@ -776,6 +776,7 @@ repository that cannot be called without a tenant scope cannot forget it.
 | `GET` | `/github/setup` | The App's **Setup URL**, reached by GitHub's redirect rather than by the SPA. No session required |
 | `GET` | `/jobs` | Cursor-paginated; filters on repo, status, date |
 | `GET` | `/jobs/{id}` | Includes findings and error detail |
+| `GET` | `/jobs/{id}/rules` | `.review/rules.md` at the job's head SHA: `status` (`absent`, `applied`, `rejected:*`, `ignored:forbidden`) and the parsed rules, read live through the installation. `404 not_found`, `502 forge_unavailable` |
 | `POST` | `/jobs/{id}/rerun` | Creates a new job; never resurrects a terminal one |
 | `GET`/`PUT` | `/config/{scope}/{scope_id}` | Validated against the plan ceiling |
 | `GET` | `/usage` | Current period against quota |
