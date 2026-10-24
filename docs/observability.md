@@ -3,7 +3,7 @@ title: Observability
 doc_type: design-and-execution-plan
 system: pr-review-bot
 status: proposed
-updated: 2026-10-12
+updated: 2026-10-24
 owners: [dmc-268-team-4]
 branch: sprint-3-observability
 extends: ./BACKEND_ARCHITECTURE.md#observability
@@ -21,17 +21,16 @@ model responses, in any log line, span, metric label or alert.
 
 1. A Grafana dashboard shows, for production: API RPS, error rate and p50/p95 latency per
    route; host CPU, RAM and disk; container CPU and RAM; Postgres connections; queue depth.
-2. Sentry shows grouped errors with release (git sha) and environment, and a trace per API
-   request, `/health` and `/metrics` excluded.
+2. Sentry shows grouped errors, failed reviews included, with release (git sha) and
+   environment, and a trace per API request, `/health` and the SSE stream excluded.
 3. An LLM gateway call appears as a span with provider, model, tokens and outcome.
 4. An error triggers a Sentry email and reaches the Telegram relay; an infrastructure alert
    fires in Grafana. Until the bot is connected both Telegram paths are placeholders: the
    relay logs `alert.dropped`, and the Grafana alert shows as *firing*.
 5. With the vendors unreachable, logs are still written to rotated files on the VPS.
-6. **When the worker lands:** one trace covers webhook → enqueue → claimed → auth →
-   fetch diff → build context → redact → gate → LLM → postprocess → post feedback →
-   meter, and the throughput alert fires in a drill (Build order phase 8 in the
-   architecture doc).
+6. One trace covers webhook → enqueue → claimed → fetch diff → LLM call → post feedback,
+   the steps the worker records today (the others join the trace as they land), and the
+   throughput alert fires in a drill (Build order phase 8 in the architecture doc).
 
 ---
 
@@ -45,7 +44,7 @@ model responses, in any log line, span, metric label or alert.
 | 4 | **Backup = local fallback copy** | JSON logs always go to rotated files on a host volume as well as to the vendors. Traces are reconstructable from those logs (every request and every pipeline step ends with a log line carrying `trace_id` and `duration_ms`) and from `pr_review_steps`. Queue metrics are recomputable from `pr_review_jobs`. Host metrics are covered only by the WAL buffer (hours, not days); accepted |
 | 5 | **Domain stays vendor-free** | `domain/` gets an `Observer` port; Sentry and `prometheus_client` live in `adapters/observability/`. Hard rule 1 |
 | 6 | **Errors alert from Sentry (email to the app admin, Telegram for the team); infrastructure alerts from Grafana (Telegram)** | Sentry knows *new* vs *recurring* vs *regressed* issues, which a raw error count in Loki does not. Sentry has no native Telegram integration, so an internal integration posts to a small relay in our API that forwards to the Telegram Bot API. Grafana keeps its native Telegram contact point for everything Sentry cannot see (host, queue, throughput, cost, security events, SLOs), and that includes the API being down, which is exactly when the relay is unavailable |
-| 7 | **Pipeline tracing is phased** | The worker does not exist yet. The step helper ships in phase 5 and the LLM gateway uses it from that PR; the worker uses it from its first commit |
+| 7 | **Pipeline tracing builds on `StepRecorder`** | The worker already records each step in `pr_review_steps` through the `StepRecorder` port (`_Steps` in `worker/process.py`). The `Observer` adapter wraps it, so one call writes the step row, the span, the histogram and the log line; a second step mechanism next to it would drift |
 
 Rejected: Sentry only (no CPU/RAM/queue gauges); self-hosted Prometheus + Grafana on the
 VPS (0.5–1 GB RAM on a box without swap, and it dies with the box); self-hosted Sentry
@@ -55,8 +54,8 @@ VPS (0.5–1 GB RAM on a box without swap, and it dies with the box); self-hoste
 flowchart LR
     subgraph VPS
         CADDY["caddy\n:443, metrics :2020"]
-        API["api\n/metrics :8000\nDB sampler"]
-        WRK["worker\n/metrics :9101"]
+        API["api\n:8000, metrics :9100\nDB sampler"]
+        WRK["worker\nmetrics :9101\nreaper"]
         PG[("postgres\npg_stat_statements")]
         LOGS[["/opt/dmc268/logs\n*.jsonl, rotated + gzip"]]
         ALLOY["alloy\nunix + cadvisor + postgres\nexporters, WAL"]
@@ -104,13 +103,12 @@ of `/opt/dmc268/logs`). Produced by `structlog` on top of stdlib `logging`, so e
   "level": "info",
   "service": "worker",
   "env": "production",
-  "release": "49f8788",
-  "logger": "domain.service",
+  "release": "a1a9564a6f96abe3535f8cf13020f8e9768a4f2b",
+  "logger": "adapters.observability.observer",
   "event": "step.finished",
   "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
   "span_id": "00f067aa0ba902b7",
   "job_id": "0192f1c4-…",
-  "account_id": "0192e0aa-…",
   "installation_id": 51234567,
   "repo_id": 812345,
   "pr_number": 42,
@@ -130,15 +128,17 @@ of `/opt/dmc268/logs`). Produced by `structlog` on top of stdlib `logging`, so e
 | `trace_id`, `span_id` | when a span is active | current Sentry span |
 | `request_id` | API requests | middleware; echoed as `X-Request-ID` |
 | `delivery_id` | webhooks | `X-GitHub-Delivery` / GitLab event UUID |
-| `job_id`, `account_id`, `installation_id`, `repo_id`, `pr_number`, `head_sha`, `attempt` | review context | bound once per job via `contextvars` |
+| `job_id`, `installation_id`, `repo_id`, `pr_number`, `head_sha`, `attempt`; `account_id` once tenancy lands | review context | bound once per job via `contextvars`. Jobs carry no `account_id` yet (`adapters/db/models.py:197`), so `installation_id` is the tenant key until then |
 | `step`, `outcome`, `duration_ms` | step events; `outcome` and `duration_ms` also on `job.finished` | the step helper; the worker at the terminal transition |
-| `error_kind`, `error_type` | errors | domain error classification (⚠️ not in code yet); exception class name |
+| `error_kind`, `error_type` | errors | `_classify` in `worker/process.py` (the closed vocabulary of [PIPELINE_SPEC.md §4.2](./PIPELINE_SPEC.md); the reaper adds `lease_expired`); exception class name |
+| `result`, `reason`, `user_id`, `organizations`, `had_session` | sign-in events | passed as `extra={…}` in `api/auth.py` and `api/github_setup.py`; lifted into the line by structlog's `ExtraAdder` |
 | `http.method`, `http.route`, `http.status`, `duration_ms` | access log | middleware (replaces uvicorn's access log) |
 | `provider`, `model`, `input_tokens`, `output_tokens`, `retries` | LLM events | gateway |
 
 `event` is a stable dotted name (`webhook.received`, `job.enqueued`, `job.claimed`,
-`step.finished`, `job.finished`, `llm.call.failed`, `lease.expired`), never a formatted sentence, so it can
-be counted and alerted on. Free text goes in `msg` only when it adds something.
+`step.finished`, `job.finished`, `llm.call.failed`, `lease.expired`), never a formatted
+sentence, so it can be counted and alerted on. Free text goes in `msg` only when it adds
+something.
 
 ### What is never logged
 
@@ -151,16 +151,22 @@ review:
 
 - **Allowlist processor.** Unknown top-level keys are dropped in production (kept in
   `local`).
-- **Our loggers: `event` is the format string, never the formatted message.** For
-  stdlib records from our own packages (`domain.*`, `adapters.*`, `api.*`, `worker.*`,
-  `ops.*`) the processor takes `record.msg` (`"provider=%s reply rejected (%s)"`), not
-  `record.getMessage()`, and drops `record.args`, so interpolated values never reach the
-  line. Values that matter go in as named fields, where the allowlist sees them. This is a
-  stop-gap: a format string is not a stable dotted `event` name, and the phase 1 audit
-  converts every such call to one (`llm.reply.rejected` + fields), after which our code
-  emits no stdlib-style records at all.
-- **Third-party loggers keep their formatted message.** uvicorn, httpx, SQLAlchemy and
-  the Sentry SDK do not hold diffs or prompts, and dropping their arguments would make
+- **Our loggers: `event` is the format string, never the formatted message.** For every
+  stdlib record not on the third-party list below, the processor takes `record.msg`
+  (`"provider=%s reply rejected (%s)"`), not `record.getMessage()`, and drops
+  `record.args`, so interpolated values never reach the line. The rule is "not
+  third-party", not a package prefix: the webhook route logs as `github_event`
+  (`api/webhooks/github.py:40`), which an `api.*` prefix would miss. Values that matter go
+  in as named fields, where the allowlist sees them; fields passed as `extra={…}` (the
+  sign-in audit in `api/auth.py`) are lifted into the line and must be on the allowlist.
+  This is a stop-gap: about 50 call sites pass their values (job id, repo, PR, error kind,
+  duration) as `%s` arguments today, and dropping the arguments blanks them. So the
+  phase 1 audit ships in the same PR and converts every call to a stable dotted `event`
+  with fields (`llm.reply.rejected` + fields), after which our code emits no stdlib-style
+  records at all.
+- **Third-party loggers keep their formatted message.** The list is explicit: `uvicorn`,
+  `httpx`, `httpcore`, `sqlalchemy`, `asyncpg`, `alembic` and `sentry_sdk`. They do not
+  hold diffs or prompts, and dropping their arguments would make
   startup and connection errors unreadable ("failed to connect to %s"). Their message goes
   into `msg`, through redaction and the 512-character cut. Residual risk, accepted: a
   forge URL with a token in the query string is caught by redaction; nothing in these
@@ -194,9 +200,16 @@ review:
   developer's machine. Not in `staging`: it would run Sentry and Alloy, so prompts would
   reach Loki and Sentry breadcrumbs, and "no customer data" there is a convention, not a
   control (the staging App can be installed on any repository). Prompt work against
-  staging or production uses `python -m ops.replay <job_id> --prompt` on the host. This
-  narrows the architecture doc's `local` and `staging` exception to satisfy
-  [AGENTS.md](../AGENTS.md) hard rule 3, which has none.
+  staging or production uses `python -m ops.replay <job_id> --prompt` on the host
+  (⚠️ `ops/replay.py` does not exist yet, and the image has no `ops/`: the Dockerfile
+  copies only `domain`, `adapters`, `api` and `worker`). This narrows the architecture
+  doc's `local` and `staging` exception to satisfy [AGENTS.md](../AGENTS.md) hard rule 3,
+  which has none.
+- **`DEBUG_LOG_DIFF=1`, the one exception in code today.** When it is set,
+  `worker/process.py` logs the fetched diff verbatim, a developer escape hatch that
+  knowingly breaks hard rule 3. Phase 1 makes it `local`-only like `prompt` and `reply`:
+  in any other `ENV` the worker ignores it and logs a warning at startup. The canary test
+  sets it and asserts the marker still never appears outside `local`.
 - Audit of existing call sites is part of phase 1. Today's are clean (e.g.
   `adapters/llm/schema.py` puts only `exc.msg` and an error count into
   `InvalidReviewJSONError`); the audit converts them to `event` + fields so they stay clean.
@@ -207,9 +220,25 @@ review:
 | :--- | :--- | :--- |
 | `debug` | Development detail | `local` only |
 | `info` | Lifecycle events: received, enqueued, claimed, step finished, posted | files, Loki |
-| `warning` | Degraded but handled: retry, fallback provider, trimmed findings, 4xx from forge | files, Loki, Sentry breadcrumb |
-| `error` | The job or request failed | files, Loki, **Sentry event**, alert |
+| `warning` | Degraded but handled: retry, fallback provider, trimmed findings, 4xx from forge, a dependency down that a Grafana alert already reports | files, Loki, Sentry breadcrumb |
+| `error` | The job or request failed; a review that ends `FAILED` is logged here with its exception | files, Loki, **Sentry event**, alert |
 | `critical` | The process cannot continue (DB gone at startup, config invalid) | as `error`, plus immediate alert |
+
+**A failed review is logged at `error`, with its exception.** The worker catches every
+exception so it can record the job's outcome (`process_claimed_job`), so nothing reaches
+Sentry by itself. Today a `FAILED` job is logged at `warning` with the exception class
+only (`worker/process.py:393`), which makes it a breadcrumb, bugs (`internal_error`)
+included. Phase 2 logs it at `error` with `exc_info`, so Sentry gets one event with
+frames and the `error_kind` tag. A retry stays below `error` and is never an event;
+retry rates are a Grafana question (`jobs_finished_total`, "Review success").
+
+**A retry loop logs on change, not per attempt.** While Postgres is down, today's code
+logs about 120 `error` lines a minute: the LISTEN connection every 1 s
+(`worker/listener.py:49`), each of the 5 claim slots every 5 s (`worker/loop.py:95`) and
+the reaper every 30 s. As Sentry events that would use the free plan's error quota (about
+5k a month; Phase 0 checks) in about 40 minutes. The phase 1 audit turns each loop's
+failures into one `warning` when they start and one `info` when they clear; "Target
+down" (`pg_up == 0`) is the alert.
 
 ### Local fallback
 
@@ -233,12 +262,16 @@ review:
 
 ## Metrics
 
-Prometheus format via `prometheus_client`. The API serves `/metrics` on its main port
-(8000); the worker starts a metrics server on `:9101`. **Neither is reachable from
-outside**: `:9101` is not published, and since Caddy proxies `/api/*` to `api:8000`, it
-answers `404` for `/api/metrics*` before proxying; the deploy smoke test asserts that.
+Prometheus format via `prometheus_client`. Each process serves metrics on an internal
+port of its own, never on the API's main port: the API on `:9100` (started in its
+lifespan), the worker on `:9101`. **Neither is reachable from outside**: neither port is
+published, and Caddy proxies `/api/*` only to `api:8000`, which has no metrics route. So
+no Caddy rule is needed; a bare `respond /api/metrics* 404` would not have worked anyway,
+because Caddy orders `respond` after the `handle_path /api/*` block that proxies. The
+deploy smoke test still asserts that `/api/metrics` is 404.
 
-Labels are low-cardinality only: never `account_id`, `repo_id`, `job_id` or a raw path.
+Labels are low-cardinality only: never `account_id`, `installation_id`, `repo_id`,
+`job_id` or a raw path.
 Per-account questions are answered from the database, not from metrics.
 
 **Every known label combination of a counter or histogram is initialised at 0 on
@@ -257,30 +290,30 @@ DB sampler and `llm_daily_budget_usd` in one process only.
 | Metric | Type | Labels | Answers |
 | :--- | :--- | :--- | :--- |
 | `http_requests_total` | counter | `route`, `method`, `status_class` | RPS, error rate |
-| `http_request_duration_seconds` | histogram | `route`, `method` | p50/p95/p99 latency |
-| `webhook_deliveries_total` | counter | `provider`, `outcome` (`enqueued`, `filtered`, `duplicate`, `unauthorized`, `error`) | Ingest health; 401 spike = bad rotation; `error` = we answered 5xx, and GitHub does not retry it (§ SLOs) |
-| `queue_jobs` | gauge | `status` | Queue depth (DB sampler, below) |
-| `queue_oldest_queued_age_seconds` | gauge | — | A backlog that is not draining (DB sampler) |
-| `job_claim_latency_seconds` | histogram | — | Enqueue → claim; a wedged worker |
+| `http_request_duration_seconds` | histogram | `route`, `method` | p50/p95/p99 latency. Not observed for the SSE stream `GET /jobs/{job_id}/events`, which stays open until its job ends |
+| `webhook_deliveries_total` | counter | `provider`, `outcome` (`enqueued` 202, `duplicate` 202, `filtered` 204, `unauthorized` 401, `too_large` 413, `rejected` 400 after a valid signature, `error` 5xx) | Ingest health; 401 spike = bad rotation; `rejected` = a genuine delivery our parser refused (a payload change or a bug); `error` = we answered 5xx. GitHub retries neither (§ SLOs) |
+| `queue_jobs` | gauge | `status` (`QUEUED`, `RETRYING`, `PROCESSING`) | Queue depth (DB sampler, below) |
+| `queue_oldest_claimable_age_seconds` | gauge | — | Age of the oldest job that could be claimed now: `QUEUED`, or `RETRYING` with `next_attempt_at <= now()`, measured from `next_attempt_at` (the partial index `ix_pr_review_jobs_claim` serves it). A job in its retry backoff is not backlog (DB sampler) |
+| `job_claim_latency_seconds` | histogram | — | Claimable → claim (from `next_attempt_at`, so a retry's backoff does not count); a wedged worker |
 | `review_step_duration_seconds` | histogram | `step`, `outcome` | Where review time goes |
 | `review_duration_seconds` | histogram | `status` | **Enqueue → terminal status** per job, so queue wait counts. Buckets include 60, 120, 300, 600 and 900 s, so the latency SLO threshold sits on a bucket edge |
 | `jobs_finished_total` | counter | `status`, `error_kind` | Forge outage vs bug |
-| `lease_expiries_total` | counter | — | Non-zero = workers dying |
-| `llm_requests_total` | counter | `provider`, `model`, `outcome` | Provider failures, fallbacks |
-| `llm_tokens_total` | counter | `provider`, `model`, `direction` | The bill, before it arrives |
+| `lease_expiries_total` | counter | — | Counted from the reaper's result. A worker died, or a review outlived its 600 s lease: the lease is renewed only before `LLM_CALL` and `POST_FEEDBACK`, and `LLM_CALL` can take 2 × 300 s plus the rule screen and verifier. BACKEND_ARCHITECTURE.md reads non-zero as "workers are dying" only |
+| `llm_requests_total` | counter | `provider`, `model`, `purpose`, `outcome` | Provider failures, fallbacks. `purpose` is `review`, `correction`, `rule_screen` or `verify`: one review makes several calls |
+| `llm_tokens_total` | counter | `provider`, `model`, `purpose`, `direction` | The bill, before it arrives |
 | `llm_key_rotations_total` | counter | `provider` | 429 pressure |
-| `llm_cost_usd_total` | counter | `provider`, `model`, `direction` | The bill in money: tokens × a price table from config (`llm_prices`), so a price change is a config change, not a deploy |
+| `llm_cost_usd_total` | counter | `provider`, `model`, `purpose`, `direction` | The bill in money, the TypeSafe rule screen and verifier included: tokens × a price table from config (`llm_prices`), so a price change is a config change, not a deploy |
 | `llm_daily_budget_usd` | gauge | — | `llm_daily_budget_usd` from config, exported so the spend alert can compare against it: PromQL cannot read app config. Exported by the API only: the rule uses `scalar()`, which returns NaN, and so never fires, if two processes export the series |
 | `forge_rate_limit_remaining_ratio` | gauge | `provider` | The lowest `X-RateLimit-Remaining / X-RateLimit-Limit` seen across installations in the last 5 min. One value, no installation label |
-| `security_events_total` | counter | `kind` (`login_failed`, `oauth_state_mismatch`, `session_rejected`, `id_not_found`) | Takeover and enumeration attempts; the auth tests treat each of these as a refusal path. `id_not_found` is a `404` for an id in the path of an authenticated route. Tenant scoping lives in the repository layer, so another account's id looks exactly like a missing one; telling them apart would take the unscoped lookup scoping exists to prevent. A real leak would be a *success*, which no counter sees; the deliberate cross-tenant test guards that ([BACKEND_ARCHITECTURE.md § Testing strategy](./BACKEND_ARCHITECTURE.md)) |
+| `security_events_total` | counter | `kind` (`oauth_state_mismatch`, `csrf_rejected`, `session_rejected`, `id_not_found`) | Takeover and enumeration attempts; the auth tests treat each of these as a refusal path. `oauth_state_mismatch`: the callback's state does not match the browser's sign-in attempt (`api/auth.py`). `csrf_rejected`: a 403 `csrf` from `enforce_csrf` (`api/deps.py`). `session_rejected`: a 401 `no_session`, which every tab polling after its session expired also produces, so it is on the dashboard but not in the alert. There is no password login, so no `login_failed`; a cancelled sign-in (`access_denied`) is not an attack, and an identity-provider failure (`server_error`) is an error log. `id_not_found` is a `404` for an id in the path of an authenticated route. Tenant scoping lives in the repository layer, so another account's id looks exactly like a missing one; telling them apart would take the unscoped lookup scoping exists to prevent. A real leak would be a *success*, which no counter sees; the deliberate cross-tenant test guards that ([BACKEND_ARCHITECTURE.md § Testing strategy](./BACKEND_ARCHITECTURE.md)) |
 | `alert_relay_failures_total` | counter | — | Sentry alerts not reaching Telegram; alerted from Grafana, never from Sentry |
 | `alert_relay_dropped_total` | counter | `reason` (`stale`, `duplicate`, `rate_limited`) | Alerts the relay chose not to forward; a `stale` count means Sentry delivers late |
 | `canary_review_last_success_timestamp` | gauge | — | Newest `finished_at` of a `COMPLETED` job for `CANARY_REPO_ID` (DB sampler); see § Synthetic checks |
 | `secrets_redacted_total` | counter | `rule` | A spike is worth telling the customer |
 | `findings_posted_total` | counter | `severity` | Model behaviour drift |
 | `worker_in_flight` | gauge | — | Concurrency actually used vs `worker_concurrency` |
-| `periodic_task_last_success_timestamp` | gauge | `task` | Reaper, grace sweep, purge are alive (DB sampler, from `periodic_task_runs`) |
-| `periodic_task_interval_seconds` | gauge | `task` | Each task's configured interval, exported by the DB sampler next to the timestamp (same target, so the two match label for label) so "Periodic task stale" can compute `2 × interval` |
+| `periodic_task_last_success_timestamp` | gauge | `task` | The periodic tasks are alive: the reaper (every 30 s, the only one today), then the grace sweep and purge as they land (DB sampler, from `periodic_task_runs`) |
+| `periodic_task_interval_seconds` | gauge | `task` | Each task's configured interval, exported by the DB sampler next to the timestamp (same target, so the two match label for label) so "Periodic task stale" can compute `2 × interval + 180 s` |
 | `stripe_last_event_timestamp` | gauge | — | Newest `occurred_at` in `stripe_events` (DB sampler). Silence = entitlements drifting |
 | `subscriptions_active` | gauge | — | Count of active subscriptions (DB sampler), so "Stripe silence" only fires when silence is unexpected |
 
@@ -345,7 +378,7 @@ Rules that keep it inside the budget:
   dashboards use.
 - **`pg_stat_statements`:** top 20 statements by total time only.
 - **Phase 3 exit check:** active series below 50% of the free limit, read from Grafana
-  Cloud's usage dashboard, so the worker's metrics still fit when it lands.
+  Cloud's usage dashboard, so the pipeline metrics still fit when phase 5 adds them.
 
 ---
 
@@ -358,48 +391,63 @@ are copied into every log line.
 
 - One transaction per request, named by route template (`GET /repositories`), never by
   raw path.
-- Automatic child spans for outgoing `httpx` calls (forge, Stripe) and, once the DB lands,
-  SQLAlchemy queries (statement text with parameters stripped).
-- `/health` and `/metrics` are excluded by `traces_sampler`: the Docker healthcheck alone
-  would be 8,640 transactions a day.
+- Automatic child spans for outgoing `httpx` calls (forge, Stripe) and SQLAlchemy
+  queries (statement text with parameters stripped).
+- `/health` and the SSE stream `GET /jobs/{job_id}/events` are excluded by
+  `traces_sampler`. The Docker healthcheck alone would be 8,640 transactions a day, and
+  an SSE stream stays open until its job ends while polling Postgres every second, so it
+  would be one long transaction with a database span per poll.
 
 ### Review pipeline
 
 ```
 review.job                         (root, worker; continues the webhook's trace)
 ├── claimed                        queue_wait_ms
-├── auth                           token_source, cache_hit
+├── auth                           (planned; today inside fetch_diff) token_source, cache_hit
 ├── fetch_diff                     files, bytes, pages
-├── build_context                  files, context_bytes, truncated
-├── redact                         rules_fired, ruleset_version
-├── gate                           result (proceed | superseded | quota | cancelled)
+├── build_context                  (planned) files, context_bytes, truncated
+├── redact                         (planned) rules_fired, ruleset_version
+├── gate                           (planned) result (proceed | superseded | quota | cancelled)
 ├── llm_call                       model, input_tokens, output_tokens, retries
-│   └── llm.attempt                one per provider attempt: provider, model, outcome
-│       └── http.client POST …     (httpx, automatic)
-├── postprocess                    findings_total, findings_new, severity histogram
+│   ├── llm.rule_screen            rules_in, rules_dropped, outcome (TypeSafe; skipped without a key)
+│   ├── llm.attempt                one per request: provider, model, purpose (review | correction), outcome
+│   │   └── http.client POST …     (httpx, automatic)
+│   └── llm.verify                 findings_in, findings_rejected, outcome (TypeSafe)
+├── postprocess                    (planned) findings_total, findings_new, severity histogram
 ├── post_feedback                  comments_posted, check_run_updated
-└── meter                          tokens_billed; db spans (automatic)
+└── meter                          (planned) tokens_billed; db spans (automatic)
 ```
 
 The span names are the `pr_review_steps` stages from
 [WORKFLOW_DESIGN.md §2](./WORKFLOW_DESIGN.md), lower-cased; attributes are the same
-"shape, never content" set that table stores. One helper produces all three signals so
-they cannot drift:
+"shape, never content" set that table stores. The worker records four of the ten today
+(`CLAIMED`, `FETCH_DIFF`, `LLM_CALL`, `POST_FEEDBACK`); the rest are already in `JobStep`
+and the `ck_pr_review_steps_step` constraint, and join the trace as they are built.
+
+One helper produces all four signals, so they cannot drift: the step row, the span, the
+histogram and the log line. The worker already writes the first through the
+`StepRecorder` port (`_Steps` in `worker/process.py`); the `Observer` wraps it instead of
+sitting next to it:
 
 ```python
 # domain/ports.py
 class Observer(Protocol):
-    def step(self, name: str, **attrs: str | int | bool) -> AbstractContextManager[StepHandle]: ...
+    def step(self, step: JobStep, **attrs: str | int | bool) -> AbstractAsyncContextManager[StepHandle]: ...
 
-# domain/service.py (⚠️ does not exist yet)
-with self._observer.step("fetch_diff") as s:
-    diff = await self._git.fetch_diff(job)
-    s.set(files=len(diff.files), bytes=diff.size)
+# worker/process.py, replacing _Steps.begin() / end()
+async with self._observer.step(JobStep.FETCH_DIFF) as s:
+    context = await vcs.fetch_pull_request(...)
+    s.set(bytes=len(context.diff_text))
 ```
 
-`adapters/observability/observer.py` implements it: opens a Sentry span, observes
-`review_step_duration_seconds`, logs `step.finished` with `duration_ms` and `outcome`, and
-maps exceptions to `outcome=error` plus `error_kind`. Tests use a recording fake.
+`adapters/observability/observer.py` implements it: calls `StepRecorder.start` and
+`finish` (a failed write is logged and ignored, as `_Steps` does today), opens a Sentry
+span, observes `review_step_duration_seconds`, and logs `step.finished` with
+`duration_ms` and `outcome`. An exception leaving the block ends the step `FAILED` with
+the `error_kind` from `_classify`, which moves from `worker/process.py` to
+`domain/errors.py` (it only maps domain exceptions to names), so the adapter does not
+import the worker. The context manager is async because `StepRecorder` is. Tests use a
+recording fake.
 
 **Webhook → worker in one trace.** The enqueue transaction stores the current
 `sentry-trace` and `baggage` headers in a `trace_context` column on `pr_review_jobs`; the
@@ -422,7 +470,7 @@ written down once.
 
 | Setting | Value | Why |
 | :--- | :--- | :--- |
-| `traces_sample_rate` | 1.0 for jobs and API, 0 for `/health`, `/metrics` | Tens of reviews a day fits the free quota for errors. Spans are the number to watch: every API request also carries automatic httpx and SQLAlchemy child spans. Phase 2 checks span usage after a week; revisit at the first breakpoint |
+| `traces_sample_rate` | 1.0 for jobs and API, 0 for `/health` and the SSE stream | Tens of reviews a day fits the free quota for errors. Spans are the number to watch: every API request also carries automatic httpx and SQLAlchemy child spans. Phase 2 checks span usage after a week; revisit at the first breakpoint |
 | `send_default_pii` | `False` | No IPs, cookies, user identifiers |
 | `max_request_body_size` | `"never"` | Webhook bodies carry PR titles and descriptions: untrusted and customer data |
 | `include_local_variables` | `False` | Stack frames would otherwise ship diffs and prompts held in locals |
@@ -442,7 +490,7 @@ reviewed like code and recoverable if the stack is lost.
 
 | Dashboard | Panels |
 | :--- | :--- |
-| **Overview** | RPS, error rate, p95 latency, queue depth, oldest queued age, jobs finished by status, LLM cost/day, SLO error budget remaining, external probe status, firing alerts |
+| **Overview** | RPS, error rate, p95 latency, queue depth, oldest claimable age, jobs finished by status, LLM cost/day, SLO error budget remaining, external probe status, firing alerts |
 | **API** | RPS and latency per route, status classes, webhook outcomes per provider, Caddy 5xx at the edge, security events by kind |
 | **Pipeline** | Review duration p50/p95, step duration stacked by `step`, claim latency, `error_kind` breakdown, LLM outcome per provider, LLM tokens and cost per model, forge rate-limit headroom, findings posted, secrets redacted, last canary review |
 | **Infrastructure** | Host CPU/RAM/disk, container CPU/RAM/restarts/OOM kills, Postgres connections, table sizes, dead tuples and top statements, TLS certificate expiry, Alloy WAL health |
@@ -529,8 +577,8 @@ down, the relay is down, and "Target down" has to arrive anyway.
 are tested in CI" below), where an absent series means *not firing*; there is no separate
 no-data state. Three consequences:
 
-- Rules committed before their metric exists (worker, queue, Stripe, canary, SLOs) stay
-  quiet until the metric lands, with no special handling.
+- Rules committed before their metric exists (Stripe, canary, SLOs, and every metric
+  until its phase lands) stay quiet until the metric lands, with no special handling.
 - Silence that matters has its own explicit rule. Three **root** alerts cover it:
   "Target down" (a target answers no scrape), "Telemetry missing" (Alloy, or the whole
   VPS, stopped sending) and "Site unreachable" (measured entirely outside the VPS).
@@ -558,7 +606,7 @@ broke.
 | **Telemetry missing** (root) | `absent_over_time(up{job="api"}[5m])`: Alloy or the VPS stopped sending | — | critical |
 | **Site unreachable** (root) | External probe of `/api/health` fails from 2 of 3 locations on two consecutive runs (4 min) | — | critical: the only alert evaluated entirely outside the VPS |
 | API error rate | 5xx / all > 5% over 10 min, min 20 requests | api down | critical; removed once the API availability fast burn becomes critical (§ SLOs), since both fire on the same 5xx spike |
-| API latency | p95 > 2 s over 10 min (GitHub fails a webhook not answered within 10 s) | api down | warning |
+| API latency | p95 > 2 s over 10 min, SSE stream excluded (GitHub fails a webhook not answered within 10 s) | api down | warning |
 | Edge 5xx | Caddy 5xx / all > 5% over 10 min, min 20 requests | api down | critical |
 | Relay failing | `increase(alert_relay_failures_total[15m]) > 0` | api down | warning: Sentry alerts are not reaching Telegram (the admin's email still works) |
 | Host resources | RAM > 90% or disk > 85% for 10 min | — | warning |
@@ -566,15 +614,15 @@ broke.
 | OOM kill | any container OOM kill | — | warning |
 | Monitoring broken | Alloy remote-write failures > 0 for 15 min | — | warning |
 | TLS certificate expiry | Probe sees < 14 days left | — | warning: Caddy renews at 30 days, so this means renewal is failing |
-| Queue backlog | `queue_oldest_queued_age_seconds` > 600 | api down (sampler), worker down | critical |
-| Lease expiry | `increase(lease_expiries_total[1h]) > 0` | worker down | warning |
+| Queue backlog | `queue_oldest_claimable_age_seconds > 600 and on() sum(increase(jobs_finished_total[10m])) == 0`: work is waiting **and** nothing is draining. A wait alone is normal: at most 3 jobs per installation run at once (`domain/jobs.py:27`), so one repository opening ten PRs queues the rest for well over 10 min | api down (sampler), worker down | critical |
+| Lease expiry | `increase(lease_expiries_total[1h]) > 0` | worker down | warning: a worker died or a review outlived its lease |
 | Queue table bloat | dead tuples on `pr_review_jobs` > 10× live rows **and** no autovacuum in 24 h (a quiet table legitimately goes days without one) | postgres down | warning |
-| Periodic task stale | `time() - periodic_task_last_success_timestamp > 2 * periodic_task_interval_seconds` | api down (sampler), worker down | critical |
+| Periodic task stale | `time() - periodic_task_last_success_timestamp > 2 * periodic_task_interval_seconds + 180`. The 180 s covers the sampler and scrape delay (the value Grafana reads can be ~105 s old); without it the 30 s reaper would fire constantly | api down (sampler), worker down | critical |
 | **No throughput** | `sum(increase(webhook_deliveries_total{outcome="enqueued"}[4h])) == 0`, notified 13:00–19:00 Europe/Berlin Mon–Fri, so the 4 h window lies entirely inside working hours | api down | critical: backstop for the canary, the silent failure from the architecture doc |
 | **Canary review stale** | `time() - canary_review_last_success_timestamp > 15300` (4 h 15 min: two missed runs plus review time), notified 13:15–23:15 Europe/Berlin Mon–Fri | api down, worker down | critical: the pipeline is broken end to end |
 | Stripe silence | `time() - stripe_last_event_timestamp > 86400` (24 h) and `subscriptions_active > 0` | api down (sampler) | warning |
 | Forge rate limit | `forge_rate_limit_remaining_ratio` < 0.1 for 10 min | — | warning |
-| Security events | `increase(security_events_total[15m]) > 20` for any `kind` | — | warning. No single-event rule: one `id_not_found` is as likely a purged job or a mistyped URL as a probe |
+| Security events | `increase(security_events_total{kind!="session_rejected"}[15m]) > 20` for any `kind` | — | warning. No single-event rule: one `id_not_found` is as likely a purged job or a mistyped URL as a probe. `session_rejected` is left out: one tab polling after its session expired exceeds 20 by itself |
 | LLM spend | `sum(increase(llm_cost_usd_total[1d])) > scalar(llm_daily_budget_usd)` | — | warning |
 | SLO burn | see § SLOs | per SLO, see there | warning until the targets are confirmed |
 
@@ -622,14 +670,17 @@ a slow leak does.
 
 | SLO | Target | Measured from | Suppressed while |
 | :--- | :--- | :--- | :--- |
-| Review latency | 95% of `COMPLETED` jobs posted within 10 min of enqueue (provisional) | `review_duration_seconds{status="completed"}` | worker down |
+| Review latency | 95% of `COMPLETED` jobs posted within 10 min of enqueue (provisional) | `review_duration_seconds{status="COMPLETED"}` (label values are the database's) | worker down |
 | Review success | 99% of jobs end `COMPLETED` rather than `FAILED` (`SUPERSEDED` and `SKIPPED` excluded) | `jobs_finished_total` | worker down |
-| API availability | 99.5% of requests, excluding `/health` and `/metrics`, are not 5xx | `http_requests_total` | api down |
-| Webhook ingest | 99.9% of signature-valid deliveries handled (`enqueued`, `filtered` or `duplicate`) rather than `error` | `webhook_deliveries_total` | api down |
+| API availability | 99.5% of requests, excluding `/health`, are not 5xx | `http_requests_total` | api down |
+| Webhook ingest | 99.9% of signature-valid deliveries handled (`enqueued`, `filtered` or `duplicate`) rather than `rejected` or `error` | `webhook_deliveries_total` | api down |
 
-Why 10 minutes and not 5: the current model took ~95 s on a small smoke diff, and
-`LLM_TIMEOUT_SECONDS=300` with one corrective retry allows up to 10 minutes per review
-([devops.md](./devops.md), decision 17). A 5-minute target would be breached on day one.
+Why 10 minutes and not 5: glm-5.2 took ~95 s on a small smoke diff
+([devops.md](./devops.md), decision 17; the model has changed since, open question 2),
+and `LLM_TIMEOUT_SECONDS=300` allows two 300 s requests, the answer and one corrective
+retry. The TypeSafe rule screen and verifier add up to 15 s each, and a retried job
+waits at least 48 s of backoff first. A 5-minute target would be breached on day one;
+10 minutes is still provisional, and a review that hits both timeouts misses it.
 
 Burn-rate alerts, each with a short confirmation window so they clear soon after
 recovery: **fast** when 2% of the 28-day budget is spent in 1 h (burn rate 13.4×,
@@ -654,20 +705,21 @@ deliveries since the outage began: the App's *Advanced → Recent deliveries* pa
 `POST /app/hook/deliveries/{id}/attempts` with the App JWT. GitHub lists only the last 3
 days; idempotency (WORKFLOW_DESIGN §4) covers a redelivery of one that did arrive.
 GitLab deliveries lost in an outage are re-triggered by the next push or a command.
-Automating the GitHub sweep is § Open questions, item 2. (⚠️ WORKFLOW_DESIGN.md §4 says GitHub
-retries a failed delivery automatically; GitHub's documentation says it does not.)
+Automating the GitHub sweep is § Open questions, item 2. (⚠️ WORKFLOW_DESIGN.md §4 says
+GitHub retries a failed delivery automatically; GitHub's documentation says it does not.)
 
 ---
 
 ## Configuration and secrets
 
 **Secrets are environment variables on the VPS, passed to the containers** (team decision,
-2026-10-12; ⚠️ [AGENTS.md](../AGENTS.md) open question 4 still lists secret storage as open
-and must be marked resolved to match). They come from GitHub Secrets and are written to `/opt/dmc268/.env` (mode
-`600`) by `deploy.yml`, exactly as today ([devops.md](./devops.md), decision 8). Each
-container gets only the variables it needs: the app reads `.env` through `env_file`;
-Alloy gets its Grafana credentials through compose interpolation, not the whole file
-(devops decision 11). All of them are added to the secrets table in devops.md.
+2026-10-12; ⚠️ [AGENTS.md](../AGENTS.md) open question 4 still lists secret storage as
+open and must be marked resolved to match). They come from GitHub Secrets and are written
+to `/opt/dmc268/.env` (mode `600`) by `deploy.yml`, exactly as today
+([devops.md](./devops.md), decision 8). The api and worker read the whole `.env` through
+`env_file`, as they do today, so each also holds variables only the other uses; Alloy gets
+only its Grafana credentials, through compose interpolation (devops decision 11). All of
+them are added to the secrets table in devops.md.
 
 | Name | Type | Used by |
 | :--- | :--- | :--- |
@@ -683,6 +735,7 @@ Alloy gets its Grafana credentials through compose interpolation, not the whole 
 | `SENTRY_AUTH_TOKEN` | repo secret | `deploy.yml`: Sentry release, commits and deploy. CI only, scoped to `project:releases` and `org:read` (`set-commits --auto` needs the latter) |
 | `POSTGRES_EXPORTER_PASSWORD` | repo secret | postgres (creates the `pg_monitor` role) and alloy, by compose interpolation |
 | `CANARY_REPO_ID` | repo variable | api (DB sampler). Unset = canary gauge never set and the canary alert stays off |
+| `DEBUG_LOG_DIFF` | exists; never written by deploy | worker: `1` logs the fetched diff, honoured only when `ENV` is `local` (§ What is never logged) |
 | `llm_prices`, `llm_daily_budget_usd` | config ([configuration.md](./configuration.md)) | `llm_prices`: api, worker (cost metric); `llm_daily_budget_usd`: api only (exported gauge). ⚠️ not in configuration.md yet |
 
 New runtime dependencies: `structlog`, `sentry-sdk[fastapi,httpx,sqlalchemy]`,
@@ -711,49 +764,64 @@ Each phase is a separate PR, green on the five commands, demonstrable on its own
   redaction processors, stdout + rotating file handlers, `configure_logging(settings)`.
 - Middleware in `api/main.py`: `request_id`, contextvars binding, JSON access log replacing
   uvicorn's (absorbs `CallbackQueryLogFilter`).
-- Audit existing `logger.*` calls in `adapters/` and `api/` for content leaks; convert to
-  `event` + fields.
+- Audit every `logger.*` call (about 50, in `adapters/`, `api/` and `worker/`) for content
+  leaks and convert each to a dotted `event` + fields, in the same PR as the processor.
+  The retry loops (LISTEN connection, claim slots, reaper) log a `warning` when failures
+  start and `info` when they clear; `DEBUG_LOG_DIFF` is honoured only in `local`.
 - `pyproject.toml`: enable ruff's `G` rules.
-- `deploy/compose.yml`: `./logs:/logs` mount for api; `ops/bootstrap.sh`: create
-  `/opt/dmc268/logs` owned by 10001.
-- Tests: a log line is valid JSON with the mandatory fields; unknown keys are dropped; a
-  planted `ghp_…` token is redacted; an exception logs no locals and, in production, no
-  message, including for every exception in a `raise … from …` chain; a `%s` argument
-  does not appear in `event`; the canary test above; `prompt` and `reply` fields are
-  dropped in every `ENV` except `local`.
+- `deploy/compose.yml`: `./logs:/logs` mount for api and worker; `ops/bootstrap.sh`:
+  create `/opt/dmc268/logs` owned by 10001.
+- Tests: a log line is valid JSON with the mandatory fields; unknown keys are dropped and
+  allowlisted `extra=` fields survive; a planted `ghp_…` token is redacted; an exception
+  logs no locals and, in production, no message, including for every exception in a
+  `raise … from …` chain; a `%s` argument does not appear in `event`; the canary test
+  above; `prompt` and `reply` fields are dropped and `DEBUG_LOG_DIFF=1` logs no diff in
+  every `ENV` except `local`; a Postgres outage logs one warning per loop, not one per
+  attempt.
 
-**Exit:** production log lines are JSON on stdout and in `/opt/dmc268/logs/api.jsonl`.
+**Exit:** production log lines are JSON on stdout and in `/opt/dmc268/logs/api.jsonl` and
+`worker.jsonl`.
 
 ### Phase 2: Sentry errors and API traces
 
 - `adapters/observability/sentry.py`: `init_sentry(settings)` with the privacy settings
-  above, `traces_sampler`, `before_send` scrubber; called from the app factory.
+  above, `traces_sampler`, `before_send` scrubber; called from the app factory and from
+  `worker/__main__.py`.
 - `trace_id`/`span_id` structlog processor.
-- Sentry tags from the same contextvars: `account_id`, `installation_id`, `job_id`,
-  `delivery_id`, so errors can be filtered per tenant.
+- Sentry tags from the same contextvars: `installation_id` (`account_id` once tenancy
+  lands), `job_id`, `delivery_id`, so errors can be filtered per tenant.
+- Worker failure path: a job that ends `FAILED` is logged at `error` with `exc_info`
+  (§ Levels), so it becomes one Sentry event tagged with its `error_kind`.
 - Tests: `before_send` strips headers, bodies and query strings and replaces the exception
   value in production; `before_breadcrumb` drops formatted log messages; the canary test
-  extended to Sentry events and breadcrumbs; init is a no-op without a DSN; no network (the
-  transport is replaced).
+  extended to Sentry events and breadcrumbs; a `FAILED` job produces exactly one event and
+  a `RETRYING` one none; init is a no-op without a DSN; no network (the transport is
+  replaced).
 
 **Exit:** a deliberate error in production appears in Sentry with release and environment;
-a request trace shows route, status and outgoing httpx spans.
+a failed review appears as an issue tagged with its `error_kind`; a request trace shows
+route, status and outgoing httpx spans.
 
 ### Phase 3: metrics and Alloy
 
 - `adapters/observability/metrics.py`: the metric definitions above (one module, so names
-  are greppable); HTTP middleware for `http_*`; `/metrics` route.
-- `deploy/Caddyfile`: `respond /api/metrics* 404`.
+  are greppable); HTTP middleware for `http_*`, which skips the SSE stream in the latency
+  histogram; metrics servers on `:9100` in the API lifespan and `:9101` in the worker.
+- DB sampler in the API with the queue gauges (`queue_jobs`,
+  `queue_oldest_claimable_age_seconds`): the queue exists, and DoD 1's queue depth needs
+  them by phase 4.
 - `deploy/compose.yml`: `alloy` service, pinned image, no ports, read-only mounts, WAL on
-  a named volume; `deploy/alloy/config.alloy` with scrape, exporters, Loki file tail,
-  remote write, 60 s scrape interval and the cadvisor limits from § Series budget.
+  a named volume; `deploy/alloy/config.alloy` scraping `api:9100`, `worker:9101` and
+  Caddy, with the exporters, Loki file tail, remote write, 60 s scrape interval and the
+  cadvisor limits from § Series budget.
 - `deploy.yml`: copy the Alloy config; the smoke test asserts `https://<site>/api/metrics`
   is 404 and the port check still sees only 22/80/443.
 - Edge and database: Caddy's global `servers { metrics }` option (per-server HTTP
   metrics are off by default) and a `metrics` site block on internal `:2020`; Postgres
   `shared_preload_libraries=pg_stat_statements`, the extension migration and the
   `pg_monitor` exporter role; cadvisor OOM metrics in the relabel allowlist.
-- Tests: metrics endpoint exposes the expected names; route label uses the template.
+- Tests: metrics endpoint exposes the expected names; route label uses the template; the
+  API's main port has no `/metrics`.
 
 **Exit:** host, container, Postgres and API metrics visible in Grafana Cloud; logs
 searchable in Loki by `trace_id`; active series below 50% of the free limit.
@@ -783,21 +851,23 @@ searchable in Loki by `trace_id`; active series below 50% of the free limit.
 **Exit:** DoD items 1–5; a deploy shows as an annotation in Grafana and as a release in
 Sentry.
 
-### Phase 5: pipeline instrumentation (LLM now, worker as it lands)
+### Phase 5: pipeline instrumentation
 
-- `Observer` port in `domain/ports.py`, adapter in `adapters/observability/observer.py`,
-  recording fake in `tests/`.
-- LLM gateway: `llm_call` step span with an `llm.attempt` child per provider attempt,
-  `llm_*` metrics including `llm_cost_usd_total` from `llm_prices`, fallback and key
-  rotation counted. Visible today through `llm-smoke.yml` once it runs with a DSN.
+- `Observer` port in `domain/ports.py`, adapter in `adapters/observability/observer.py`
+  wrapping `StepRecorder`, recording fake in `tests/`; it replaces `_Steps` in
+  `worker/process.py`.
+- LLM gateway: `llm_call` with `llm.rule_screen`, one `llm.attempt` per request and
+  `llm.verify` children; `llm_*` metrics with `purpose`, including `llm_cost_usd_total`
+  from `llm_prices`; fallback and key rotation counted. Visible today through
+  `llm-smoke.yml` once it runs with a DSN.
 - Forge adapters: `forge_rate_limit_remaining_ratio` from response headers. Auth:
-  `security_events_total` at each refusal path the auth tests already cover, and
+  `security_events_total` at the state-mismatch, CSRF and session refusals, and
   `id_not_found` in the 404 handler of authenticated routes with an id in the path.
-- When the worker lands: `review.job` root span, every stage through `observer.step`,
-  `trace_context` column and continuation, `lease_expiries_total`, `periodic_task_runs`
-  upserts, worker `:9101` scraped by Alloy, `./logs` mount on the worker service.
-- DB sampler in the API, each query added as its table lands: queue gauges with the
-  queue, periodic tasks with `periodic_task_runs`, Stripe and `subscriptions_active` with
+- Worker: `review.job` root span, every recorded step through `observer.step`,
+  `trace_context` column and continuation, `lease_expiries_total` from the reaper's
+  count, `periodic_task_runs` upserts by the reaper.
+- DB sampler queries added as their tables land (the queue gauges are in from phase 3):
+  periodic tasks with `periodic_task_runs`, Stripe and `subscriptions_active` with
   billing.
 
 **Exit:** DoD items 3 and 6. Throughput drill: stopping all ingest in production for 4 h
@@ -805,7 +875,7 @@ would lose customer reviews, so the drill deploys a copy of the rule with a 15-m
 lookback and no time window ("No throughput (drill)"), watches it fire in a quiet
 period, then removes it; the `promtool` tests cover the real 4-hour rule.
 
-### Phase 6: canary and SLOs (after the worker)
+### Phase 6: canary and SLOs
 
 - `dmc268-canary` repository with the App installed, on an internal plan; its scheduled
   workflow pushes to an open PR; the canary query in the DB sampler; "Canary review
@@ -829,22 +899,27 @@ methods and ~12 buckets is about 540 series; add `account_id` for 100 accounts a
 becomes 54,000, well past the free tier, from one metric. Metrics also only give numbers:
 they cannot show *which* PRs failed.
 
-Per-account questions are answered by the stores that already hold the account id. Loki
-queries reach back only as far as its retention (14 days on the free tier, the same as
-the local files); anything older comes from Postgres.
+Per-account questions are answered by the stores that already hold the tenant id:
+`installation_id` until tenancy lands (jobs carry no `account_id` yet), `account_id`
+after; the examples below switch with it. Loki queries reach back only as far as its
+retention (14 days on the free tier, the same as the local files); anything older comes
+from Postgres.
 
 | Question | Where | Example |
 | :--- | :--- | :--- |
-| Which errors hit account X? | **Sentry**: `account_id` is a tag on every event and trace. Sentry indexes tags, so many distinct values are fine | Issues → `account_id:0192e0aa-…` |
-| How many reviews did each account run today, and how many failed? | **Loki**: `account_id` is a JSON field in the log line, not an index label, so it costs nothing until queried | `sum by (account_id, outcome) (count_over_time({service="worker"} \| json \| event="job.finished" [1d]))` |
-| Which account's reviews are slowest? | **Loki** | `quantile_over_time(0.95, {service="worker"} \| json \| event="job.finished" \| unwrap duration_ms [1d]) by (account_id)` |
+| Which errors hit account X? | **Sentry**: `installation_id` is a tag on every event and trace. Sentry indexes tags, so many distinct values are fine | Issues → `installation_id:51234567` |
+| How many reviews did each account run today, and how many failed? | **Loki**: `installation_id` is a JSON field in the log line, not an index label, so it costs nothing until queried | `sum by (installation_id, outcome) (count_over_time({service="worker"} \| json \| event="job.finished" [1d]))` |
+| Which account's reviews are slowest? | **Loki** | `quantile_over_time(0.95, {service="worker"} \| json \| event="job.finished" \| unwrap duration_ms [1d]) by (installation_id)` |
 | Quota used vs plan, per account | **Postgres** (later) | see below |
 
 **Later, for billing and usage dashboards:** Postgres as a Grafana datasource. Grafana
 Cloud reaches it through Private Data Source Connect (PDC), an agent on the VPS that opens
 an outbound tunnel, so Postgres stays unpublished. PDC is available on the free tier. The
-datasource uses a read-only role with `SELECT` on `pr_review_jobs`, `usage_records` and
-`subscriptions` only, never `provider_credentials` or `sessions`.
+datasource uses a read-only role with `SELECT` on `usage_records`, `subscriptions` and
+only the metadata columns of `pr_review_jobs` (ids, `repo_id`, `pr_number`, status,
+timestamps, `error_kind`), never `provider_credentials` or `sessions`. The other
+`pr_review_jobs` columns hold `pr_title`, `author_login`, branch names, `summary` and
+`error_log`: customer text that the logs deliberately never carry.
 
 ```sql
 -- quota used this period, per account
@@ -884,9 +959,9 @@ adds no new category of data leaving the box. It is not part of this plan's DoD.
 
 ## Comments
 
-<!-- ⚠️ 2026-10-12, from observability.md § SLOs: GitHub's documentation ("Handling
-failed webhook deliveries") says GitHub does not automatically redeliver a failed
-delivery; it is redelivered only by hand or through the REST API, within 3 days. If
-that holds, layer 1 collapses redeliveries rather than automatic retries, and on GitHub
-too a delivery dropped while the API is down is lost unless redelivered. Not yet
-reconciled with this section. -->
+<!-- ⚠️ 2026-10-12, for WORKFLOW_DESIGN.md §4, left unedited by decision: GitHub's
+documentation ("Handling failed webhook deliveries") says GitHub does not automatically
+redeliver a failed delivery; it is redelivered only by hand or through the REST API,
+within 3 days. If that holds, §4's layer 1 collapses redeliveries rather than automatic
+retries, and on GitHub too a delivery dropped while the API is down is lost unless
+redelivered. See § SLOs, "Blind spot". -->
