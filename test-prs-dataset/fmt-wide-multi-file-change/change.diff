@@ -1,0 +1,86 @@
+diff --git a/app/prefs/models.py b/app/prefs/models.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/prefs/models.py
+@@ -0,0 +1,10 @@
++from dataclasses import dataclass, field
++
++
++@dataclass
++class Preferences:
++    user_id: int
++    email: bool = True
++    sms: bool = False
++    channels: list[str] = field(default_factory=list)
++    quiet_hours: tuple[int, int] = (22, 7)
+diff --git a/app/prefs/service.py b/app/prefs/service.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/prefs/service.py
+@@ -0,0 +1,23 @@
++import json
++
++from app.prefs.models import Preferences
++
++_STORE: dict[int, str] = {}
++
++
++def save(prefs: Preferences) -> None:
++    _STORE[prefs.user_id] = json.dumps(prefs.__dict__)
++
++
++def load(user_id: int) -> Preferences:
++    raw = _STORE.get(user_id)
++    if raw is None:
++        return Preferences(user_id)
++    data = json.loads(raw)
++    data["quiet_hours"] = tuple(data["quiet_hours"])
++    return Preferences(**data)
++
++
++def is_quiet(prefs: Preferences, hour: int) -> bool:
++    start, end = prefs.quiet_hours
++    return start <= hour or hour < end
+diff --git a/app/prefs/api.py b/app/prefs/api.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/prefs/api.py
+@@ -0,0 +1,18 @@
++from fastapi import APIRouter
++
++from app.prefs import service
++from app.prefs.models import Preferences
++
++router = APIRouter()
++
++
++@router.get("/prefs/{user_id}")
++def read(user_id: int):
++    return service.load(user_id).__dict__
++
++
++@router.put("/prefs/{user_id}")
++def write(user_id: int, body: dict):
++    prefs = Preferences(user_id, **body)
++    service.save(prefs)
++    return prefs.__dict__
+diff --git a/tests/test_prefs.py b/tests/test_prefs.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/tests/test_prefs.py
+@@ -0,0 +1,11 @@
++from app.prefs import service
++from app.prefs.models import Preferences
++
++
++def test_round_trip():
++    service.save(Preferences(1, sms=True))
++    assert service.load(1).sms is True
++
++
++def test_quiet_hours_wrap_midnight():
++    assert service.is_quiet(Preferences(1), 23)

@@ -10,7 +10,15 @@ from fastapi.responses import JSONResponse
 
 from api.config import AppSettings
 from domain.auth import Session, hash_session_id
-from domain.ports import Clock, IdentityProvider, SessionStore, SignInAttemptStore
+from domain.ports import (
+    Clock,
+    IdentityProvider,
+    JobEventsSource,
+    JobHistory,
+    ReviewCommentStore,
+    SessionStore,
+    SignInAttemptStore,
+)
 from domain.repositories import RepositoriesService
 
 SESSION_COOKIE = "__Host-session"
@@ -20,6 +28,7 @@ NO_STORE = "no-store"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 _REQUESTED_WITH = "fetch"
 _CALLBACK_PATH = re.compile(r"^/auth/[^/]+/callback$")
+_WEBHOOK_PREFIX = "/webhooks/"
 
 
 class ApiError(Exception):
@@ -50,6 +59,9 @@ class Services:
     clock: Clock
     repositories: RepositoriesService
     app_slug: str
+    job_events: JobEventsSource
+    jobs: JobHistory
+    findings: ReviewCommentStore
 
 
 def services(request: Request) -> Services:
@@ -140,6 +152,16 @@ async def optional_session(request: Request) -> Session | None:
 
 def enforce_csrf(request: Request) -> JSONResponse | None:
     """Unsafe methods need X-Requested-With: fetch and our own Origin."""
+    # Webhook deliveries are forge-to-server POSTs: they carry no cookies
+    # and no Origin or X-Requested-With headers, so the checks below would
+    # reject every legitimate delivery. Their authentication is the
+    # delivery signature, verified in the route
+    # (docs/WORKFLOW_DESIGN.md §2 Step 2).
+    # Behind uvicorn --root-path /api the request path carries the prefix
+    # (/api/webhooks/github), so match on the path the router sees.
+    route_path = request.scope["path"].removeprefix(request.scope.get("root_path", ""))
+    if route_path.startswith(_WEBHOOK_PREFIX):
+        return None
     if request.method in _SAFE_METHODS:
         return None
     if request.headers.get("x-requested-with") != _REQUESTED_WITH:

@@ -1,0 +1,13 @@
+id: cor-mutable-default-argument
+intent: "detection: a list default is shared between calls"
+pattern: "mutable default argument"
+metrics: detection
+fixture: change.diff
+title: "Tag support tickets"
+description: "Appends a tag to the ticket's tag list."
+expected:
+  - path: app/tickets.py
+    line: 10
+    side: new
+    category: correctness
+    severity: medium

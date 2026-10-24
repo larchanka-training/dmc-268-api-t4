@@ -1,0 +1,25 @@
+# Real dev-App credentials for the local stack — LOCAL ONLY, gitignored.
+#
+# Copy this file to docker-compose.override.yml (docker compose merges it
+# automatically) and fill the values in .env next to this file. The PEM is
+# mounted read-only: a host path in GITHUB_APP_PRIVATE_KEY_PATH means nothing
+# inside the container, so the override points the env var at the mount.
+services:
+  api:
+    environment: &github_env
+      APP_ORIGIN: ${APP_ORIGIN}
+      GITHUB_APP_ID: ${GITHUB_APP_ID}
+      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
+      GITHUB_CALLBACK_URL: ${GITHUB_CALLBACK_URL}
+      GITHUB_APP_PRIVATE_KEY_PATH: /secrets/app.pem
+      DEBUG_LOG_DIFF: ${DEBUG_LOG_DIFF:-}
+    volumes:
+      - ${GITHUB_APP_PRIVATE_KEY_PATH}:/secrets/app.pem:ro
+
+  worker:
+    environment: *github_env
+    volumes:
+      - ${GITHUB_APP_PRIVATE_KEY_PATH}:/secrets/app.pem:ro

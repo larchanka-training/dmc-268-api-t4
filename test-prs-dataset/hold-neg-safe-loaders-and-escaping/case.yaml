@@ -1,0 +1,9 @@
+id: hold-neg-safe-loaders-and-escaping
+intent: "negative control (hold-out): calls that are dangerous in their unsafe form, used in the safe form"
+pattern: "safe YAML loader, HTML escaping and constant-time compare; nothing to report"
+metrics: negative control
+fixture: change.diff
+title: "Render the profile card from the uploaded settings"
+description: "Parses the settings file, escapes the display name and checks the signature."
+tags: [holdout]
+expected: []

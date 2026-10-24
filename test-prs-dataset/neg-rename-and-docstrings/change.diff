@@ -1,0 +1,31 @@
+diff --git a/app/totals.py b/app/totals.py
+index 3f2a1c4..9b7e0d2 100644
+--- a/app/totals.py
++++ b/app/totals.py
+@@ -1,5 +1,9 @@
+-def calc(items, tax):
+-    t = 0
+-    for i in items:
+-        t += i["price"] * i["qty"]
+-    return round(t * (1 + tax), 2)
++def calculate_total(items: list[dict], tax_rate: float) -> float:
++    """Return the order total including tax, rounded to cents.
++
++    Each item carries a unit `price` and a `qty`.
++    """
++    subtotal = 0.0
++    for item in items:
++        subtotal += item["price"] * item["qty"]
++    return round(subtotal * (1 + tax_rate), 2)
+diff --git a/app/checkout.py b/app/checkout.py
+index 3f2a1c4..9b7e0d2 100644
+--- a/app/checkout.py
++++ b/app/checkout.py
+@@ -1,5 +1,5 @@
+-from app.totals import calc
++from app.totals import calculate_total
+ 
+ 
+ def checkout(cart):
+-    return calc(cart.items, 0.2)
++    return calculate_total(cart.items, 0.2)

@@ -1,0 +1,19 @@
+diff --git a/app/inventory.py b/app/inventory.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/inventory.py
+@@ -0,0 +1,13 @@
++from app.db import db
++
++
++class OutOfStock(Exception):
++    pass
++
++
++async def reserve(sku: str, qty: int) -> int:
++    stock = await db.get_stock(sku)
++    if stock < qty:
++        raise OutOfStock(sku)
++    await db.set_stock(sku, stock - qty)
++    return stock - qty

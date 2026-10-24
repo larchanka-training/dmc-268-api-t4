@@ -1,0 +1,13 @@
+id: mnt-getter-writes-to-database
+intent: "detection: a function named get_* commits a write, which callers cannot see"
+pattern: "misleading name hides a side effect"
+metrics: detection
+fixture: change.diff
+title: "Show the display name in the header"
+description: "Adds a helper for the header component."
+expected:
+  - path: app/profile.py
+    line: 6
+    side: new
+    category: maintainability
+    severity: medium

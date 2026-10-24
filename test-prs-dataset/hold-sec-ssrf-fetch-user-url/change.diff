@@ -1,0 +1,20 @@
+diff --git a/app/preview.py b/app/preview.py
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/app/preview.py
+@@ -0,0 +1,14 @@
++import re
++
++import httpx
++from fastapi import APIRouter
++
++router = APIRouter()
++TITLE = re.compile(r"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
++
++
++@router.get("/preview")
++def preview(url: str):
++    page = httpx.get(url, follow_redirects=True, timeout=5)
++    match = TITLE.search(page.text)
++    return {"title": match.group(1).strip() if match else None}

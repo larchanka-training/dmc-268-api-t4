@@ -3,7 +3,14 @@ import re
 from dataclasses import dataclass
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+    field_validator,
+)
 
 from domain.models import (
     MESSAGE_MAX_LENGTH,
@@ -56,6 +63,16 @@ class FindingOut(BaseModel):
     category: Category
     message: FindingMessage
     suggestion: SuggestionOut | None = None
+    rule_id: str | None = None
+
+    @field_validator("rule_id", mode="before")
+    @classmethod
+    def _rule_id_as_text(cls, value: Any) -> Any:
+        # A malformed rule_id must not cost the finding: it becomes an unknown id, which
+        # parse_review then clears and counts.
+        if value is None or isinstance(value, str):
+            return value
+        return ""
 
     def to_domain(self) -> Finding:
         return Finding(
@@ -64,6 +81,7 @@ class FindingOut(BaseModel):
             category=self.category,
             message=self.message,
             suggestion=self.suggestion.to_domain() if self.suggestion else None,
+            rule_id=self.rule_id,
         )
 
 
@@ -89,6 +107,7 @@ class ParsedReview:
     review: ReviewOut
     dropped_findings: int
     trimmed_findings: int = 0
+    unknown_rule_ids: int = 0
 
 
 def strip_code_fence(text: str) -> str:
@@ -96,7 +115,21 @@ def strip_code_fence(text: str) -> str:
     return match.group("body") if match else text.strip()
 
 
-def parse_review(raw_reply: str) -> ParsedReview:
+def _known_rule_ids(
+    findings: list[FindingOut], rule_ids: frozenset[str]
+) -> tuple[list[FindingOut], int]:
+    """Clear rule_id values that name no rule we sent; the findings themselves stay."""
+    checked: list[FindingOut] = []
+    unknown = 0
+    for finding in findings:
+        if finding.rule_id is not None and finding.rule_id not in rule_ids:
+            finding = finding.model_copy(update={"rule_id": None})
+            unknown += 1
+        checked.append(finding)
+    return checked, unknown
+
+
+def parse_review(raw_reply: str, rule_ids: frozenset[str] = frozenset()) -> ParsedReview:
     """Validate a model reply; drop findings that break the schema instead of failing."""
     try:
         payload = json.loads(strip_code_fence(raw_reply))
@@ -115,6 +148,7 @@ def parse_review(raw_reply: str) -> ParsedReview:
             valid.append(FindingOut.model_validate(item))
         except ValidationError:
             continue
+    valid, unknown_rule_ids = _known_rule_ids(valid, rule_ids)
     kept = valid
     if len(valid) > FINDINGS_MAX:
         # Over the limit, keep the most severe: the dashboard reads them first. sorted() is
@@ -125,4 +159,5 @@ def parse_review(raw_reply: str) -> ParsedReview:
         review=review,
         dropped_findings=len(envelope.findings) - len(valid),
         trimmed_findings=len(valid) - len(kept),
+        unknown_rule_ids=unknown_rule_ids,
     )

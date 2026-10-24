@@ -1,0 +1,13 @@
+id: perf-quadratic-dedupe
+intent: "detection: membership is tested against a list inside a loop over a large input"
+pattern: "O(n^2) de-duplication with list membership"
+metrics: detection
+fixture: change.diff
+title: "De-duplicate imported events"
+description: "Imports can hold hundreds of thousands of events."
+expected:
+  - path: app/importer.py
+    line: 5
+    side: new
+    category: performance
+    severity: medium

@@ -1,0 +1,13 @@
+id: con-lost-update-across-await
+intent: "detection: stock is read, then written back after an await, losing concurrent updates"
+pattern: "read-modify-write race across an await point"
+metrics: detection
+fixture: change.diff
+title: "Reserve stock for an order"
+description: "Decrements stock when an order is placed."
+expected:
+  - path: app/inventory.py
+    line: 12
+    side: new
+    category: concurrency
+    severity: high

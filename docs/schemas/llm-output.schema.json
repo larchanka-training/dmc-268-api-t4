@@ -73,6 +73,14 @@
             }
           ],
           "description": "A concrete replacement, when one can be stated exactly. Omitted or null otherwise."
+        },
+        "rule_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^R[1-9][0-9]*$",
+          "description": "Id of the repository rule (from .review/rules.md, numbered R1, R2, ...) the finding violates. Omitted or null when the finding violates no listed rule. An id that names no rule sent with the request is cleared by the gateway; the finding is kept."
         }
       }
     },

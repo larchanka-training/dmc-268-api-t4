@@ -1,0 +1,13 @@
+id: perf-n-plus-one-query
+intent: "detection: one query per order inside a loop"
+pattern: "N+1 queries"
+metrics: detection
+fixture: change.diff
+title: "Show items on the order list"
+description: "Each order row now lists its line items."
+expected:
+  - path: app/order_list.py
+    line: 10
+    side: new
+    category: performance
+    severity: medium

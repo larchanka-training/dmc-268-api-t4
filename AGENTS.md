@@ -11,13 +11,14 @@ Target layout: [docs/BACKEND_ARCHITECTURE.md § Planned code layout](docs/BACKEN
 | Path | Status | Contents |
 |---|---|---|
 | `docs/`, `SYSTEM_DESIGN.md`, `main.py` | exists | design documents, FastAPI stub |
-| `domain/` | lands with PR #8 | models, ports (`domain/ports.py`), errors; pure Python |
-| `adapters/` | lands with PR #8 (`adapters/llm/`) | integrations: `db/`, `github/`, `gitlab/`, `stripe/`, `identity/`, `vault/` planned |
-| `tests/` | lands with PR #8 | pytest suite |
-| `api/` | planned | webhooks, `/v1` routes, auth, app factory |
-| `worker/` | planned | claim loop, reaper, periodic tasks |
+| `domain/` | exists | models, ports (`domain/ports.py`), errors; pure Python |
+| `adapters/` | exists (`llm/`, `github/`, `identity/`, `memory/`, `jobs/`, `db/`) | `jobs/` holds the in-memory `JobRepository`; `db/` holds config/models/session/repository (`PostgresJobStore`); `github/publisher.py` posts reviews; `db/job_events.py` records pipeline steps and reads them back for the SSE stream (`memory/job_events.py` is its in-memory twin for tests); `db/review_comments.py` keeps published findings (`memory/review_comments.py` is its twin); `gitlab/`, `stripe/`, `vault/` planned; tenancy/billing/auth/config tables still planned |
+| `tests/` | exists | pytest suite |
+| `api/` | exists | auth, `/repositories`, `/webhooks/github`, `/jobs`, `/jobs/{id}` and the job events stream (`api/jobs.py`), app factory; `/v1` routes planned |
+| `worker/` | exists (`process.py` processes one job; `loop.py` claim/LISTEN/poll, `run_worker`; `listener.py` LISTEN; `periodic.py` advisory-lock leader + lease reaper; `config.py`, `__main__.py`) | remaining periodic tasks planned: usage rollover, credential health, retention purge, grace expiry |
 | `ops/` | planned | `replay.py` |
-| `alembic/` | planned | migrations |
+| `evals/`, `test-prs-dataset/` | exists | LLM eval harness (`python -m evals validate\|run`) and the 29-case gold dataset; see [test-prs-dataset/README.md](test-prs-dataset/README.md) |
+| `alembic/` | exists (`0001` review jobs + steps, `0002` published findings) | migrations; tenancy/billing tables later |
 
 ## Commands
 
@@ -73,8 +74,9 @@ Documents disagree here. Do not pick a side in code; ask the team.
    (team decision, 2026-10-04).
 2. **LLM providers:** OpenAI and Anthropic ([SYSTEM_DESIGN.md §5.4](SYSTEM_DESIGN.md)) vs
    Eurouter + Ollama behind one OpenAI-compatible adapter ([docs/llm-gateway.md](docs/llm-gateway.md), PR #8).
-3. **Severity:** not persisted ([docs/configuration.md §3](docs/configuration.md)) vs stored on
-   Finding ([SYSTEM_DESIGN.md §8](SYSTEM_DESIGN.md)); the UI shows it on published findings.
+3. **Severity (resolved):** severity AND category are persisted on published findings
+   ([docs/PIPELINE_SPEC.md §7.1, D4](docs/PIPELINE_SPEC.md); decision 2026-10-10, this PR);
+   the columns land with the pr_review_comments migration, which is deliberately not `0001`.
 4. **Secret storage:** encrypted in the database ([SYSTEM_DESIGN.md §10](SYSTEM_DESIGN.md)) vs
    systemd `LoadCredential`, never in the environment ([docs/BACKEND_ARCHITECTURE.md § Deployment](docs/BACKEND_ARCHITECTURE.md))
    vs `LoadCredential` or a `0600` env file ([docs/configuration.md](docs/configuration.md));
