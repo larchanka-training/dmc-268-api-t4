@@ -263,11 +263,21 @@ def assess_risk(
     return max(risk, floor, key=RISK_ORDER.index)
 
 
+DISMISSED_NOTE = "The summary and checklist above were written before that check."
+
+
 def dismissed_line(dismissed: int) -> str:
-    """Counts only: the dismissed findings' text is never shown."""
+    """Counts only: the dismissed findings' text is never shown.
+
+    The model writes the summary and checklist before the verifier runs, and a prompt rule
+    keeping defects out of them cost eval precision and recall (issue #55 follow-up), so the
+    Check Run says plainly which came first.
+    """
     if dismissed == 1:
-        return "1 possible issue was checked by the verifier and dismissed."
-    return f"{dismissed} possible issues were checked by the verifier and dismissed."
+        counted = "1 possible issue was checked by the verifier and dismissed."
+    else:
+        counted = f"{dismissed} possible issues were checked by the verifier and dismissed."
+    return f"{counted} {DISMISSED_NOTE}"
 
 
 def build_plan(

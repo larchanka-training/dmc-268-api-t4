@@ -423,6 +423,7 @@ def test_a_high_model_risk_is_capped_when_the_verifier_dismissed_the_only_findin
     assert "**Risk: Medium** (the model said High before the verifier dismissed" in plan.summary
     assert "the risk is capped" in plan.summary
     assert "1 possible issue was checked by the verifier and dismissed." in plan.summary
+    assert "written before that check" in plan.summary
     assert NO_ISSUES_LINE in plan.summary
 
 
