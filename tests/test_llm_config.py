@@ -18,7 +18,7 @@ def test_defaults_from_minimal_env() -> None:
     assert settings.timeout_seconds == 120
     assert settings.temperature == 0.0
     assert settings.json_mode is True
-    assert settings.max_tokens == 4096
+    assert settings.max_tokens == 16384
     assert settings.max_input_tokens == 32000
     assert settings.primary.provider_order == ()
 

@@ -10,8 +10,12 @@ from pathlib import Path
 
 from adapters.llm.config import LLMSettings
 from adapters.llm.factory import build_gateway
+from domain.diff import parse_diff
+from domain.diff_filter import filter_files
 from domain.errors import LLMConfigurationError, LLMGatewayError
+from domain.models import ReviewResult
 from domain.ports import ReviewRequest
+from domain.publishing import CommentableLines, build_plan
 
 EXIT_CONFIG_ERROR = 2
 EXIT_REVIEW_FAILED = 1
@@ -27,6 +31,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--description", default="", help="pull request description")
     parser.add_argument(
         "--rules", type=Path, default=None, help="repository rules file (.review/rules.md)"
+    )
+    parser.add_argument(
+        "--check-run",
+        type=Path,
+        default=None,
+        help="also write the Check Run summary the worker would publish to this file",
     )
     return parser.parse_args(argv)
 
@@ -64,7 +74,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"review failed: {exc}", file=sys.stderr)
         return EXIT_REVIEW_FAILED
     print(json.dumps(asdict(result), indent=2, ensure_ascii=False))
+    if args.check_run is not None:
+        args.check_run.write_text(check_run_summary(result, diff_text), encoding="utf-8")
     return 0
+
+
+def check_run_summary(result: ReviewResult, diff_text: str) -> str:
+    """The Check Run summary, built the way worker/process.py builds it (default policy)."""
+    plan = build_plan(
+        result.findings,
+        model_summary=result.summary,
+        lines=CommentableLines.from_files(filter_files(parse_diff(diff_text)).kept),
+        model_risk=result.risk,
+        checklist=result.checklist,
+    )
+    return plan.summary
 
 
 if __name__ == "__main__":

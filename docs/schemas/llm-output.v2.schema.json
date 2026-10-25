@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/larchanka-training/dmc-268-api-t4/docs/schemas/llm-output.v2.schema.json",
+  "title": "LLM review output, v2",
+  "description": "Schema v2, paired with adapters/llm/prompts/review_v2.md (issue #55, PIPELINE_SPEC.md §10). Adds the release risk and a checklist for the human reviewer to v1; v1 (llm-output.schema.json) stays readable for old jobs. The single JSON object a model must return for one review. Validated in adapters/llm/schema.py before anything is posted; anything that fails validation is dropped, never published. Mirrors the frontend type src/modules/runs/domain/finding.ts in dmc-268-ui-t4. The schema is strict: a finding that does not match it is dropped. The parser is deliberately more tolerant in one direction only - it ignores keys it does not know (Pydantic extra=\"ignore\"), so a model that adds a field loses the field rather than the finding. risk and checklist are required of the model, but the parser treats a missing or invalid value as absent: the published risk then comes from the findings' severity and the checklist is empty.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "risk",
+    "checklist",
+    "findings"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "maxLength": 4000,
+      "description": "What changed and why it matters, in plain words, 1-3 sentences. Shown at the top of the Check Run summary."
+    },
+    "risk": {
+      "$ref": "#/$defs/risk"
+    },
+    "checklist": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200,
+        "pattern": "^[^\\n]*$"
+      },
+      "description": "Up to 5 short, change-specific checks for the human reviewer. The parser cuts a longer list to 5, collapses whitespace in each item, cuts it to 200 characters and drops non-strings. May be empty."
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 50,
+      "description": "Concrete defects, each anchored to a line of the diff. An empty array is a valid review: it means the change looks fine.",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "line",
+        "side",
+        "severity",
+        "category",
+        "message"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Repository-relative path of the file the finding is about, exactly as it appears in the diff."
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Line number on the chosen side of the diff. A position outside the diff is dropped in post-processing."
+        },
+        "side": {
+          "$ref": "#/$defs/side"
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "category": {
+          "$ref": "#/$defs/category"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "description": "What is wrong and why it matters, in the reviewer's voice. Markdown is allowed; it is posted as comment text and never executed."
+        },
+        "suggestion": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/suggestion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A concrete replacement, when one can be stated exactly. Omitted or null otherwise."
+        },
+        "rule_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^R[1-9][0-9]*$",
+          "description": "Id of the repository rule (from .review/rules.md, numbered R1, R2, ...) the finding violates. Omitted or null when the finding violates no listed rule. An id that names no rule sent with the request is cleared by the gateway; the finding is kept."
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\n]*$",
+          "description": "Optional in this version. The exact source line the finding refers to, as specified in CONTEXT_AND_VERIFICATION_SPEC.md §5, where it is required. It becomes required, and review_v2.md asks for it, when the evidence-and-snap pass (§4.2) is implemented; until then the parser ignores it. Never posted or stored."
+        }
+      }
+    },
+    "suggestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "before",
+        "after"
+      ],
+      "properties": {
+        "before": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "string"
+          },
+          "description": "The lines to be replaced, as they appear in the file."
+        },
+        "after": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "string"
+          },
+          "description": "The lines that should take their place."
+        }
+      }
+    },
+    "side": {
+      "type": "string",
+      "enum": [
+        "old",
+        "new"
+      ],
+      "description": "Which side of the diff the line belongs to: 'old' is the pre-image, 'new' the post-image. Provider-neutral on purpose; the GitHub adapter maps old/new to LEFT/RIGHT at the edge."
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "critical",
+        "high",
+        "medium",
+        "low"
+      ],
+      "description": "How much the finding matters. Also the value min_severity filters on."
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "security",
+        "correctness",
+        "concurrency",
+        "performance",
+        "maintainability"
+      ],
+      "description": "What kind of problem this is."
+    },
+    "risk": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "description": "Release risk of merging the whole change. Publishing never shows it below what the findings imply: a critical finding makes it at least high, a high finding at least medium."
+    }
+  },
+  "examples": [
+    {
+      "summary": "Retries were added around the provider call. Two issues are worth a look: the retry loop keeps the database transaction open, and the backoff has no upper bound.",
+      "risk": "high",
+      "checklist": [
+        "Check that no row lock is held while the provider is retried",
+        "Confirm the retry count and the backoff cap with the payments team"
+      ],
+      "findings": [
+        {
+          "path": "src/payment_service.rb",
+          "line": 142,
+          "side": "new",
+          "severity": "high",
+          "category": "correctness",
+          "message": "The transaction stays open while the provider is retried. A slow provider holds the row locks for the whole backoff window, which can stall unrelated payments.",
+          "suggestion": {
+            "before": [
+              "    with_transaction do",
+              "      charge_with_retries(account, amount)",
+              "    end"
+            ],
+            "after": [
+              "    charge_with_retries(account, amount)",
+              "    with_transaction do",
+              "      record_settlement(account, amount)",
+              "    end"
+            ]
+          }
+        },
+        {
+          "path": "src/payment_service.rb",
+          "line": 158,
+          "side": "new",
+          "severity": "medium",
+          "category": "performance",
+          "message": "The backoff doubles without an upper bound, so the fifth attempt waits over a minute. Cap the delay and the number of attempts.",
+          "suggestion": null
+        }
+      ]
+    }
+  ]
+}

@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from domain.diff import FileDiff
-from domain.models import DiffSide, Finding, FindingPosition, Severity
+from domain.models import RISK_ORDER, DiffSide, Finding, FindingPosition, RiskLevel, Severity
 
 # Most severe first: Severity is declared in that order in domain/models.py.
 SEVERITY_ORDER: tuple[Severity, ...] = tuple(Severity)
@@ -38,6 +38,7 @@ _SEVERITY_RANK = {severity: rank for rank, severity in enumerate(SEVERITY_ORDER)
 FINGERPRINT_MARKER = "<!-- dmc268:fp={fingerprint} -->"
 _FINGERPRINT_MARKER_RE = re.compile(r"<!-- dmc268:fp=(?P<fingerprint>[0-9a-f]{64}) -->")
 SUMMARY_MARKER = "<!-- dmc268:summary -->"
+NO_ISSUES_LINE = "No issues found in this review."
 
 SUMMARY_FILES_SHOWN = 30
 SUMMARY_RISKS_SHOWN = 10
@@ -217,6 +218,7 @@ class PublishPlan:
     review_event: ReviewEvent
     conclusion: CheckConclusion
     stats: PublishStats
+    risk: RiskLevel = RiskLevel.LOW
 
     @property
     def needs_review(self) -> bool:
@@ -228,6 +230,28 @@ class PublishPlan:
         return bool(self.comments) or self.review_event is ReviewEvent.REQUEST_CHANGES
 
 
+def risk_floor(findings: Iterable[Finding]) -> RiskLevel:
+    """The least risk the findings imply: a critical one makes it High, a high one Medium."""
+    severities = {finding.severity for finding in findings}
+    if Severity.CRITICAL in severities:
+        return RiskLevel.HIGH
+    if Severity.HIGH in severities:
+        return RiskLevel.MEDIUM
+    return RiskLevel.LOW
+
+
+def assess_risk(model_risk: RiskLevel | None, findings: Iterable[Finding]) -> RiskLevel:
+    """The model's risk, never below what the findings imply; the floor alone without one.
+
+    The model sees the whole change and may rate it higher than its findings do, but a
+    critical finding must never sit under a "Low" headline (issue #55).
+    """
+    floor = risk_floor(findings)
+    if model_risk is None:
+        return floor
+    return max(model_risk, floor, key=RISK_ORDER.index)
+
+
 def build_plan(
     findings: Iterable[Finding],
     *,
@@ -236,6 +260,8 @@ def build_plan(
     policy: PublishPolicy = DEFAULT_POLICY,
     posted_fingerprints: frozenset[str] = frozenset(),
     redact: Redactor = _no_redaction,
+    model_risk: RiskLevel | None = None,
+    checklist: tuple[str, ...] = (),
 ) -> PublishPlan:
     received = tuple(findings)
     in_diff = [finding for finding in received if lines.contains(finding.position)]
@@ -284,6 +310,7 @@ def build_plan(
         over_limit=len(fresh) - len(kept),
         by_severity=dict(Counter(str(finding.severity) for finding in loud_enough)),
     )
+    risk = assess_risk(model_risk, loud_enough)
     summary = render_summary(
         model_summary=model_summary,
         verdict=verdict,
@@ -291,6 +318,9 @@ def build_plan(
         files=lines.paths,
         stats=stats,
         redact=redact,
+        risk=risk,
+        model_risk=model_risk,
+        checklist=checklist,
     )
     return PublishPlan(
         comments=comments,
@@ -299,6 +329,7 @@ def build_plan(
         review_event=event,
         conclusion=conclusion,
         stats=stats,
+        risk=risk,
     )
 
 
@@ -307,6 +338,12 @@ _SEVERITY_LABEL = {
     Severity.HIGH: "🟠 High",
     Severity.MEDIUM: "🟡 Medium",
     Severity.LOW: "🔵 Low",
+}
+
+_RISK_LABEL = {
+    RiskLevel.HIGH: "High",
+    RiskLevel.MEDIUM: "Medium",
+    RiskLevel.LOW: "Low",
 }
 
 _VERDICT_LABEL = {
@@ -381,6 +418,15 @@ def render_comment(
     return "\n".join(parts)
 
 
+def _risk_line(risk: RiskLevel, model_risk: RiskLevel | None) -> str:
+    line = f"**Risk: {_RISK_LABEL[risk]}**"
+    if model_risk is not None and model_risk is not risk:
+        return f"{line} (the model said {_RISK_LABEL[model_risk]}; the findings set the floor)"
+    if model_risk is None:
+        return f"{line} (from the findings' severity)"
+    return line
+
+
 def render_summary(
     *,
     model_summary: str,
@@ -389,11 +435,22 @@ def render_summary(
     files: tuple[str, ...],
     stats: PublishStats,
     redact: Redactor = _no_redaction,
+    risk: RiskLevel | None = None,
+    model_risk: RiskLevel | None = None,
+    checklist: tuple[str, ...] = (),
 ) -> str:
-    """The overview: verdict, the model's summary, risks by severity, files reviewed."""
+    """The overview: verdict, the model's summary, risk, checklist, risks by severity, files."""
     parts = [SUMMARY_MARKER, f"## {_VERDICT_LABEL[verdict]}", ""]
     if model_summary.strip():
         parts.extend([redact(model_summary.strip()), ""])
+    shown_risk = assess_risk(model_risk, findings) if risk is None else risk
+    parts.extend([_risk_line(shown_risk, model_risk), ""])
+    if not findings:
+        parts.extend([NO_ISSUES_LINE, ""])
+    if checklist:
+        parts.extend(["### Checklist for the reviewer", ""])
+        parts.extend(f"- {redact(item)}" for item in checklist)
+        parts.append("")
 
     if findings:
         counts = " · ".join(

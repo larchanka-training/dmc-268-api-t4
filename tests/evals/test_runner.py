@@ -43,6 +43,8 @@ async def test_a_matching_reply_is_a_true_positive(sql_case: Case) -> None:
     assert record.score.findings[0].verdict is Verdict.TP
     assert record.provider == "eurouter"
     assert record.error is None
+    assert (record.with_suggestion, record.llm_calls) == (1, 1)
+    assert record.input_tokens > 0
 
 
 async def test_findings_the_parser_drops_are_counted(sql_case: Case) -> None:
