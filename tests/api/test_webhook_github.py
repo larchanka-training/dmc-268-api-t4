@@ -31,7 +31,9 @@ from tests.conftest import (
     TEST_WEBHOOK_SECRET,
     FakeIdentityProvider,
     FixedClock,
+    all_log_text,
     build_test_app,
+    log_events,
     sign_webhook,
 )
 
@@ -463,7 +465,7 @@ async def test_the_secret_never_reaches_logs_or_responses(
 
     assert response.status_code == 401
     assert TEST_WEBHOOK_SECRET not in response.text
-    assert TEST_WEBHOOK_SECRET not in caplog.text
+    assert TEST_WEBHOOK_SECRET not in all_log_text(caplog)
 
 
 # --- routing logs: every verified delivery is traceable ---------------------
@@ -484,12 +486,17 @@ async def test_an_accepted_delivery_logs_the_event_and_pull_request(
         response = await post_delivery(app, opened_body())
 
     assert response.status_code == 202
-    text = caplog.text
-    assert "github webhook accepted: event=pull_request action=opened" in text
-    assert f"repo={REPO} pr=7" in text
-    assert f"installation={INSTALLATION_ID}" in text
-    assert f"head={HEAD_SHA[:7]}" in text
-    assert f"base={BASE_SHA[:7]}" in text
+    [record] = log_events(caplog, "webhook.accepted")
+    assert record.action == "opened"
+    assert record.repo == REPO
+    assert record.pr_number == 7
+    assert record.installation_id == INSTALLATION_ID
+    assert record.head_sha == HEAD_SHA[:7]
+    assert record.base_sha == BASE_SHA[:7]
+    assert record.delivery_id
+    [enqueued] = log_events(caplog, "job.enqueued")
+    assert enqueued.job_id == response.json()["job_id"]
+    assert enqueued.delivery_id == record.delivery_id
 
 
 async def test_ignored_events_and_actions_are_logged(
@@ -501,9 +508,9 @@ async def test_ignored_events_and_actions_are_logged(
         await post_delivery(app, opened_body(), event="ping")
         await post_delivery(app, opened_body(action="edited"))
 
-    text = caplog.text
-    assert "github webhook ignored: event=ping" in text
-    assert "github webhook ignored: event=pull_request action=edited" in text
+    ignored = [(r.gh_event, r.action) for r in log_events(caplog, "webhook.ignored")]
+    assert ("ping", "opened") in ignored
+    assert ("pull_request", "edited") in ignored
 
 
 async def test_a_duplicate_delivery_is_logged(
@@ -522,4 +529,5 @@ async def test_a_duplicate_delivery_is_logged(
         await post_delivery(app, body)
         await post_delivery(app, body)
 
-    assert "github webhook duplicate delivery: action=opened" in caplog.text
+    [record] = log_events(caplog, "webhook.duplicate")
+    assert record.action == "opened"

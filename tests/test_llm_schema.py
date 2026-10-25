@@ -25,7 +25,9 @@ from domain.ports import ReviewRequest
 from tests.conftest import (
     VALID_FINDING,
     RecordingTransport,
+    all_log_text,
     chat_response,
+    log_events,
     make_provider,
     replies,
     review_json,
@@ -159,9 +161,10 @@ async def test_dropped_findings_are_counted_in_warning_without_text(
         result = await review_with_provider(make_provider(transport), REQUEST)
 
     assert len(result.findings) == 1
-    assert "dropped 1 finding(s)" in caplog.text
-    assert "SECRET-FINDING-TEXT" not in caplog.text
-    assert VALID_FINDING["message"] not in caplog.text
+    [record] = log_events(caplog, "llm.findings.dropped")
+    assert record.dropped == 1
+    assert "SECRET-FINDING-TEXT" not in all_log_text(caplog)
+    assert VALID_FINDING["message"] not in all_log_text(caplog)
 
 
 def test_summary_is_cut_to_the_schema_limit() -> None:

@@ -26,6 +26,7 @@ from collections.abc import Awaitable
 from dataclasses import dataclass, replace
 from datetime import datetime
 
+from adapters.observability.config import DEFAULT_ENV, read_env
 from domain.diff import parse_diff, split_into_chunks
 from domain.diff_filter import filter_files
 from domain.errors import (
@@ -73,13 +74,15 @@ class ReviewStage:
 
 #: Dev-only escape hatch: when "1", the fetched diff text is logged verbatim
 #: after the fetch. This knowingly deviates from AGENTS.md hard rule 3 (raw
-#: diffs are never logged) and is the only place in the codebase that does.
+#: diffs are never logged) and is the only place in the codebase that does,
+#: so it works only in ENV=local (docs/observability.md § What is never
+#: logged); the log allowlist also drops ``diff_text`` everywhere else.
 DEBUG_LOG_DIFF_ENV = "DEBUG_LOG_DIFF"
 
 
 def _debug_log_diff_enabled() -> bool:
     # Read per call, not at import, so tests and operators can flip it.
-    return os.environ.get(DEBUG_LOG_DIFF_ENV, "") == "1"
+    return os.environ.get(DEBUG_LOG_DIFF_ENV, "") == "1" and read_env(os.environ) == DEFAULT_ENV
 
 
 def _clip(value: str, limit: int = 2000) -> str:
@@ -138,9 +141,8 @@ class _Steps:
             await write
         except Exception as err:
             self._log.error(
-                "review job step record failed: job_id=%s exc_class=%s",
-                self._claimed.job_id,
-                type(err).__name__,
+                "job.step_record.failed",
+                extra={"job_id": self._claimed.job_id, "error_type": type(err).__name__},
             )
 
 
@@ -199,12 +201,13 @@ async def process_claimed_job(
             # Logged before parsing on purpose: a diff that fails to parse is
             # exactly the case a developer needs to see.
             log.info(
-                "review job diff (%s=1): job_id=%s repo=%s pr=%s diff_text=%s",
-                DEBUG_LOG_DIFF_ENV,
-                job_id,
-                payload.repo_full_name,
-                payload.pr_number,
-                context.diff_text,
+                "job.diff.debug",
+                extra={
+                    "job_id": job_id,
+                    "repo": payload.repo_full_name,
+                    "pr_number": payload.pr_number,
+                    "diff_text": context.diff_text,
+                },
             )
         files = parse_diff(context.diff_text)
         filtered = filter_files(files)
@@ -213,12 +216,14 @@ async def process_claimed_job(
             f"{entry.path} ({entry.reason.value})" for entry in filtered.skipped
         )
         log.info(
-            "review job files: job_id=%s repo=%s pr=%s reviewable=[%s] skipped=[%s]",
-            job_id,
-            payload.repo_full_name,
-            payload.pr_number,
-            _clip(kept_paths),
-            _clip(skipped_paths),
+            "job.files",
+            extra={
+                "job_id": job_id,
+                "repo": payload.repo_full_name,
+                "pr_number": payload.pr_number,
+                "reviewable_paths": _clip(kept_paths),
+                "skipped_paths": _clip(skipped_paths),
+            },
         )
         stats = JobStats(
             files_total=len(files),
@@ -294,32 +299,45 @@ async def process_claimed_job(
         completed = await jobs.complete(job_id, stats, worker_id=claimed.worker_id)
     except Exception as err:
         log.error(
-            "review job store error on completion: job_id=%s provider=%s repo=%s "
-            "pr_number=%s exc_class=%s duration_ms=%.0f",
-            job_id,
-            payload.provider,
-            payload.repo_full_name,
-            payload.pr_number,
-            type(err).__name__,
-            (time.monotonic() - started) * 1000,
+            "job.store.failed",
+            extra={
+                **_job_fields(claimed),
+                "stage": "complete",
+                "error_type": type(err).__name__,
+                "duration_ms": _elapsed_ms(started),
+            },
         )
         return False
     if not completed:
         return False
     log.info(
-        "review job completed: job_id=%s provider=%s repo=%s pr_number=%s "
-        "files=%d reviewable=%d hunks=%d chunks=%d duration_ms=%.0f",
-        job_id,
-        payload.provider,
-        payload.repo_full_name,
-        payload.pr_number,
-        stats.files_total,
-        stats.files_reviewable,
-        stats.hunks_total,
-        stats.chunks_total,
-        (time.monotonic() - started) * 1000,
+        "job.finished",
+        extra={
+            **_job_fields(claimed),
+            "outcome": ReviewJobStatus.COMPLETED.value,
+            "files": stats.files_total,
+            "reviewable": stats.files_reviewable,
+            "hunks": stats.hunks_total,
+            "chunks": stats.chunks_total,
+            "duration_ms": _elapsed_ms(started),
+        },
     )
     return True
+
+
+def _job_fields(claimed: ClaimedJob) -> dict[str, object]:
+    """The fields every job event carries."""
+    payload = claimed.payload
+    return {
+        "job_id": claimed.job_id,
+        "provider": payload.provider,
+        "repo": payload.repo_full_name,
+        "pr_number": payload.pr_number,
+    }
+
+
+def _elapsed_ms(started: float) -> int:
+    return round((time.monotonic() - started) * 1000)
 
 
 async def _keep_findings(
@@ -334,16 +352,13 @@ async def _keep_findings(
     try:
         await comments.record(claimed.job_id, findings)
     except Exception as err:
-        payload = claimed.payload
         log.error(
-            "review job findings not kept: job_id=%s provider=%s repo=%s pr_number=%s "
-            "findings=%d exc_class=%s",
-            claimed.job_id,
-            payload.provider,
-            payload.repo_full_name,
-            payload.pr_number,
-            len(findings),
-            type(err).__name__,
+            "job.findings.not_kept",
+            extra={
+                **_job_fields(claimed),
+                "findings": len(findings),
+                "error_type": type(err).__name__,
+            },
         )
 
 
@@ -365,7 +380,6 @@ async def _record_failure(
     log-and-stop contract, so a store error is logged (exc_class only) and
     the function still returns False. A None status means the lease was
     lost; nothing is logged because the job's new owner logs its own run."""
-    payload = claimed.payload
     try:
         status = await jobs.fail(
             claimed.job_id,
@@ -375,15 +389,14 @@ async def _record_failure(
         )
     except Exception as err:
         log.error(
-            "review job store error on failure record: job_id=%s provider=%s repo=%s "
-            "pr_number=%s error_kind=%s exc_class=%s duration_ms=%.0f",
-            claimed.job_id,
-            payload.provider,
-            payload.repo_full_name,
-            payload.pr_number,
-            error_kind,
-            type(err).__name__,
-            (time.monotonic() - started) * 1000,
+            "job.store.failed",
+            extra={
+                **_job_fields(claimed),
+                "stage": "fail",
+                "error_kind": error_kind,
+                "error_type": type(err).__name__,
+                "duration_ms": _elapsed_ms(started),
+            },
         )
         return False
     if status is ReviewJobStatus.RETRYING:
@@ -391,15 +404,14 @@ async def _record_failure(
         return False
     if status is ReviewJobStatus.FAILED:
         log.warning(
-            "review job failed: job_id=%s provider=%s repo=%s pr_number=%s "
-            "error_kind=%s exc_class=%s duration_ms=%.0f",
-            claimed.job_id,
-            payload.provider,
-            payload.repo_full_name,
-            payload.pr_number,
-            error_kind,
-            exc_class,
-            (time.monotonic() - started) * 1000,
+            "job.finished",
+            extra={
+                **_job_fields(claimed),
+                "outcome": ReviewJobStatus.FAILED.value,
+                "error_kind": error_kind,
+                "error_type": exc_class,
+                "duration_ms": _elapsed_ms(started),
+            },
         )
     return False
 
@@ -416,7 +428,6 @@ async def _log_retrying(
     which computed it with its own clock and rng. A supersede between the
     fail and this read-back leaves the job with no next_attempt_at; it is
     logged as '-'. The read is guarded like every other store call."""
-    payload = claimed.payload
     next_attempt_at: datetime | None = None
     try:
         stored = await jobs.get(claimed.job_id)
@@ -424,25 +435,22 @@ async def _log_retrying(
             next_attempt_at = stored.next_attempt_at
     except Exception as err:
         log.error(
-            "review job store error on retry record: job_id=%s provider=%s repo=%s "
-            "pr_number=%s error_kind=%s exc_class=%s duration_ms=%.0f",
-            claimed.job_id,
-            payload.provider,
-            payload.repo_full_name,
-            payload.pr_number,
-            error_kind,
-            type(err).__name__,
-            (time.monotonic() - started) * 1000,
+            "job.store.failed",
+            extra={
+                **_job_fields(claimed),
+                "stage": "get",
+                "error_kind": error_kind,
+                "error_type": type(err).__name__,
+                "duration_ms": _elapsed_ms(started),
+            },
         )
     log.info(
-        "review job retrying: job_id=%s provider=%s repo=%s pr_number=%s "
-        "error_kind=%s attempt=%d next_attempt_at=%s duration_ms=%.0f",
-        claimed.job_id,
-        payload.provider,
-        payload.repo_full_name,
-        payload.pr_number,
-        error_kind,
-        claimed.attempt + 1,
-        next_attempt_at.isoformat() if next_attempt_at is not None else "-",
-        (time.monotonic() - started) * 1000,
+        "job.retrying",
+        extra={
+            **_job_fields(claimed),
+            "error_kind": error_kind,
+            "attempt": claimed.attempt + 1,
+            "next_attempt_at": next_attempt_at.isoformat() if next_attempt_at else None,
+            "duration_ms": _elapsed_ms(started),
+        },
     )

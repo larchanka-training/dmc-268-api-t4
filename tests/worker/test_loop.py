@@ -27,6 +27,7 @@ from domain.ports import (
     ReviewJob,
     ReviewJobStatus,
 )
+from tests.conftest import log_events
 from tests.worker.test_process import (
     GOOD_DIFF,
     FakeGitProvider,
@@ -239,8 +240,8 @@ async def test_a_claim_error_is_logged_and_the_slot_survives(caplog) -> None:
     finally:
         loop_task.cancel()
 
-    assert "claim attempt failed" in caplog.text
-    assert "exc_class=RuntimeError" in caplog.text
+    [record] = log_events(caplog, "worker.claim.failed")
+    assert record.error_type == "RuntimeError"
 
 
 # --- run_worker ---------------------------------------------------------------

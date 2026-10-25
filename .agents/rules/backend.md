@@ -33,7 +33,10 @@ Follow `adapters/llm/` from PR #8 ([docs/llm-gateway.md](../../docs/llm-gateway.
    required variable is an error naming that variable ([docs/llm-gateway.md](../../docs/llm-gateway.md)).
 4. Wire the object graph in `factory.py`; take HTTP transport and clock as injectable
    parameters so tests can replace them ([docs/llm-gateway.md](../../docs/llm-gateway.md)).
-5. Log provider, model, duration and counts; never diff text, prompts, model replies or keys
+5. Log provider, model, duration and counts; never diff text, prompts, model replies or keys.
+   Each call is a dotted event name with its values in `extra`, never format arguments; a
+   new field goes on the allowlist in `adapters/observability/logging.py`, and a new event
+   into the Events table ([docs/observability.md § Logs](../../docs/observability.md))
    ([docs/llm-gateway.md § Логирование](../../docs/llm-gateway.md)).
 6. Once a port has two adapters, run one conformance suite against both
    ([docs/BACKEND_ARCHITECTURE.md § Testing strategy](../../docs/BACKEND_ARCHITECTURE.md)).

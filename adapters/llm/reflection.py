@@ -93,9 +93,8 @@ class JevVerifier:
         estimated = estimate_text_tokens(state)
         if estimated > self._max_input_tokens:
             logger.warning(
-                "verifier skipped: state needs ~%d tokens, over the %d-token input budget",
-                estimated,
-                self._max_input_tokens,
+                "llm.verifier.skipped",
+                extra={"input_tokens": estimated, "max_input_tokens": self._max_input_tokens},
             )
             return VerificationReport(VerificationOutcome.SKIPPED, unchanged)
 
@@ -104,9 +103,8 @@ class JevVerifier:
             response = await self._client.ask_noul(state, _questions(len(findings)))
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning(
-                "verifier failed (%s), keeping all %d finding(s)",
-                describe_jev_error(exc),
-                len(findings),
+                "llm.verifier.failed",
+                extra={"reason": describe_jev_error(exc), "findings": len(findings)},
             )
             return VerificationReport(VerificationOutcome.FAILED, unchanged)
         return self._decide(response, findings, time.monotonic() - started)
@@ -126,14 +124,15 @@ class JevVerifier:
         rejected = len(findings) - len(kept)
         usage = response.usage or {}
         logger.info(
-            "verifier model=%s duration=%.2fs kept=%d dropped=%d unanswered=%d "
-            "input_tokens=%s output_tokens=%s",
-            response.model,
-            duration,
-            len(kept),
-            rejected,
-            unanswered,
-            usage.get("input_tokens", "n/a"),
-            usage.get("output_tokens", "n/a"),
+            "llm.verifier.finished",
+            extra={
+                "model": response.model,
+                "duration_ms": round(duration * 1000),
+                "kept": len(kept),
+                "dropped": rejected,
+                "unanswered": unanswered,
+                "input_tokens": usage.get("input_tokens"),
+                "output_tokens": usage.get("output_tokens"),
+            },
         )
         return VerificationReport(VerificationOutcome.PASSED, tuple(kept), rejected)

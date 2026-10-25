@@ -1,12 +1,9 @@
-import logging
-
 from fastapi import Response
 
 from api.config import AppSettings
 from api.deps import (
     OAUTH_COOKIE,
     SESSION_COOKIE,
-    CallbackQueryLogFilter,
     clear_session_cookie,
     set_oauth_cookie,
     set_session_cookie,
@@ -94,34 +91,3 @@ def test_a_missing_required_variable_names_it() -> None:
 
 
 # --- access log ---------------------------------------------------------
-
-
-def make_access_record(full_path: str) -> logging.LogRecord:
-    record = logging.LogRecord(
-        name="uvicorn.access",
-        level=logging.INFO,
-        pathname=__file__,
-        lineno=1,
-        msg='%s - "%s %s HTTP/%s" %d',
-        args=("127.0.0.1:1", "GET", full_path, "1.1", 302),
-        exc_info=None,
-    )
-    return record
-
-
-def test_the_log_filter_drops_the_query_from_callback_lines() -> None:
-    record = make_access_record("/auth/github/callback?code=secret-code&state=secret-state")
-
-    assert CallbackQueryLogFilter().filter(record)
-
-    assert "secret-code" not in record.getMessage()
-    assert "secret-state" not in record.getMessage()
-    assert "/auth/github/callback" in record.getMessage()
-
-
-def test_the_log_filter_leaves_other_paths_alone() -> None:
-    record = make_access_record("/runs?page=2")
-
-    CallbackQueryLogFilter().filter(record)
-
-    assert "page=2" in record.getMessage()

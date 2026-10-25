@@ -26,6 +26,7 @@ from domain.ports import (
     ReviewJob,
     ReviewJobStatus,
 )
+from tests.conftest import all_log_text, log_events
 from worker.process import process_claimed_job
 
 HEAD_SHA = "a1b2c3d4e5" * 4
@@ -320,8 +321,9 @@ async def test_store_error_on_completion_is_swallowed(caplog) -> None:
     job = await store.get(job_id)
     assert job is not None
     assert job.status is ReviewJobStatus.PROCESSING
-    assert "exc_class=RuntimeError" in caplog.text
-    assert DIFF_SENTINEL not in caplog.text
+    [record] = log_events(caplog, "job.store.failed")
+    assert (record.stage, record.error_type) == ("complete", "RuntimeError")
+    assert DIFF_SENTINEL not in all_log_text(caplog)
 
 
 async def test_store_error_while_recording_failure_is_swallowed() -> None:
@@ -371,14 +373,15 @@ async def test_success_log_carries_counts_never_content(
     with caplog.at_level(logging.INFO, logger="worker.process"):
         assert await process_claimed_job(claimed, vcs, store) is True
 
-    text = caplog.text
-    assert job_id in text
-    assert payload.provider in text
-    assert payload.repo_full_name in text
-    assert "files=2" in text
-    assert "reviewable=1" in text
-    assert "hunks=2" in text
-    assert "chunks=1" in text
+    [record] = log_events(caplog, "job.finished")
+    assert record.outcome == "COMPLETED"
+    assert (record.job_id, record.provider, record.repo) == (
+        job_id,
+        payload.provider,
+        payload.repo_full_name,
+    )
+    assert (record.files, record.reviewable, record.hunks, record.chunks) == (2, 1, 2, 1)
+    text = all_log_text(caplog)
     assert DIFF_SENTINEL not in text
     assert TITLE_SENTINEL not in text
     assert DESCRIPTION_SENTINEL not in text
@@ -397,9 +400,10 @@ async def test_failure_log_carries_error_kind_never_messages(
     with caplog.at_level(logging.WARNING, logger="worker.process"):
         assert await process_claimed_job(claimed, vcs, store) is False
 
-    text = caplog.text
-    assert job_id in text
-    assert "error_kind=installation_removed" in text
+    [record] = log_events(caplog, "job.finished")
+    assert (record.job_id, record.outcome) == (job_id, "FAILED")
+    assert record.error_kind == "installation_removed"
+    text = all_log_text(caplog)
     assert "permission revoked" not in text
     assert DIFF_SENTINEL not in text
     assert TITLE_SENTINEL not in text
@@ -419,13 +423,12 @@ async def test_retrying_log_carries_the_retry_schedule_never_messages(
     with caplog.at_level(logging.INFO, logger="worker.process"):
         assert await process_claimed_job(claimed, vcs, store) is False
 
-    text = caplog.text
-    assert "review job retrying:" in text
-    assert f"job_id={job_id}" in text
-    assert "error_kind=forge_unavailable" in text
-    assert "attempt=1" in text
-    assert "next_attempt_at=" in text
-    assert "next_attempt_at=None" not in text
+    [record] = log_events(caplog, "job.retrying")
+    assert record.job_id == job_id
+    assert record.error_kind == "forge_unavailable"
+    assert record.attempt == 1
+    assert record.next_attempt_at is not None
+    text = all_log_text(caplog)
     assert "connection reset" not in text
     assert DIFF_SENTINEL not in text
     assert TITLE_SENTINEL not in text
@@ -441,7 +444,7 @@ async def test_retrying_log_tolerates_a_supersede_before_the_read_back(
     job_id = await enqueue(store, payload)
     claimed = await claim(store)
     # The race: a supersede lands between fail() and the read-back, so the
-    # job comes back with no next_attempt_at — the log line says '-', not None.
+    # job comes back with no next_attempt_at, and the line carries none.
     superseded = ReviewJob(
         job_id=job_id,
         created_at=datetime(2026, 10, 7, 12, 0, tzinfo=UTC),
@@ -453,10 +456,8 @@ async def test_retrying_log_tolerates_a_supersede_before_the_read_back(
     with caplog.at_level(logging.INFO, logger="worker.process"):
         assert await process_claimed_job(claimed, vcs, stub) is False
 
-    text = caplog.text
-    assert "review job retrying:" in text
-    assert "next_attempt_at=- " in text
-    assert "next_attempt_at=None" not in text
+    [record] = log_events(caplog, "job.retrying")
+    assert record.next_attempt_at is None
 
 
 async def test_the_file_inventory_is_logged_with_paths_and_reasons(caplog) -> None:
@@ -468,16 +469,16 @@ async def test_the_file_inventory_is_logged_with_paths_and_reasons(caplog) -> No
     with caplog.at_level(logging.INFO, logger="worker.process"):
         assert await process_claimed_job(claimed, vcs, store) is True
 
-    text = caplog.text
-    assert "review job files:" in text
-    assert "app/users.py" in text
-    assert "package-lock.json (lockfile)" in text
+    [record] = log_events(caplog, "job.files")
+    assert "app/users.py" in record.reviewable_paths
+    assert "package-lock.json (lockfile)" in record.skipped_paths
 
 
 async def test_the_debug_log_diff_flag_logs_the_diff_text(
     caplog, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DEBUG_LOG_DIFF", "1")
+    monkeypatch.delenv("ENV", raising=False)
     store = MemoryJobStore()
     vcs = FakeGitProvider(make_context(GOOD_DIFF))
     await enqueue(store, make_payload())
@@ -487,8 +488,26 @@ async def test_the_debug_log_diff_flag_logs_the_diff_text(
         assert await process_claimed_job(claimed, vcs, store) is True
 
     # The single sanctioned exception to the no-diff-in-logs rule: an explicit
-    # dev-only flag, off by default.
-    assert DIFF_SENTINEL in caplog.text
+    # dev-only flag, off by default, honoured only in ENV=local.
+    [record] = log_events(caplog, "job.diff.debug")
+    assert DIFF_SENTINEL in record.diff_text
+
+
+async def test_the_debug_log_diff_flag_is_ignored_outside_local(
+    caplog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEBUG_LOG_DIFF", "1")
+    monkeypatch.setenv("ENV", "production")
+    store = MemoryJobStore()
+    vcs = FakeGitProvider(make_context(GOOD_DIFF))
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
+
+    with caplog.at_level(logging.DEBUG, logger="worker.process"):
+        assert await process_claimed_job(claimed, vcs, store) is True
+
+    assert log_events(caplog, "job.diff.debug") == []
+    assert DIFF_SENTINEL not in all_log_text(caplog)
 
 
 async def test_the_diff_stays_out_of_logs_without_the_flag(
@@ -503,4 +522,4 @@ async def test_the_diff_stays_out_of_logs_without_the_flag(
     with caplog.at_level(logging.DEBUG, logger="worker.process"):
         assert await process_claimed_job(claimed, vcs, store) is True
 
-    assert DIFF_SENTINEL not in caplog.text
+    assert DIFF_SENTINEL not in all_log_text(caplog)

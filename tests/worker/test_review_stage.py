@@ -26,6 +26,7 @@ from domain.ports import (
     ReviewRequest,
 )
 from domain.publishing import PublishPlan
+from tests.conftest import all_log_text, log_events
 from tests.worker.test_process import (
     DIFF_SENTINEL,
     GOOD_DIFF,
@@ -297,6 +298,6 @@ async def test_a_store_failure_after_posting_still_completes_the_job(
     assert len(publisher.plans) == 1
     stored = await store.get(job_id)
     assert stored is not None and stored.status is ReviewJobStatus.COMPLETED
-    [record] = [r for r in caplog.records if "findings not kept" in r.getMessage()]
-    assert "exc_class=RuntimeError" in record.getMessage()
-    assert "database went away" not in record.getMessage()
+    [record] = log_events(caplog, "job.findings.not_kept")
+    assert record.error_type == "RuntimeError"
+    assert "database went away" not in all_log_text(caplog)

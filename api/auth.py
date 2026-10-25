@@ -109,12 +109,12 @@ async def complete_sign_in(
     attempt_id = request.cookies.get(OAUTH_COOKIE)
     attempt = await service.attempts.take(attempt_id) if attempt_id else None
     if attempt is None or not attempt.matches(state or ""):
-        logger.info("sign-in rejected", extra={"result": SignInResult.STATE_MISMATCH.value})
+        logger.info("auth.sign_in.rejected", extra={"result": SignInResult.STATE_MISMATCH.value})
         return _callback_redirect(SignInResult.STATE_MISMATCH, None)
 
     # 2. The user cancelled on GitHub.
     if error:
-        logger.info("sign-in rejected", extra={"result": SignInResult.ACCESS_DENIED.value})
+        logger.info("auth.sign_in.rejected", extra={"result": SignInResult.ACCESS_DENIED.value})
         return _callback_redirect(SignInResult.ACCESS_DENIED, attempt.return_to)
 
     if not code:
@@ -126,7 +126,7 @@ async def complete_sign_in(
         profile = await service.identity.load_profile(token)
     except IdentityProviderError as failure:
         logger.warning(
-            "sign-in failed",
+            "auth.sign_in.failed",
             extra={"result": SignInResult.SERVER_ERROR.value, "reason": failure.reason},
         )
         return _callback_redirect(SignInResult.SERVER_ERROR, attempt.return_to)
@@ -152,7 +152,7 @@ async def complete_sign_in(
 
     # An audit record: who signed in and when. Never the code, state or token.
     logger.info(
-        "sign-in succeeded",
+        "auth.sign_in.succeeded",
         extra={
             "result": SignInResult.SUCCESS.value,
             "user_id": profile.user.id,
@@ -171,7 +171,7 @@ async def logout(request: Request) -> Response:
     raw_value = request.cookies.get(SESSION_COOKIE)
     if raw_value:
         await service.sessions.delete(hash_session_id(raw_value))
-        logger.info("session ended")
+        logger.info("auth.session.ended")
     response = Response(status_code=204)
     response.headers["Cache-Control"] = NO_STORE
     clear_session_cookie(response)

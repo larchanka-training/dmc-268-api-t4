@@ -37,7 +37,7 @@ async def github_setup(
     await service.repositories.forget(session)
 
     # installation_id and setup_action are deliberately never read or logged.
-    logger.info("github setup redirect", extra={"had_session": session is not None})
+    logger.info("github.setup.redirect", extra={"had_session": session is not None})
 
     target = f"{SIGN_IN_PATH}?return_to={quote(RETURN_TO, safe='')}"
     response = RedirectResponse(target, status_code=302)

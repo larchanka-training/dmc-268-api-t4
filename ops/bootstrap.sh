@@ -6,6 +6,9 @@ set -euo pipefail
 
 readonly DEPLOY_USER=deploy
 readonly APP_DIR=/opt/dmc268
+# The image user (Dockerfile: useradd --uid 10001): the api and worker write their
+# JSON log files here (docs/observability.md § Local fallback).
+readonly APP_UID=10001
 readonly DOCKER_KEYRING=/etc/apt/keyrings/docker.asc
 readonly DOCKER_SOURCE=/etc/apt/sources.list.d/docker.list
 readonly DOCKER_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
@@ -114,6 +117,7 @@ disable_multicast_name_resolution() {
 
 create_app_dirs() {
   install -d -m 755 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$APP_DIR" "$APP_DIR/frontend"
+  install -d -m 755 -o "$APP_UID" "$APP_DIR/logs"
 }
 
 print_summary() {

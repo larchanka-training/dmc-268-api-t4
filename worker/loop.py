@@ -81,6 +81,7 @@ async def worker_loop(
     Cancellation (run_worker teardown) propagates cleanly.
     """
     log = logger if logger is not None else logging.getLogger(__name__)
+    failing = False
     while not stop.is_set():
         while not stop.is_set():
             try:
@@ -91,13 +92,20 @@ async def worker_loop(
                 # A store error (database restarting) must not kill the
                 # slot: log it, fall back to the timed wait, and the next
                 # tick retries. Cancellation is not Exception, so it
-                # propagates.
-                log.error(
-                    "claim attempt failed: worker_id=%s exc_class=%s",
-                    worker_id,
-                    type(err).__name__,
-                )
+                # propagates. Logged once per run of failures, as a
+                # warning: every slot retries each poll interval, and the
+                # database being down is "Target down"'s alert
+                # (docs/observability.md § Levels).
+                if not failing:
+                    log.warning(
+                        "worker.claim.failed",
+                        extra={"worker_id": worker_id, "error_type": type(err).__name__},
+                    )
+                    failing = True
                 break
+            if failing:
+                log.info("worker.claim.recovered", extra={"worker_id": worker_id})
+                failing = False
             if not processed:
                 break
         if stop.is_set():

@@ -19,6 +19,9 @@ services:
       start_period: 10s
     volumes:
       - ./github-app.pem:/opt/dmc268/github-app.pem:ro
+      # JSON log files, rotated daily (LOG_DIR=/logs, written by deploy.yml);
+      # created by ops/bootstrap.sh, owned by the image user 10001.
+      - ./logs:/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -35,6 +38,7 @@ services:
     command: ["python", "-m", "worker"]
     volumes:
       - ./github-app.pem:/opt/dmc268/github-app.pem:ro
+      - ./logs:/logs
     depends_on:
       postgres:
         condition: service_healthy

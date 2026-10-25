@@ -109,19 +109,24 @@ class OpenAICompatibleProvider:
             seconds = parse_retry_after(response.headers.get("Retry-After"))
             pool.cool_down(key, seconds)
             logger.warning(
-                "provider=%s key=%s rate-limited (HTTP 429), cooldown %gs",
-                self._name,
-                mask_key(key),
-                seconds,
+                "llm.key.rate_limited",
+                extra={
+                    "provider": self._name,
+                    "key_masked": mask_key(key),
+                    "cooldown_seconds": seconds,
+                },
             )
             return True
         if response.status_code in _REJECTED_KEY_STATUSES:
             pool.disable(key)
+            # Disabled until restart.
             logger.warning(
-                "provider=%s key=%s rejected (HTTP %d), disabled until restart",
-                self._name,
-                mask_key(key),
-                response.status_code,
+                "llm.key.rejected",
+                extra={
+                    "provider": self._name,
+                    "key_masked": mask_key(key),
+                    "http.status": response.status_code,
+                },
             )
             return True
         return False
@@ -133,7 +138,7 @@ class OpenAICompatibleProvider:
         if status >= 400:
             body_text = response.text.replace(key, mask_key(key)) if key else response.text
             preview = body_text[:ERROR_BODY_PREVIEW_CHARS]
-            raise ProviderUnavailableError(self._name, f"HTTP {status}: {preview}")
+            raise ProviderUnavailableError(self._name, f"HTTP {status}", detail=preview)
         if status != 200:
             raise ProviderUnavailableError(self._name, f"unexpected HTTP {status}")
         return self._extract_content(response)

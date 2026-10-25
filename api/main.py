@@ -27,11 +27,13 @@ from adapters.memory.auth import InMemorySessionStore, InMemorySignInAttemptStor
 from adapters.memory.job_events import InMemoryJobEventsSource
 from adapters.memory.repositories import InMemoryRepositoriesCache
 from adapters.memory.review_comments import MemoryReviewCommentStore
+from adapters.observability.config import SentrySettings
+from adapters.observability.sentry import init_sentry
+from api.access_log import install_access_log
 from api.auth import router as auth_router
 from api.config import AppSettings
 from api.deps import (
     ApiError,
-    CallbackQueryLogFilter,
     Services,
     api_error_response,
     enforce_csrf,
@@ -126,6 +128,9 @@ def create_app(
             return rejected
         return await call_next(request)
 
+    # Last, so it is the outermost middleware and logs the CSRF rejections too.
+    install_access_log(app)
+
     @app.get("/")
     def read_root() -> dict[str, str]:
         return {"message": "Welcome to DMC-268 Team 4 API"}
@@ -142,11 +147,6 @@ def create_app(
     return app
 
 
-def install_access_log_filter() -> None:
-    """Keep the authorization code out of uvicorn's access log."""
-    logging.getLogger("uvicorn.access").addFilter(CallbackQueryLogFilter())
-
-
 def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     """Production wiring. Sessions and attempts are in memory until the database
     exists; `adapters/db/auth.py` replaces them behind the same ports.
@@ -156,7 +156,8 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     (`dispatch_inline=False`, engine disposed on app shutdown); without it,
     dev mode keeps the in-memory queue and the API claims inline
     (tasks/plan-pg-queue.md)."""
-    install_access_log_filter()
+    # Before the app exists, so the SDK's FastAPI integration instruments it.
+    init_sentry(SentrySettings.from_env())
     clock = SystemClock()
     settings = AppSettings.from_env()
     app_settings = GitHubAppSettings.from_env()
@@ -176,7 +177,7 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         # No DATABASE_URL: dev mode keeps the in-memory queue (the
         # PostgreSQL path exists — tasks/plan-pg-queue.md) and the API
         # claims inline; no worker process is used.
-        logger.info("queue: in-memory (no DATABASE_URL); worker process not used")
+        logger.info("queue.in_memory")
         jobs = MemoryJobStore(clock=clock)
         dispatch_inline = True
     return create_app(

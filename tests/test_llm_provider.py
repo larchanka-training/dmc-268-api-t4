@@ -167,7 +167,8 @@ async def test_client_error_includes_code_and_truncated_body() -> None:
         await provider.complete(MESSAGES)
 
     assert "HTTP 404: model 'gpt-nope' not found" in str(excinfo.value)
-    assert excinfo.value.reason == f"HTTP 404: {body[:200]}"
+    assert excinfo.value.reason == "HTTP 404"
+    assert excinfo.value.detail == body[:200]
 
 
 async def test_null_content_is_returned_as_empty_text() -> None:

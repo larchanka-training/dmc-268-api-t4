@@ -11,7 +11,13 @@ from adapters.github.app_auth import GitHubAppAuth
 from adapters.github.client import GitHubVCSClient
 from adapters.github.config import GitHubAppSettings
 from domain.errors import ForgeUnavailableError, InstallationGoneError, PrNotFoundError
-from tests.conftest import FixedClock, RecordingTransport, github_fixture
+from tests.conftest import (
+    FixedClock,
+    RecordingTransport,
+    all_log_text,
+    github_fixture,
+    log_events,
+)
 
 KEY_PATH = Path(__file__).resolve().parent.parent / "fixtures" / "github" / "app_key.pem"
 TOKEN = "ghs_test_aaaaaaaaaaaaaaaaaaaaaaaa"
@@ -256,10 +262,10 @@ async def test_malformed_commit_entries_are_dropped_and_counted(
         context = await client.fetch_pull_request(42, REPO, PR_NUMBER)
 
     assert len(context.commits) == 1
-    record = next(r for r in caplog.records if r.message == "pull request fetched")
+    [record] = log_events(caplog, "github.pull_request.fetched")
     assert record.dropped_commits == 2
-    assert "not-a-commit-object" not in caplog.text
-    assert "short" not in caplog.text
+    assert "not-a-commit-object" not in all_log_text(caplog)
+    assert "short" not in all_log_text(caplog)
 
 
 # --- the diff ------------------------------------------------------------

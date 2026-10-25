@@ -19,6 +19,7 @@ from tests.conftest import (
     VALID_FINDING,
     RecordingTransport,
     chat_response,
+    log_events,
     make_provider,
     replies,
     review_json,
@@ -38,8 +39,10 @@ async def test_primary_503_falls_back_to_ollama(caplog: pytest.LogCaptureFixture
     assert result.provider == "ollama"
     assert result.model == "ollama-model"
     assert len(result.findings) == 1
-    assert "falling back to provider=ollama" in caplog.text
-    assert "provider=ollama model=ollama-model" in caplog.text
+    [fallback_record] = log_events(caplog, "llm.provider.fallback")
+    assert fallback_record.next_provider == "ollama"
+    [finished] = log_events(caplog, "llm.review.finished")
+    assert (finished.provider, finished.model) == ("ollama", "ollama-model")
 
 
 async def test_output_error_on_primary_also_falls_back() -> None:
@@ -71,7 +74,10 @@ async def test_all_providers_failed_keeps_every_cause(caplog: pytest.LogCaptureF
     ]
     assert "timeout" in str(causes[0])
     assert "HTTP 500" in str(causes[1])
-    assert any(record.levelno == logging.ERROR for record in caplog.records)
+    # A warning: the job is retried, so this is not yet a Sentry event.
+    [record] = log_events(caplog, "llm.call.failed")
+    assert record.levelno == logging.WARNING
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records)
 
 
 async def test_primary_success_does_not_touch_fallback() -> None:

@@ -90,7 +90,7 @@ async def reap_tick(
         return None
     # Count only: ids and kinds are metadata, everything else on a job row
     # is untrusted webhook data.
-    log.info("lease reaper tick: reaped=%d", reaped)
+    log.info("worker.reaper.tick", extra={"reaped": reaped})
     return reaped
 
 
@@ -105,16 +105,26 @@ async def reaper_loop(
 ) -> None:
     """Run reap_tick every ``interval`` seconds until ``stop`` is set.
 
-    A failed tick (database down) is logged and retried on the next
-    interval — the reap is a conditional UPDATE, so a late tick loses
-    nothing. ``stop`` interrupts the interval pause promptly.
+    A failed tick (database down) is retried on the next interval — the
+    reap is a conditional UPDATE, so a late tick loses nothing. A run of
+    failed ticks logs one warning when it starts and one info when it
+    ends; the database being down is "Target down"'s alert
+    (docs/observability.md § Levels). ``stop`` interrupts the interval
+    pause promptly.
     """
     log = logger if logger is not None else logging.getLogger(__name__)
+    failing = False
     while not stop.is_set():
         try:
             await reap_tick(store, TASK_KEYS["reaper"], dsn, connect=connect, logger=log)
         except Exception as err:
-            log.error("lease reaper tick failed: exc_class=%s", type(err).__name__)
+            if not failing:
+                log.warning("worker.reaper.failed", extra={"error_type": type(err).__name__})
+                failing = True
+        else:
+            if failing:
+                log.info("worker.reaper.recovered")
+                failing = False
         sleeper = asyncio.ensure_future(stop.wait())
         try:
             await asyncio.wait({sleeper}, timeout=interval)

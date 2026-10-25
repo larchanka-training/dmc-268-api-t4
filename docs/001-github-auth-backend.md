@@ -256,7 +256,10 @@ contract):
 - **Access-log hygiene:** uvicorn's access log prints query strings, which on the callback
   contain the authorization `code`. Install a log filter that drops the query string from
   `/auth/*/callback` lines (backend design: "the authorization code and token never appear
-  in a log line").
+  in a log line"). *Superseded by [observability.md § Logs](./observability.md):
+  uvicorn's access log is now off, and `api/access_log.py` logs the route template, never
+  the query string, so the filter is gone; `tests/api/test_access_log.py` holds the
+  requirement.*
 
 ### Step 8 — Frontend sync (`dmc-268-ui-t4`)
 

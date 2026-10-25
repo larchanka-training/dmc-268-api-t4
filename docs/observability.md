@@ -135,10 +135,81 @@ of `/opt/dmc268/logs`). Produced by `structlog` on top of stdlib `logging`, so e
 | `http.method`, `http.route`, `http.status`, `duration_ms` | access log | middleware (replaces uvicorn's access log) |
 | `provider`, `model`, `input_tokens`, `output_tokens`, `retries` | LLM events | gateway |
 
-`event` is a stable dotted name (`webhook.received`, `job.enqueued`, `job.claimed`,
-`step.finished`, `job.finished`, `llm.call.failed`, `lease.expired`), never a formatted
-sentence, so it can be counted and alerted on. Free text goes in `msg` only when it adds
-something.
+`event` is a stable dotted name, never a formatted sentence, so it can be counted and
+alerted on; values travel as fields. Third-party loggers (uvicorn, httpx, …) keep their
+template as `event` and the formatted text in `msg`. § Events lists every event our code
+emits.
+
+### Events
+
+Every line also carries `ts`, `level`, `service`, `env`, `release` and `logger`; lines
+logged while a request is handled carry its `request_id`. A test fails when this table and
+the code disagree (`tests/adapters/test_observability_logging.py`).
+
+| Event | Level | Logged when | Fields |
+| :--- | :--- | :--- | :--- |
+| `http.request` | info; debug for `/health` | Every API request, once answered | `http.method`, `http.route` (the template), `http.status`, `duration_ms` |
+| `auth.sign_in.rejected` | info | The OAuth callback is refused: state mismatch or the user cancelled | `result` |
+| `auth.sign_in.failed` | warning | The identity provider failed during code exchange or profile load | `result`, `reason` |
+| `auth.sign_in.succeeded` | info | Sign-in audit record | `result`, `user_id`, `organizations` |
+| `auth.session.ended` | info | Logout deleted a session | — |
+| `github.setup.redirect` | info | GitHub sent the browser to the App's setup URL | `had_session` |
+| `repositories.list.failed` | warning | Listing repositories on GitHub failed; the API answers 502 | `reason` |
+| `queue.in_memory` | info | The API started without `DATABASE_URL`: dev mode, no worker | — |
+| `webhook.ignored` | info | A verified delivery that is not reviewed: another event, or a non-reviewable action | `delivery_id`, `provider`, `gh_event`, `action` |
+| `webhook.rejected` | warning | A verified `pull_request` payload the parser refused (400) | `delivery_id`, `provider`, `reason` |
+| `webhook.accepted` | info | A reviewable delivery, before enqueue | `delivery_id`, `provider`, `action`, `repo`, `pr_number`, `installation_id`, `head_sha`, `base_sha` (7 characters each) |
+| `webhook.duplicate` | info | A redelivery; no second job | `delivery_id`, `provider`, `action`, `repo`, `pr_number` |
+| `job.enqueued` | info | The delivery became a job: where a `delivery_id` meets its `job_id` | `delivery_id`, `provider`, `job_id`, `repo`, `pr_number` |
+| `worker.listener.ready` | info | `LISTEN` is registered | `channel` |
+| `worker.listener.lost` | warning | The server dropped the `LISTEN` connection; reconnecting | — |
+| `worker.listener.failed` | warning | The first failed (re)connect of a run of failures | `error_type` |
+| `worker.listener.restored` | info | Connected again after failures | — |
+| `worker.claim.failed` | warning | A slot's first failed claim in a run of failures | `worker_id`, `error_type` |
+| `worker.claim.recovered` | info | That slot's claims work again | `worker_id` |
+| `worker.reaper.tick` | info | The leader ran the lease reaper | `reaped` |
+| `worker.reaper.failed` | warning | The first failed reaper tick of a run | `error_type` |
+| `worker.reaper.recovered` | info | Reaper ticks work again | — |
+| `worker.debug_log_diff.ignored` | warning | `DEBUG_LOG_DIFF=1` outside `ENV=local` | — |
+| `job.files` | info | The PR's files after the filter | `job_id`, `repo`, `pr_number`, `reviewable_paths`, `skipped_paths` |
+| `job.diff.debug` | info | The fetched diff: only with `DEBUG_LOG_DIFF=1` in `ENV=local` | `job_id`, `repo`, `pr_number`, `diff_text` (a local-only field) |
+| `job.finished` | info for `COMPLETED`, warning for `FAILED` | The job reached a terminal status | `job_id`, `provider`, `repo`, `pr_number`, `outcome`, `duration_ms`; `files`, `reviewable`, `hunks`, `chunks` when completed; `error_kind`, `error_type` when failed |
+| `job.retrying` | info | A retryable failure; the job waits for its next attempt | `job_id`, `provider`, `repo`, `pr_number`, `error_kind`, `attempt`, `next_attempt_at`, `duration_ms` |
+| `job.store.failed` | error | A store call failed while recording the outcome | `job_id`, `provider`, `repo`, `pr_number`, `stage` (`complete`, `fail`, `get`), `error_kind`, `error_type`, `duration_ms` |
+| `job.step_record.failed` | error | Writing a `pr_review_steps` row failed; the job goes on | `job_id`, `error_type` |
+| `job.findings.not_kept` | error | Findings were posted but not stored | `job_id`, `provider`, `repo`, `pr_number`, `findings`, `error_type` |
+| `github.token.minted` | info | An installation token was minted | `provider`, `installation_id` |
+| `github.pull_request.fetched` | info | PR detail, commits and diff fetched | `provider`, `installation_id`, `repo`, `pr_number`, `sha`, `commits`, `dropped_commits`, `diff_bytes`, `duration_ms` |
+| `github.commits.page_cap` | warning | The commit listing stopped at the page cap | `provider`, `pages`, `commits` |
+| `github.repositories.listed` | info | An installation's repositories were listed | `provider`, `installation_id`, `count` |
+| `github.repositories.page_cap` | warning | The repository listing stopped at the page cap | `provider`, `installation_id`, `pages` |
+| `github.review.published` | info | The review was posted | `provider`, `installation_id`, `comments`, `inline_fallback`, `conclusion` |
+| `github.review.inline_rejected` | warning | GitHub refused the inline comments (422); they go into the review body | `provider`, `comments` |
+| `identity.profile.loaded` | info | Sign-in loaded the GitHub profile | `provider`, `organizations` |
+| `identity.membership.unreadable` | warning | An organisation membership could not be read | `provider`, `http.status` |
+| `llm.rules.screened` | info; warning when any rule was dropped | The repository rules kept and dropped | `kept`, `dropped_pattern`, `dropped_screen`, `dropped_over_limit`, `screen` |
+| `llm.rule_screen.disabled` | warning | No TypeSafe key, or reflection off: rules checked by patterns only | `rules` |
+| `llm.rule_screen.finished` | info | The TypeSafe rule screen answered | `model`, `duration_ms`, `kept`, `dropped`, `unanswered`, `input_tokens`, `output_tokens` |
+| `llm.rule_screen.failed` | warning | The rule screen failed; patterns only | `rules`; `reason` for a TypeSafe error, `error_type` for any other exception |
+| `llm.input.too_large` | warning | The input is over the token budget; no provider is called | `input_tokens`, `max_input_tokens` |
+| `llm.reply.rejected` | warning | A reply was not valid review JSON; one corrective retry | `provider`, `model`, `reason` |
+| `llm.findings.trimmed` | warning | More findings than the limit; the most severe are kept | `provider`, `model`, `kept`, `trimmed` |
+| `llm.findings.dropped` | warning | Findings that failed the schema were dropped | `provider`, `model`, `dropped` |
+| `llm.rule_ids.cleared` | warning | Findings cited a rule that was not listed | `provider`, `model`, `cleared` |
+| `llm.review.finished` | info | A provider returned a review | `provider`, `model`, `duration_ms`, `findings` |
+| `llm.provider.fallback` | warning | A provider failed; the next one is tried | `provider`, `next_provider`, `reason` |
+| `llm.call.failed` | warning | Every provider failed (`AllProvidersFailedError`); the job is retried | `reason`: each provider and its reason, never a response body |
+| `llm.key.rate_limited` | warning | A key got 429 and cools down | `provider`, `key_masked`, `cooldown_seconds` |
+| `llm.key.rejected` | warning | A key got 401 or 403 and is disabled until restart | `provider`, `key_masked`, `http.status` |
+| `llm.verifier.skipped` | warning | The verifier input is over budget; the first pass is kept | `input_tokens`, `max_input_tokens` |
+| `llm.verifier.finished` | info | The TypeSafe verifier answered | `model`, `duration_ms`, `kept`, `dropped`, `unanswered`, `input_tokens`, `output_tokens` |
+| `llm.verifier.failed` | warning | The verifier failed; every finding is kept | `findings` and `reason` for a TypeSafe error, `error_type` for any other exception |
+| `logging.file_unavailable` | warning | `LOG_DIR` cannot be opened; stdout only | `log_dir`, `error_type` |
+| `sentry.enabled` | info | Sentry is initialised | — |
+| `sentry.disabled` | info | No `SENTRY_DSN`: Sentry is off | — |
+
+Planned, with the phase that adds them: `step.finished` (phase 5, the `Observer`);
+`alert.relay_dropped`, `alert.relay_failed` and `alert.dropped` (phase 4, the relay).
 
 ### What is never logged
 
@@ -159,11 +230,9 @@ review:
   (`api/webhooks/github.py:40`), which an `api.*` prefix would miss. Values that matter go
   in as named fields, where the allowlist sees them; fields passed as `extra={…}` (the
   sign-in audit in `api/auth.py`) are lifted into the line and must be on the allowlist.
-  This is a stop-gap: about 50 call sites pass their values (job id, repo, PR, error kind,
-  duration) as `%s` arguments today, and dropping the arguments blanks them. So the
-  phase 1 audit ships in the same PR and converts every call to a stable dotted `event`
-  with fields (`llm.reply.rejected` + fields), after which our code emits no stdlib-style
-  records at all.
+  Since phase 1 every call passes a dotted `event` and its values as fields
+  (`llm.reply.rejected` + fields), so the rule is a net: a call that slips back to
+  `%s` arguments loses its values instead of leaking them.
 - **Third-party loggers keep their formatted message.** The list is explicit: `uvicorn`,
   `httpx`, `httpcore`, `sqlalchemy`, `asyncpg`, `alembic` and `sentry_sdk`. They do not
   hold diffs or prompts, and dropping their arguments would make
@@ -174,15 +243,15 @@ review:
 - **Lint.** ruff's `G` rules (`flake8-logging-format`) are enabled: no f-strings, `%` or
   `.format()` inside logging calls.
 - **Redaction processor.** Every string value passes through `domain/redaction.py`
-  (⚠️ does not exist yet; the same rules will be used before LLM egress) and is truncated
+  (the same rules are meant for LLM egress later) and is truncated
   to 512 characters. It is a net for secrets, not for content.
 - **Exceptions.** In production an exception is logged as `error_type` and `error_kind`,
   never `str(exc)`. A formatted traceback is not "frames only" by default: its last line
   is `ExcType: message`, and every chained exception ("The above exception was the direct
   cause…") repeats its own message. So the production renderer emits structured frames
   (file, line, function) and the type of each exception in the `__cause__`/`__context__`
-  chain, and strips `exc_value` from all of them; structlog's `dict_tracebacks` keeps it,
-  so a processor after it removes it. No local variables. Exception messages (pydantic's
+  chain, and strips `exc_value` from all of them. It is our own renderer: structlog's
+  `dict_tracebacks` would keep the value. No local variables. Exception messages (pydantic's
   `ValidationError` includes `input_value=` snippets) appear only in `local`. The cost is
   less context in the log line; Sentry still has the frames.
 - **Canary test.** A marker string is planted in a fake diff, PR title and model reply;
@@ -191,8 +260,13 @@ review:
   the Sentry events and breadcrumbs captured by a test transport, or the text the relay
   hands to the notifier.
 - Never: request/response bodies, diff text, PR title or description, prompts, model
-  replies, tokens, cookies, `Authorization`, OAuth `code`/`state` (the existing
-  `CallbackQueryLogFilter` stays and moves into the access-log middleware).
+  replies, tokens, cookies, `Authorization`, OAuth `code`/`state`. The access log
+  (`api/access_log.py`) records the route template, never the query string, and uvicorn's
+  own access log is off, so the old `CallbackQueryLogFilter` is gone.
+- **Provider error bodies.** A provider's 4xx body can echo the request, so
+  `ProviderUnavailableError` keeps its first 200 characters in `detail`, apart from
+  `reason` (`HTTP 400`). The exception message still shows both; a log line carries the
+  provider and `reason` only.
 - **Exception: prompts and model replies in `local` only.** This is where prompt tuning
   happens ([BACKEND_ARCHITECTURE.md § Debugging a review](./BACKEND_ARCHITECTURE.md)). The
   allowlist admits `prompt` and `reply` fields only when `ENV == local`; they still go
@@ -210,9 +284,9 @@ review:
   knowingly breaks hard rule 3. Phase 1 makes it `local`-only like `prompt` and `reply`:
   in any other `ENV` the worker ignores it and logs a warning at startup. The canary test
   sets it and asserts the marker still never appears outside `local`.
-- Audit of existing call sites is part of phase 1. Today's are clean (e.g.
-  `adapters/llm/schema.py` puts only `exc.msg` and an error count into
-  `InvalidReviewJSONError`); the audit converts them to `event` + fields so they stay clean.
+- **Every call site is checked.** Phase 1 converted each call to a dotted `event` with
+  fields; a test parses the source and fails on a call with format arguments, a message
+  that is not an event name, or a field missing from the allowlist.
 
 ### Levels
 
@@ -251,7 +325,9 @@ down" (`pg_up == 0`) is the alert.
   file name gets the pid.
 - **Only when `LOG_DIR` is set.** Unset (the default in `local` and tests) means stdout
   only, so a laptop or CI runner never needs a writable `/logs`. `deploy.yml` writes
-  `LOG_DIR=/logs`.
+  `LOG_DIR=/logs`. A `LOG_DIR` that cannot be opened (missing, not writable) gives one
+  `logging.file_unavailable` warning and stdout only: the backup never takes the service
+  down.
 - Docker's own `json-file` logs are **not** the backup: they disappear when `compose up`
   recreates a container on a new image, which is every deploy.
 - `/opt/dmc268/logs` is created by `ops/bootstrap.sh`, owned by uid 10001 (the image user).
@@ -732,8 +808,8 @@ them are added to the secrets table in devops.md.
 | `GRAFANA_CLOUD_LOKI_URL`, `GRAFANA_CLOUD_LOKI_USER` | repo variables | alloy |
 | `GRAFANA_CLOUD_TOKEN` | repo secret | alloy only, passed by compose interpolation, not the whole `.env` (devops decision 11) |
 | `GRAFANA_SA_TOKEN` | repo secret | `ops/observability/sync.py` and the deploy annotation in `deploy.yml`, CI only |
-| `SENTRY_AUTH_TOKEN` | repo secret | `deploy.yml`: Sentry release, commits and deploy. CI only, scoped to `project:releases` and `org:read` (`set-commits --auto` needs the latter) |
-| `POSTGRES_EXPORTER_PASSWORD` | repo secret | postgres (creates the `pg_monitor` role) and alloy, by compose interpolation |
+| `SENTRY_AUTH_TOKEN` | repo secret | `deploy.yml`: Sentry release, commits and deploy. CI only. An Organization Token (fixed scope `org:ci`), not tied to the one seat; `releases new`, `set-commits --auto` and `deploys new` checked with it on 2026-10-24 |
+| `POSTGRES_EXPORTER_PASSWORD` | repo secret | alloy only, by compose interpolation: the password of the read-only `dmc268_exporter` role (`pg_monitor`). The role is created once by hand (checklist, phase 3): the postgres image runs init scripts only on an empty data directory. Generate it as hex (`openssl rand -hex 32`) so it needs no escaping in the connection string |
 | `CANARY_REPO_ID` | repo variable | api (DB sampler). Unset = canary gauge never set and the canary alert stays off |
 | `DEBUG_LOG_DIFF` | exists; never written by deploy | worker: `1` logs the fetched diff, honoured only when `ENV` is `local` (§ What is never logged) |
 | `llm_prices`, `llm_daily_budget_usd` | config ([configuration.md](./configuration.md)) | `llm_prices`: api, worker (cost metric); `llm_daily_budget_usd`: api only (exported gauge). ⚠️ not in configuration.md yet |
@@ -762,8 +838,9 @@ Each phase is a separate PR, green on the five commands, demonstrable on its own
 
 - `adapters/observability/logging.py`: structlog config, JSON renderer, allowlist and
   redaction processors, stdout + rotating file handlers, `configure_logging(settings)`.
-- Middleware in `api/main.py`: `request_id`, contextvars binding, JSON access log replacing
-  uvicorn's (absorbs `CallbackQueryLogFilter`).
+- `api/access_log.py`, installed by the app factory as the outermost middleware:
+  `request_id`, contextvars binding, the JSON access log replacing uvicorn's (and
+  `CallbackQueryLogFilter`, removed).
 - Audit every `logger.*` call (about 50, in `adapters/`, `api/` and `worker/`) for content
   leaks and convert each to a dotted `event` + fields, in the same PR as the processor.
   The retry loops (LISTEN connection, claim slots, reaper) log a `warning` when failures

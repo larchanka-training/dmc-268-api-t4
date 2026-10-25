@@ -102,7 +102,7 @@ class GitHubReviewPublisher:
                     )
 
         logger.info(
-            "review published",
+            "github.review.published",
             extra={
                 "provider": PROVIDER_NAME,
                 "installation_id": target.installation_id,
@@ -171,7 +171,7 @@ class GitHubReviewPublisher:
             if not plan.comments:
                 raise ForgeUnavailableError(PROVIDER_NAME, "review rejected with 422") from None
             logger.warning(
-                "inline comments rejected; posting them in the review body",
+                "github.review.inline_rejected",
                 extra={"provider": PROVIDER_NAME, "comments": len(plan.comments)},
             )
         body["comments"] = []

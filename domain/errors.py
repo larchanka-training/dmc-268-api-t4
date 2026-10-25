@@ -10,10 +10,16 @@ class LLMConfigurationError(LLMGatewayError):
 
 
 class ProviderUnavailableError(LLMGatewayError):
-    def __init__(self, provider: str, reason: str) -> None:
-        super().__init__(f"LLM provider '{provider}' unavailable: {reason}")
+    """``detail`` is the start of the provider's response body: useful to a
+    caller reading the exception, but it may echo the request, so a log line
+    carries ``reason`` only (docs/observability.md § What is never logged)."""
+
+    def __init__(self, provider: str, reason: str, *, detail: str | None = None) -> None:
+        message = f"LLM provider '{provider}' unavailable: {reason}"
+        super().__init__(f"{message}: {detail}" if detail else message)
         self.provider = provider
         self.reason = reason
+        self.detail = detail
 
 
 class LLMOutputError(LLMGatewayError):
@@ -159,6 +165,10 @@ class DBConfigurationError(Exception):
 
 class WorkerConfigurationError(Exception):
     """The worker process cannot be built from its settings."""
+
+
+class ObservabilityConfigurationError(Exception):
+    """Logging or error reporting cannot be set up from the given settings."""
 
 
 class DiffFormatError(Exception):
