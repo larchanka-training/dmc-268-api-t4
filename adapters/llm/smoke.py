@@ -87,6 +87,7 @@ def check_run_summary(result: ReviewResult, diff_text: str) -> str:
         lines=CommentableLines.from_files(filter_files(parse_diff(diff_text)).kept),
         model_risk=result.risk,
         checklist=result.checklist,
+        dismissed_by_verifier=result.rejected_by_verifier,
     )
     return plan.summary
 
