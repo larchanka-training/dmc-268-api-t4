@@ -4,7 +4,8 @@ One marker is planted in a PR's diff, title and description, in the model's
 replies and in the providers' error bodies. Then the failure paths run: invalid
 JSON, a schema mismatch, a provider error, all providers failed, a webhook
 delivery, and a worker run with DEBUG_LOG_DIFF=1 outside ``local``. The marker
-must not appear anywhere in the production JSON output. Everything runs on fakes
+must not appear anywhere in the production JSON output, nor in the Sentry events,
+breadcrumbs and transactions a test transport captures. Everything runs on fakes
 and ``httpx.MockTransport``; nothing touches the network.
 """
 
@@ -14,14 +15,16 @@ import json
 
 import httpx
 import pytest
+import sentry_sdk
 
 from adapters.jobs.memory import MemoryJobStore
 from adapters.llm.gateway import FallbackLLMGateway
-from domain.errors import AllProvidersFailedError
+from domain.errors import AllProvidersFailedError, InstallationGoneError
 from domain.ports import ReviewRequest
 from tests.api.test_webhook_github import HeldJobStore, opened_payload, post_delivery
 from tests.conftest import (
     VALID_FINDING,
+    CaptureTransport,
     FakeIdentityProvider,
     FixedClock,
     RecordingTransport,
@@ -142,3 +145,34 @@ async def test_a_failing_review_run_never_logs_content(
     assert {"job.files", "llm.call.failed", "job.retrying"} <= events
     assert "job.diff.debug" not in events
     assert_marker_absent(json_logs)
+
+
+async def test_sentry_events_and_breadcrumbs_never_carry_content(
+    auth_clock: FixedClock,
+    json_logs: io.StringIO,
+    sentry_capture: CaptureTransport,
+) -> None:
+    # Breadcrumbs: a provider failure, and a webhook delivery with the marker in its title.
+    failing = make_provider(RecordingTransport(replies(httpx.Response(400, text=MARKER))))
+    with pytest.raises(AllProvidersFailedError):
+        await FallbackLLMGateway([failing]).review(REQUEST)
+    payload = opened_payload()
+    payload["pull_request"]["title"] = f"title {MARKER}"
+    app = build_test_app(auth_clock, FakeIdentityProvider(), jobs=HeldJobStore(auth_clock))
+    assert (await post_delivery(app, json.dumps(payload).encode("utf-8"))).status_code == 202
+
+    # Events: a review that fails for good, and an exception with the marker as its message.
+    context = dataclasses.replace(
+        make_context(GOOD_DIFF.replace("+more", f"+{MARKER}")), title=f"title {MARKER}"
+    )
+    gone = FakeGitProvider(context, error=InstallationGoneError(42, f"revoked {MARKER}"))
+    store = MemoryJobStore()
+    await enqueue(store, make_job_payload())
+    assert await process_claimed_job(await claim(store), gone, store) is False
+    sentry_sdk.capture_exception(RuntimeError(MARKER))
+    sentry_sdk.flush()
+
+    events = sentry_capture.payloads("event")
+    assert len(events) == 2
+    assert any(event.get("breadcrumbs", {}).get("values") for event in events)
+    assert MARKER not in sentry_capture.dump()

@@ -5,6 +5,7 @@ This is Step 5 of docs/WORKFLOW_DESIGN.md §2, run by the worker claim loop
 fakes are local and never touch the network; clocks are injected, no sleeps.
 """
 
+import io
 import logging
 from datetime import UTC, datetime
 
@@ -26,7 +27,7 @@ from domain.ports import (
     ReviewJob,
     ReviewJobStatus,
 )
-from tests.conftest import all_log_text, log_events
+from tests.conftest import all_log_text, json_lines, log_events
 from worker.process import process_claimed_job
 
 HEAD_SHA = "a1b2c3d4e5" * 4
@@ -388,7 +389,7 @@ async def test_success_log_carries_counts_never_content(
 
 
 async def test_failure_log_carries_error_kind_never_messages(
-    caplog, monkeypatch: pytest.MonkeyPatch
+    caplog, json_logs: io.StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("DEBUG_LOG_DIFF", raising=False)
     store = MemoryJobStore()
@@ -400,14 +401,20 @@ async def test_failure_log_carries_error_kind_never_messages(
     with caplog.at_level(logging.WARNING, logger="worker.process"):
         assert await process_claimed_job(claimed, vcs, store) is False
 
+    # An error with its exception: what makes a failed review one Sentry event.
     [record] = log_events(caplog, "job.finished")
     assert (record.job_id, record.outcome) == (job_id, "FAILED")
     assert record.error_kind == "installation_removed"
-    text = all_log_text(caplog)
-    assert "permission revoked" not in text
-    assert DIFF_SENTINEL not in text
-    assert TITLE_SENTINEL not in text
-    assert DESCRIPTION_SENTINEL not in text
+    assert record.levelno == logging.ERROR
+    assert isinstance(record.exc_info[1], InstallationGoneError)
+    # The production line has the type and frames, never the message.
+    [line] = [line for line in json_lines(json_logs) if line["event"] == "job.finished"]
+    assert [link["type"] for link in line["exception"]] == ["InstallationGoneError"]
+    output = json_logs.getvalue()
+    assert "permission revoked" not in output
+    assert DIFF_SENTINEL not in output
+    assert TITLE_SENTINEL not in output
+    assert DESCRIPTION_SENTINEL not in output
 
 
 async def test_retrying_log_carries_the_retry_schedule_never_messages(

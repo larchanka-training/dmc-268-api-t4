@@ -64,31 +64,31 @@ Rules for every step:
 - [x] 14. Dependency — `sentry-sdk` 2.73.0 (its FastAPI, httpx and SQLAlchemy
       integrations enable themselves); lock; re-export.
 - [x] 15. Init — `adapters/observability/sentry.py`: `init_sentry(SentrySettings)`, a no-op
-      without `SENTRY_DSN`; `send_default_pii`, `max_request_body_size`,
+      without `SENTRY_DSN`; no PII (the SDK default), `max_request_body_size`,
       `include_local_variables`, `environment` (`ENV`) and `release` (`IMAGE_TAG`) as in
       § Sampling and privacy (`tests/adapters/test_observability_sentry.py`).
-- [ ] 15a. Init, remaining row of § Sampling and privacy: LLM SDK integrations disabled
-      explicitly.
+- [x] 15a. Integrations — auto-enabling off; Starlette, FastAPI, httpx and SQLAlchemy
+      listed, so no LLM SDK integration can switch itself on.
 - [x] 16. Sampler and query scrub — `traces_sampler`: 0 for `/health` and
       `GET /jobs/{job_id}/events`, else 1.0; the query string dropped from events and
       transactions.
-- [ ] 16a. Scrubbers, remaining — `before_send`: redaction and header scrub; in
-      production each `exception.values[].value` → `error_type` + `error_kind` and
-      `logentry.formatted` dropped; events from the relay route dropped (once phase 4
-      adds it). `before_breadcrumb`: in production drop `message`/`data` of logging
-      breadcrumbs.
+- [x] 16a. Scrubbers — `before_send`: redaction, allowlisted headers, no query, body or
+      cookies; in production each `exception.values[].value` → the `error_kind`,
+      `logentry.formatted`/`params` dropped, `extra` allowlisted. `before_breadcrumb`: in
+      production a logging breadcrumb keeps its event name only. (Dropping events from
+      the relay route moved to step 34.)
 - [x] 17. Wiring — `init_sentry` in `build_app` and `worker/__main__.py`; `deploy.yml`
       writes `ENV=production`.
-- [ ] 17a. Context — structlog processor for `trace_id`/`span_id` (needs phase 1's
-      structlog); Sentry tags `installation_id`, `job_id`, `delivery_id` from the same
-      contextvars.
-- [ ] 18. Failed reviews — `worker/process.py`: a job that ends `FAILED` logs at `error`
+- [x] 17a. Context — structlog processor for `trace_id`/`span_id`; Sentry tags
+      `installation_id`, `job_id`, `delivery_id`, `request_id`, `error_kind` from the same
+      contextvars (the worker binds each job, the webhook its delivery).
+- [x] 18. Failed reviews — `worker/process.py`: a job that ends `FAILED` logs at `error`
       with `exc_info` (pass the exception into `_record_failure`); `RETRYING` stays
       below `error`.
-- [ ] 19. Tests — test transport: scrubbers; exactly one event per `FAILED` job, none
+- [x] 19. Tests — test transport: scrubbers; exactly one event per `FAILED` job, none
       per `RETRYING`; no-op without a DSN; canary test extended to events and
       breadcrumbs.
-- [ ] 20. Verify — five commands green; stop. Production exit **blocked by:** "Sentry project".
+- [x] 20. Verify — five commands green; stop. Production exit **blocked by:** "Sentry project".
 
 ## Phase 3: metrics and Alloy
 
@@ -140,7 +140,7 @@ Rules for every step:
       30/min, each logged `alert.relay_dropped` and counted by reason; message = level,
       title (redacted, ≤ 200 chars), env, release, count, link; failures `warning` +
       `alert_relay_failures_total`. Exempt the route from CSRF in `api/deps.py` (server
-      to server, like `/webhooks/`).
+      to server, like `/webhooks/`); `before_send` drops any event raised inside it.
 - [ ] 35. Notifier — `adapters/alerting/telegram.py`: `TelegramNotifier` (`sendMessage`)
       and `NullNotifier` (logs `alert.dropped`) while `TELEGRAM_BOT_TOKEN` is unset;
       settings for `TELEGRAM_*` and `SENTRY_WEBHOOK_SECRET`.

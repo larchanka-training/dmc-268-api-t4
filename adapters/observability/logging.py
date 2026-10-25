@@ -25,6 +25,7 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, TextIO
 
+import sentry_sdk
 import structlog
 from structlog.typing import EventDict, Processor, WrappedLogger
 
@@ -145,6 +146,7 @@ def build_formatter(settings: LoggingSettings, service: str) -> logging.Formatte
     local = settings.is_local
     processors: list[Processor] = [
         structlog.contextvars.merge_contextvars,
+        _trace_ids,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso", utc=True, key="ts"),
@@ -164,9 +166,16 @@ def build_formatter(settings: LoggingSettings, service: str) -> logging.Formatte
 @contextlib.contextmanager
 def bind_context(**fields: Any) -> Iterator[None]:
     """Add fields to every line logged inside the block (contextvars, so each
-    request or job sees only its own)."""
+    request or job sees only its own). Sentry turns some into tags."""
     with structlog.contextvars.bound_contextvars(**fields):
         yield
+
+
+def bind_fields(**fields: Any) -> None:
+    """Add fields to every later line of the current context, without a block.
+    Only for code that already runs in a context of its own, such as a request
+    handler (each request runs in its own task), so nothing leaks to the next."""
+    structlog.contextvars.bind_contextvars(**fields)
 
 
 # --- processors --------------------------------------------------------------
@@ -184,6 +193,16 @@ def _event_from_template(_: WrappedLogger, __: str, event_dict: EventDict) -> Ev
     event_dict["event"] = str(record.msg)
     if _is_third_party(record.name) and formatted != event_dict["event"]:
         event_dict["msg"] = formatted
+    return event_dict
+
+
+def _trace_ids(_: WrappedLogger, __: str, event_dict: EventDict) -> EventDict:
+    """The active Sentry span's ids, so a line leads to its trace and back.
+    Without Sentry, or outside a transaction, there is no span and no ids."""
+    span = sentry_sdk.get_current_span()
+    if span is not None:
+        event_dict.setdefault("trace_id", span.trace_id)
+        event_dict.setdefault("span_id", span.span_id)
     return event_dict
 
 

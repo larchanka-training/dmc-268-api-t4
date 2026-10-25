@@ -27,6 +27,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 
 from adapters.observability.config import DEFAULT_ENV, read_env
+from adapters.observability.logging import bind_context
 from domain.diff import parse_diff, split_into_chunks
 from domain.diff_filter import filter_files
 from domain.errors import (
@@ -183,8 +184,38 @@ async def process_claimed_job(
     job now), when the run failed terminally (FAILED), or when a retryable
     failure sent it to RETRYING. Unexpected errors — including the store
     raising on a terminal transition — are swallowed: a claimed job has no
-    caller to raise to; only the exception class is logged.
+    caller to raise to. A job that ends FAILED is logged at error with its
+    exception, which is what makes it one Sentry event; the log line itself
+    carries the exception's type and frames, never its message.
+
+    Every line logged and every Sentry event raised during the run carries the
+    job's context (docs/observability.md § Fields).
     """
+    with bind_context(**_bound_fields(claimed)):
+        return await _process(claimed, vcs, jobs, review=review, steps=steps, logger=logger)
+
+
+def _bound_fields(claimed: ClaimedJob) -> dict[str, object]:
+    payload = claimed.payload
+    return {
+        "job_id": claimed.job_id,
+        "installation_id": payload.installation_id,
+        "repo_id": payload.repo_id,
+        "pr_number": payload.pr_number,
+        "head_sha": payload.head_sha,
+        "attempt": claimed.attempt,
+    }
+
+
+async def _process(
+    claimed: ClaimedJob,
+    vcs: GitProvider,
+    jobs: JobRepository,
+    *,
+    review: ReviewStage | None,
+    steps: StepRecorder | None,
+    logger: logging.Logger | None,
+) -> bool:
     log = logger if logger is not None else logging.getLogger(__name__)
     started = time.monotonic()
     job_id = claimed.job_id
@@ -292,7 +323,7 @@ async def process_claimed_job(
             started,
             error_kind=error_kind,
             retryable=retryable,
-            exc_class=type(err).__name__,
+            error=err,
         )
 
     try:
@@ -370,16 +401,18 @@ async def _record_failure(
     *,
     error_kind: str,
     retryable: bool,
-    exc_class: str,
+    error: Exception,
 ) -> bool:
     """Record RETRYING or FAILED with the store, then log which one it was.
 
-    The exception class is logged — never its message, which is safe by
-    construction today but is not guaranteed to stay that way. The store
-    calls are guarded: raising while handling a failure would lose the
-    log-and-stop contract, so a store error is logged (exc_class only) and
-    the function still returns False. A None status means the lease was
-    lost; nothing is logged because the job's new owner logs its own run."""
+    FAILED is logged at error with the exception: one Sentry event per failed
+    job, its message replaced by the error_kind in production
+    (adapters/observability/sentry.py), and in the log line only the type and
+    frames. RETRYING stays at info and is never an event. The store calls are
+    guarded: raising while handling a failure would lose the log-and-stop
+    contract, so a store error is logged (error_type only) and the function
+    still returns False. A None status means the lease was lost; nothing is
+    logged because the job's new owner logs its own run."""
     try:
         status = await jobs.fail(
             claimed.job_id,
@@ -403,13 +436,14 @@ async def _record_failure(
         await _log_retrying(jobs, claimed, log, started, error_kind=error_kind)
         return False
     if status is ReviewJobStatus.FAILED:
-        log.warning(
+        log.error(
             "job.finished",
+            exc_info=error,
             extra={
                 **_job_fields(claimed),
                 "outcome": ReviewJobStatus.FAILED.value,
                 "error_kind": error_kind,
-                "error_type": exc_class,
+                "error_type": type(error).__name__,
                 "duration_ms": _elapsed_ms(started),
             },
         )

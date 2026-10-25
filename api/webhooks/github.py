@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 from adapters.github.config import PROVIDER_NAME
 from adapters.github.payload import parse_pull_request_event, reviewable_action
 from adapters.github.signature import SIGNATURE_HEADER, verify_webhook_signature
+from adapters.observability.logging import bind_fields
 from api.deps import ApiError
 from domain.errors import WebhookPayloadError, WebhookSignatureError
 from domain.jobs import clamp_for_storage
@@ -141,6 +142,8 @@ async def receive_github_webhook(request: Request) -> Response:
     # Routing metadata on every line below; the signature has been verified.
     delivery_id = request.headers.get(DELIVERY_HEADER)
     fields: dict[str, object] = {"provider": PROVIDER_NAME, "delivery_id": delivery_id}
+    # And on any Sentry event this request raises, as a tag.
+    bind_fields(delivery_id=delivery_id)
 
     try:
         payload = json.loads(raw)
@@ -177,6 +180,7 @@ async def receive_github_webhook(request: Request) -> Response:
         logger.warning("webhook.rejected", extra={**fields, "reason": error.reason})
         raise ApiError(400, "invalid_payload") from None
 
+    bind_fields(installation_id=event.installation_id)
     logger.info(
         "webhook.accepted",
         extra={

@@ -12,16 +12,20 @@ from typing import Any
 
 import httpx
 import pytest
+import sentry_sdk
 import structlog
 from fastapi.testclient import TestClient
+from sentry_sdk.envelope import Envelope
+from sentry_sdk.transport import Transport
 
 from adapters.jobs.memory import MemoryJobStore
 from adapters.llm.keys import KeyPool
 from adapters.llm.openai_compat import OpenAICompatibleProvider
 from adapters.memory.auth import InMemorySessionStore, InMemorySignInAttemptStore
 from adapters.memory.repositories import InMemoryRepositoriesCache
-from adapters.observability.config import LoggingSettings
+from adapters.observability.config import LoggingSettings, SentrySettings
 from adapters.observability.logging import configure_logging
+from adapters.observability.sentry import init_sentry
 from api.config import AppSettings
 from api.main import create_app
 from api.webhooks.github import BACKGROUND_TASKS
@@ -156,6 +160,45 @@ def json_logs() -> Iterator[io.StringIO]:
             lg.propagate = propagate
             lg.disabled = disabled
         structlog.reset_defaults()
+
+
+SENTRY_TEST_DSN = "https://public@o0.ingest.sentry.example/0"
+
+
+class CaptureTransport(Transport):
+    """Keeps every envelope instead of sending it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.envelopes: list[Envelope] = []
+
+    def capture_envelope(self, envelope: Envelope) -> None:
+        self.envelopes.append(envelope)
+
+    def payloads(self, kind: str) -> list[dict[str, Any]]:
+        return [
+            item.payload.json
+            for envelope in self.envelopes
+            for item in envelope.items
+            if item.type == kind and item.payload.json is not None
+        ]
+
+    def dump(self) -> str:
+        return json.dumps(self.payloads("event") + self.payloads("transaction"), default=str)
+
+
+@pytest.fixture
+def sentry_capture() -> Iterator[CaptureTransport]:
+    """The real SDK in production mode, its envelopes kept in memory; afterwards
+    the client is replaced by a disabled one, so no other test reports."""
+    transport = CaptureTransport()
+    settings = SentrySettings(dsn=SENTRY_TEST_DSN, environment="production", release="r1")
+    init_sentry(settings, transport=transport)
+    try:
+        yield transport
+    finally:
+        sentry_sdk.flush()
+        sentry_sdk.init(dsn=None, default_integrations=False, auto_enabling_integrations=False)
 
 
 def json_lines(stream: io.StringIO) -> list[dict[str, Any]]:

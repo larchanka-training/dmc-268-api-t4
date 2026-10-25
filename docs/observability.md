@@ -173,7 +173,7 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `worker.debug_log_diff.ignored` | warning | `DEBUG_LOG_DIFF=1` outside `ENV=local` | — |
 | `job.files` | info | The PR's files after the filter | `job_id`, `repo`, `pr_number`, `reviewable_paths`, `skipped_paths` |
 | `job.diff.debug` | info | The fetched diff: only with `DEBUG_LOG_DIFF=1` in `ENV=local` | `job_id`, `repo`, `pr_number`, `diff_text` (a local-only field) |
-| `job.finished` | info for `COMPLETED`, warning for `FAILED` | The job reached a terminal status | `job_id`, `provider`, `repo`, `pr_number`, `outcome`, `duration_ms`; `files`, `reviewable`, `hunks`, `chunks` when completed; `error_kind`, `error_type` when failed |
+| `job.finished` | info for `COMPLETED`; error for `FAILED`, with the exception (one Sentry event) | The job reached a terminal status | `job_id`, `provider`, `repo`, `pr_number`, `outcome`, `duration_ms`; `files`, `reviewable`, `hunks`, `chunks` when completed; `error_kind`, `error_type` when failed |
 | `job.retrying` | info | A retryable failure; the job waits for its next attempt | `job_id`, `provider`, `repo`, `pr_number`, `error_kind`, `attempt`, `next_attempt_at`, `duration_ms` |
 | `job.store.failed` | error | A store call failed while recording the outcome | `job_id`, `provider`, `repo`, `pr_number`, `stage` (`complete`, `fail`, `get`), `error_kind`, `error_type`, `duration_ms` |
 | `job.step_record.failed` | error | Writing a `pr_review_steps` row failed; the job goes on | `job_id`, `error_type` |
@@ -300,11 +300,12 @@ review:
 
 **A failed review is logged at `error`, with its exception.** The worker catches every
 exception so it can record the job's outcome (`process_claimed_job`), so nothing reaches
-Sentry by itself. Today a `FAILED` job is logged at `warning` with the exception class
-only (`worker/process.py:393`), which makes it a breadcrumb, bugs (`internal_error`)
-included. Phase 2 logs it at `error` with `exc_info`, so Sentry gets one event with
-frames and the `error_kind` tag. A retry stays below `error` and is never an event;
-retry rates are a Grafana question (`jobs_finished_total`, "Review success").
+Sentry by itself. So a job that ends `FAILED` is logged at `error` with its exception
+(`_record_failure` in `worker/process.py`): Sentry gets one event with the frames, the
+job's context as tags and the `error_kind` as its message, bugs (`internal_error`)
+included, while the log line keeps only the type and frames. A retry stays below `error`
+and is never an event; retry rates are a Grafana question (`jobs_finished_total`,
+"Review success").
 
 **A retry loop logs on change, not per attempt.** While Postgres is down, today's code
 logs about 120 `error` lines a minute: the LISTEN connection every 1 s
@@ -547,11 +548,11 @@ written down once.
 | Setting | Value | Why |
 | :--- | :--- | :--- |
 | `traces_sample_rate` | 1.0 for jobs and API, 0 for `/health` and the SSE stream | Tens of reviews a day fits the free quota for errors. Spans are the number to watch: every API request also carries automatic httpx and SQLAlchemy child spans. Phase 2 checks span usage after a week; revisit at the first breakpoint |
-| `send_default_pii` | `False` | No IPs, cookies, user identifiers |
+| `send_default_pii`, `data_collection` | not set: the SDK's default sends no PII | No IPs, cookies, user identifiers. sentry-sdk 2.73 deprecates `send_default_pii` (even `False`) in favour of `data_collection`; leaving both unset keeps the default |
 | `max_request_body_size` | `"never"` | Webhook bodies carry PR titles and descriptions: untrusted and customer data |
 | `include_local_variables` | `False` | Stack frames would otherwise ship diffs and prompts held in locals |
-| LLM SDK integrations | disabled explicitly | Sentry's OpenAI/Anthropic integrations record prompts and replies by default. We call providers over raw `httpx` today; the explicit disable keeps it that way if an SDK appears |
-| `before_send` / `before_send_transaction` | redaction + header/query scrub; in production the `value` of every entry in `exception.values` (the whole chain, not only the last) is replaced by `error_type` and `error_kind`, and `logentry.formatted` is dropped | Same rules as the logs. Redaction catches secrets, not content: a pydantic `input_value=` fragment of a model reply would otherwise become the issue title and travel on to email and Telegram |
+| Integrations | auto-enabling off; Starlette, FastAPI, httpx and SQLAlchemy listed (plus the SDK's defaults, logging among them) | Sentry's OpenAI/Anthropic integrations record prompts and replies by default. We call providers over raw `httpx` today; with auto-enabling off no LLM SDK integration can switch itself on if an SDK appears |
+| `before_send` / `before_send_transaction` | redaction of every string; the request keeps its URL and allowlisted headers (no query string, body or cookies); tags from the bound log context (`installation_id`, `job_id`, `delivery_id`, `request_id`, `error_kind`); in production the `value` of every entry in `exception.values` (the whole chain, not only the last) is replaced by the `error_kind` (empty when there is none; the type stays), `logentry.formatted` and `params` are dropped, and `extra` keeps only the log allowlist | Same rules as the logs. Redaction catches secrets, not content: a pydantic `input_value=` fragment of a model reply would otherwise become the issue title and travel on to email and Telegram |
 | `before_breadcrumb` | drop `message`/`data` from `logging` breadcrumbs in production, keep logger, level and the format string | Sentry's logging integration reads stdlib records directly and formats them with their arguments, bypassing the structlog processors |
 | `environment`, `release` | `ENV`, `IMAGE_TAG` | Errors grouped per deploy |
 | DSN unset | SDK not initialised | `local` and tests send nothing (hard rule 4) |
@@ -608,6 +609,11 @@ use the same bot.
 Each rule has two actions: email to the one Sentry user, and the internal integration
 `telegram-relay`. The free plan has a single seat, held by the app admin; the team hears
 about errors through Telegram, and the issue link in the message opens only for the admin.
+
+What becomes an event: an unhandled exception, an `error` log line (a failed review among
+them), and a handled `ApiError` with a 5xx status, which Sentry's Starlette integration
+reports. So a GitHub outage that makes `/repositories` answer `502 forge_unavailable`
+is one issue that grows with every request.
 
 **The relay.** Sentry has no native Telegram integration. A Sentry *internal integration*
 with "Alert Rule Action" enabled posts a signed webhook to
@@ -866,9 +872,13 @@ Each phase is a separate PR, green on the five commands, demonstrable on its own
   `worker/__main__.py`.
 - `trace_id`/`span_id` structlog processor.
 - Sentry tags from the same contextvars: `installation_id` (`account_id` once tenancy
-  lands), `job_id`, `delivery_id`, so errors can be filtered per tenant.
+  lands), `job_id`, `delivery_id`, `request_id`, so errors can be filtered per tenant. The
+  worker binds the job's context for each run; the webhook route binds `delivery_id`
+  and `installation_id`.
 - Worker failure path: a job that ends `FAILED` is logged at `error` with `exc_info`
   (§ Levels), so it becomes one Sentry event tagged with its `error_kind`.
+- Events raised inside the relay route are dropped by `before_send` once phase 4 adds
+  the relay.
 - Tests: `before_send` strips headers, bodies and query strings and replaces the exception
   value in production; `before_breadcrumb` drops formatted log messages; the canary test
   extended to Sentry events and breadcrumbs; a `FAILED` job produces exactly one event and
@@ -984,7 +994,7 @@ from Postgres.
 
 | Question | Where | Example |
 | :--- | :--- | :--- |
-| Which errors hit account X? | **Sentry**: `installation_id` is a tag on every event and trace. Sentry indexes tags, so many distinct values are fine | Issues → `installation_id:51234567` |
+| Which errors hit account X? | **Sentry**: `installation_id` is a tag on every error event (traces carry the trace id the log lines share). Sentry indexes tags, so many distinct values are fine | Issues → `installation_id:51234567` |
 | How many reviews did each account run today, and how many failed? | **Loki**: `installation_id` is a JSON field in the log line, not an index label, so it costs nothing until queried | `sum by (installation_id, outcome) (count_over_time({service="worker"} \| json \| event="job.finished" [1d]))` |
 | Which account's reviews are slowest? | **Loki** | `quantile_over_time(0.95, {service="worker"} \| json \| event="job.finished" \| unwrap duration_ms [1d]) by (installation_id)` |
 | Quota used vs plan, per account | **Postgres** (later) | see below |

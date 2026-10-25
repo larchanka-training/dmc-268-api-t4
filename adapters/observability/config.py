@@ -73,6 +73,10 @@ class SentrySettings:
     def enabled(self) -> bool:
         return bool(self.dsn)
 
+    @property
+    def is_local(self) -> bool:
+        return self.environment == DEFAULT_ENV
+
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "SentrySettings":
         source = os.environ if env is None else env
