@@ -383,3 +383,13 @@ def test_the_smoke_renders_the_check_run_summary_the_worker_would_publish() -> N
     assert "Bumps two constants." in summary
     assert "**Risk: High** (the model said Low; the findings set the floor)" in summary
     assert "- Run the tests" in summary
+
+
+@pytest.mark.parametrize("name", ["review_v2", SUMMARY_PROMPT])
+def test_summary_and_risk_rules_describe_the_change_not_the_findings(name: str) -> None:
+    prompt = load_prompt(name)
+
+    assert "critical/high defect" not in prompt and "critical/high finding" not in prompt
+    assert "Mention the most serious finding" not in prompt
+    assert "describe the change, never defects" in prompt
+    assert "the findings' severity is added by code" in prompt

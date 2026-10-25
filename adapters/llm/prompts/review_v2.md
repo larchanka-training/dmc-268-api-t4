@@ -32,9 +32,11 @@ release risk; tell the human reviewer what to check.
   gutter out of `message` and `suggestion`.
 - `suggestion`: `{"before": [current lines verbatim], "after": [new lines]}` or `null`.
 - `rule_id`: the repository rule (`R1`, ...) the finding violates, or `null`.
-- `risk` of merging the change: `high` (a critical/high defect, or auth, payments, migrations
-  or concurrency changes), `medium` (a real defect or behaviour change in shared code), `low`
-  (contained or no behaviour change).
+- `summary`, `risk` and `checklist` describe the change, never defects: defects go in
+  `findings` only, and a later check may discard them.
+- `risk` of the area the change touches; the findings' severity is added by code: `high`
+  (auth, payments, migrations, concurrency, public API, infra), `medium` (behaviour change in
+  shared code), `low` (contained or no behaviour change).
 - `checklist`: up to 5 short checks for the human reviewer specific to this change, not
   generic advice; `[]` if none.
 
@@ -42,7 +44,7 @@ release risk; tell the human reviewer what to check.
 
 Reply with one JSON object only, no prose or code fences:
 
-{"summary": "<what changed and why it matters, plain words, 1-3 sentences>",
+{"summary": "<what the change does and why, plain words, 1-3 sentences>",
  "risk": "low",
  "checklist": ["<check>"],
  "findings": [{"path": "app/users.py", "line": 12, "side": "new", "severity": "high",
