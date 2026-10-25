@@ -66,9 +66,12 @@ ALLOWED_FIELDS = frozenset(
         "http.method", "http.route", "http.status",
         # LLM gateway
         "provider", "model", "input_tokens", "output_tokens", "max_input_tokens",
-        "retries", "findings", "kept", "trimmed", "dropped", "cleared", "unanswered",
+        "retries", "findings", "kept", "trimmed", "dropped", "dropped_fields", "cleared",
+        "unanswered",
         "rules", "next_provider", "screen", "dropped_pattern", "dropped_screen",
-        "dropped_over_limit", "key_masked", "cooldown_seconds",
+        "dropped_over_limit", "key_masked", "cooldown_seconds", "max_tokens",
+        "finish_reason", "failed", "risk", "risk_problem", "risk_invalid",
+        "checklist", "checklist_invalid", "checklist_trimmed",
         # sign-in audit
         "result", "user_id", "organizations", "had_session",
         # forge

@@ -194,9 +194,17 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `llm.input.too_large` | warning | The input is over the token budget; no provider is called | `input_tokens`, `max_input_tokens` |
 | `llm.reply.rejected` | warning | A reply was not valid review JSON; one corrective retry | `provider`, `model`, `reason` |
 | `llm.findings.trimmed` | warning | More findings than the limit; the most severe are kept | `provider`, `model`, `kept`, `trimmed` |
-| `llm.findings.dropped` | warning | Findings that failed the schema were dropped | `provider`, `model`, `dropped` |
+| `llm.findings.dropped` | warning | Findings that failed the schema were dropped | `provider`, `model`, `dropped`, `dropped_fields` (failures per schema field, e.g. `{"severity": 1}`) |
 | `llm.rule_ids.cleared` | warning | Findings cited a rule that was not listed | `provider`, `model`, `cleared` |
 | `llm.review.finished` | info | A provider returned a review | `provider`, `model`, `duration_ms`, `findings` |
+| `llm.response.usage` | info | Every chat completion: tokens and why the reply ended | `provider`, `model`, `input_tokens`, `output_tokens`, `finish_reason` |
+| `llm.reply.truncated` | warning | A reply was cut at `max_tokens`, so it is not valid JSON | `provider`, `model`, `max_tokens`, `output_tokens` |
+| `llm.summary_fields.invalid` | warning | A schema v2 reply's risk was missing or invalid, or its checklist had invalid or extra items; publishing falls back to the rule-based risk | `provider`, `model`, `risk_problem` (`missing`, `invalid` or null), `checklist_invalid`, `checklist_trimmed` |
+| `llm.file_calls.failed` | warning | Per-file review: some file calls failed, so those files have no findings | `failed`, `files` |
+| `llm.summary.skipped` | warning | Per-file review: the summary agent's input is over budget; the merged file summaries are used | `input_tokens`, `max_input_tokens` |
+| `llm.summary.failed` | warning | Per-file review: one provider's summary call failed; the next is tried | `provider`, `model`, `error_type` |
+| `llm.summary.unavailable` | warning | Per-file review: the summary agent failed on every provider; the merged file summaries are used | — |
+| `llm.summary.finished` | info | Per-file review: the summary agent answered | `provider`, `model`, `duration_ms`, `files`, `risk`, `checklist`, `risk_invalid`, `checklist_invalid`, `checklist_trimmed` |
 | `llm.provider.fallback` | warning | A provider failed; the next one is tried | `provider`, `next_provider`, `reason` |
 | `llm.call.failed` | warning | Every provider failed (`AllProvidersFailedError`); the job is retried | `reason`: each provider and its reason, never a response body |
 | `llm.key.rate_limited` | warning | A key got 429 and cools down | `provider`, `key_masked`, `cooldown_seconds` |

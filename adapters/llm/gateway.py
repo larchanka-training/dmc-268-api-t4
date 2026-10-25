@@ -112,7 +112,9 @@ async def review_with_provider(
                 "provider": provider.name,
                 "model": provider.model,
                 "dropped": parsed.dropped_findings,
-                # ", ".join(f"{name}={count}" for name, count in sorted(parsed.dropped_fields.items())),
+                # Which schema field failed, and how often ({"severity": 1, "line": 2}):
+                # FindingOut's field names, never text from the reply.
+                "dropped_fields": parsed.dropped_fields,
             },
         )
     if parsed.unknown_rule_ids:
@@ -153,13 +155,14 @@ def _log_summary_fields(provider: ChatProvider, parsed: ParsedReview) -> None:
     )
     if risk_problem or parsed.checklist_invalid_items or parsed.checklist_trimmed:
         logger.warning(
-            "provider=%s model=%s summary fields: risk %s, checklist %d invalid item(s), "
-            "%d over the limit",
-            provider.name,
-            provider.model,
-            risk_problem or "ok",
-            parsed.checklist_invalid_items,
-            parsed.checklist_trimmed,
+            "llm.summary_fields.invalid",
+            extra={
+                "provider": provider.name,
+                "model": provider.model,
+                "risk_problem": risk_problem,
+                "checklist_invalid": parsed.checklist_invalid_items,
+                "checklist_trimmed": parsed.checklist_trimmed,
+            },
         )
 
 
@@ -277,10 +280,9 @@ class FallbackLLMGateway:
         if not results:
             raise failures[0]
         if failures:
+            # Their files have no findings.
             logger.warning(
-                "per-file review: %d of %d file call(s) failed, their files have no findings",
-                len(failures),
-                len(parts),
+                "llm.file_calls.failed", extra={"failed": len(failures), "files": len(parts)}
             )
         merged = merge_file_results(results)
         reviews = [
@@ -303,9 +305,8 @@ class FallbackLLMGateway:
         estimated = estimate_tokens(messages)
         if estimated > self._max_input_tokens:
             logger.warning(
-                "summary agent skipped: ~%d tokens over the %d-token input budget",
-                estimated,
-                self._max_input_tokens,
+                "llm.summary.skipped",
+                extra={"input_tokens": estimated, "max_input_tokens": self._max_input_tokens},
             )
             return None
         for provider in self._providers:
@@ -314,27 +315,31 @@ class FallbackLLMGateway:
                 parsed = parse_summary(await provider.complete(messages))
             except (LLMGatewayError, InvalidReviewJSONError) as exc:
                 logger.warning(
-                    "summary agent provider=%s model=%s failed (%s)",
-                    provider.name,
-                    provider.model,
-                    type(exc).__name__,
+                    "llm.summary.failed",
+                    extra={
+                        "provider": provider.name,
+                        "model": provider.model,
+                        "error_type": type(exc).__name__,
+                    },
                 )
                 continue
             logger.info(
-                "summary agent provider=%s model=%s duration=%.2fs files=%d risk=%s "
-                "checklist=%d risk_invalid=%s checklist_invalid=%d checklist_trimmed=%d",
-                provider.name,
-                provider.model,
-                time.monotonic() - started,
-                len(reviews),
-                parsed.risk or "none",
-                len(parsed.checklist),
-                parsed.risk_invalid,
-                parsed.checklist_invalid_items,
-                parsed.checklist_trimmed,
+                "llm.summary.finished",
+                extra={
+                    "provider": provider.name,
+                    "model": provider.model,
+                    "duration_ms": round((time.monotonic() - started) * 1000),
+                    "files": len(reviews),
+                    "risk": parsed.risk,
+                    "checklist": len(parsed.checklist),
+                    "risk_invalid": parsed.risk_invalid,
+                    "checklist_invalid": parsed.checklist_invalid_items,
+                    "checklist_trimmed": parsed.checklist_trimmed,
+                },
             )
             return parsed
-        logger.warning("summary agent failed on every provider, using the merged file summaries")
+        # The merged file summaries are published instead.
+        logger.warning("llm.summary.unavailable")
         return None
 
     async def _first_pass(self, request: ReviewRequest, rules: Sequence[Rule]) -> ReviewResult:

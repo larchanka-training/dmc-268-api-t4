@@ -31,7 +31,9 @@ from domain.ports import ReviewRequest
 from tests.conftest import (
     VALID_FINDING,
     RecordingTransport,
+    all_log_text,
     chat_response,
+    log_events,
     make_provider,
     replies,
     review_json,
@@ -198,9 +200,14 @@ async def test_a_missing_risk_under_v2_logs_a_counter_without_content(
         result = await gateway.review(REQUEST)
 
     assert result.risk is None
-    assert "risk invalid, checklist 1 invalid item(s), 0 over the limit" in caplog.text
-    assert "extreme" not in caplog.text
-    assert secret_item not in caplog.text
+    [record] = log_events(caplog, "llm.summary_fields.invalid")
+    assert (record.risk_problem, record.checklist_invalid, record.checklist_trimmed) == (
+        "invalid",
+        1,
+        0,
+    )
+    assert "extreme" not in all_log_text(caplog)
+    assert secret_item not in all_log_text(caplog)
 
 
 async def test_v1_replies_log_no_summary_field_warnings(caplog: pytest.LogCaptureFixture) -> None:
@@ -212,7 +219,7 @@ async def test_v1_replies_log_no_summary_field_warnings(caplog: pytest.LogCaptur
         result = await gateway.review(REQUEST)
 
     assert result.risk is None
-    assert "summary fields" not in caplog.text
+    assert log_events(caplog, "llm.summary_fields.invalid") == []
 
 
 async def test_a_reply_without_risk_under_the_default_v2_logs_it_as_missing(
@@ -224,7 +231,8 @@ async def test_a_reply_without_risk_under_the_default_v2_logs_it_as_missing(
         result = await FallbackLLMGateway([make_provider(transport)]).review(REQUEST)
 
     assert result.risk is None
-    assert "summary fields: risk missing, checklist 0 invalid item(s)" in caplog.text
+    [record] = log_events(caplog, "llm.summary_fields.invalid")
+    assert (record.risk_problem, record.checklist_invalid) == ("missing", 0)
 
 
 SUMMARY_REPLY = json.dumps(
@@ -303,7 +311,9 @@ async def test_a_failed_summary_agent_falls_back_to_the_merged_file_results(
     assert result.risk is RiskLevel.HIGH
     assert sorted(result.checklist) == ["Check a", "Run tests"]
     assert result.summary == "Adds a users endpoint. Adds a users endpoint."
-    assert "summary agent provider=eurouter model=eurouter-model failed" in caplog.text
+    [failed] = log_events(caplog, "llm.summary.failed")
+    assert (failed.provider, failed.model) == ("eurouter", "eurouter-model")
+    assert log_events(caplog, "llm.summary.unavailable")
 
 
 async def test_a_failed_file_call_leaves_the_other_files_reviewed(
@@ -322,7 +332,8 @@ async def test_a_failed_file_call_leaves_the_other_files_reviewed(
         result = await gateway.review(REQUEST)
 
     assert len(result.findings) == 1
-    assert "1 of 2 file call(s) failed" in caplog.text
+    [record] = log_events(caplog, "llm.file_calls.failed")
+    assert (record.failed, record.files) == (1, 2)
 
 
 async def test_the_review_fails_when_every_file_call_fails() -> None:

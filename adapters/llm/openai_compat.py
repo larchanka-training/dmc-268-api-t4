@@ -166,17 +166,21 @@ class OpenAICompatibleProvider:
         finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
         if finish_reason == "length":
             logger.warning(
-                "provider=%s model=%s reply cut at max_tokens=%d (output_tokens=%s)",
-                self._name,
-                self._model,
-                self._max_tokens,
-                usage.get("completion_tokens", "n/a"),
+                "llm.reply.truncated",
+                extra={
+                    "provider": self._name,
+                    "model": self._model,
+                    "max_tokens": self._max_tokens,
+                    "output_tokens": usage.get("completion_tokens"),
+                },
             )
         logger.info(
-            "provider=%s model=%s input_tokens=%s output_tokens=%s finish_reason=%s",
-            self._name,
-            self._model,
-            usage.get("prompt_tokens", "n/a"),
-            usage.get("completion_tokens", "n/a"),
-            finish_reason[:32] if isinstance(finish_reason, str) else "n/a",
+            "llm.response.usage",
+            extra={
+                "provider": self._name,
+                "model": self._model,
+                "input_tokens": usage.get("prompt_tokens"),
+                "output_tokens": usage.get("completion_tokens"),
+                "finish_reason": finish_reason[:32] if isinstance(finish_reason, str) else None,
+            },
         )

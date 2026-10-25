@@ -12,7 +12,9 @@ from tests.conftest import (
     FAKE_KEY_B,
     FakeClock,
     RecordingTransport,
+    all_log_text,
     chat_response,
+    log_events,
     make_provider,
     replies,
 )
@@ -190,7 +192,9 @@ async def test_a_reply_cut_at_max_tokens_is_logged_with_counts_only(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     body = {
-        "choices": [{"message": {"content": '{"summary": "cut'}, "finish_reason": "length"}],
+        "choices": [
+            {"message": {"content": '{"summary": "REPLY-MARKER'}, "finish_reason": "length"}
+        ],
         "usage": {"prompt_tokens": 900, "completion_tokens": 4096},
     }
     provider = make_provider(RecordingTransport(replies(httpx.Response(200, json=body))))
@@ -198,6 +202,8 @@ async def test_a_reply_cut_at_max_tokens_is_logged_with_counts_only(
     with caplog.at_level(logging.INFO, logger="adapters.llm"):
         await provider.complete([{"role": "user", "content": "x"}])
 
-    assert "reply cut at max_tokens=" in caplog.text
-    assert "input_tokens=900 output_tokens=4096 finish_reason=length" in caplog.text
-    assert "cut" not in caplog.text.replace("reply cut at", "")
+    [truncated] = log_events(caplog, "llm.reply.truncated")
+    assert (truncated.max_tokens, truncated.output_tokens) == (1024, 4096)
+    [usage] = log_events(caplog, "llm.response.usage")
+    assert (usage.input_tokens, usage.output_tokens, usage.finish_reason) == (900, 4096, "length")
+    assert "REPLY-MARKER" not in all_log_text(caplog)

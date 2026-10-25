@@ -178,6 +178,7 @@ async def test_dropped_findings_are_counted_in_warning_without_text(
     assert len(result.findings) == 1
     [record] = log_events(caplog, "llm.findings.dropped")
     assert record.dropped == 1
+    assert record.dropped_fields == {"severity": 1}
     assert "SECRET-FINDING-TEXT" not in all_log_text(caplog)
     assert VALID_FINDING["message"] not in all_log_text(caplog)
 
