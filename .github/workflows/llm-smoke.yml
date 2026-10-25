@@ -104,7 +104,7 @@ jobs:
                   print(line)
               elif line.startswith(("**Risk:", "No issues found", "<!--")) or not line.strip():
                   print(line)
-              elif line.endswith("checked by the verifier and dismissed."):
+              elif "checked by the verifier and dismissed." in line:
                   print(line)
               elif section.startswith("### Files reviewed"):
                   print(line)
