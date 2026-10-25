@@ -77,7 +77,7 @@ def test_unknown_severity_drops_only_that_finding() -> None:
     "override",
     [
         {"category": "readability"},
-        {"severity": "High"},
+        {"severity": "severe"},
         {"side": "right"},
     ],
 )
@@ -86,6 +86,21 @@ def test_near_miss_enum_values_are_not_coerced(override: dict[str, str]) -> None
 
     assert parsed.dropped_findings == 1
     assert parsed.review.findings == []
+    assert parsed.dropped_fields == {next(iter(override)): 1}
+
+
+def test_enum_values_in_another_case_are_kept() -> None:
+    finding = {**VALID_FINDING, "severity": "High", "category": " Security", "side": "NEW"}
+
+    parsed = parse_review(review_json(finding))
+
+    assert parsed.dropped_findings == 0
+    [kept] = parsed.review.to_domain()
+    assert (kept.severity, kept.category, kept.position.side) == (
+        Severity.HIGH,
+        Category.SECURITY,
+        DiffSide.NEW,
+    )
 
 
 @pytest.mark.parametrize(

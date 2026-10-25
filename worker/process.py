@@ -292,6 +292,8 @@ async def _process(
                 lines=CommentableLines.from_files(filtered.kept),
                 policy=review.policy,
                 posted_fingerprints=posted,
+                model_risk=result.risk,
+                checklist=result.checklist,
             )
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                 return False

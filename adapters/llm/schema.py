@@ -1,6 +1,7 @@
 import json
 import re
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from typing import Annotated, Any
 
 from pydantic import (
@@ -19,6 +20,7 @@ from domain.models import (
     Finding,
     FindingPosition,
     FindingSuggestion,
+    RiskLevel,
     Severity,
 )
 
@@ -27,6 +29,9 @@ SUMMARY_MAX_LENGTH = 4000
 FINDINGS_MAX = 50
 PATH_MAX_LENGTH = 1024
 SUGGESTION_MAX_LINES = 50
+# Schema v2 (docs/schemas/llm-output.v2.schema.json): a checklist for the human reviewer.
+CHECKLIST_MAX_ITEMS = 5
+CHECKLIST_ITEM_MAX_LENGTH = 200
 _SEVERITY_RANK = {severity: rank for rank, severity in enumerate(Severity)}
 
 _FENCE = re.compile(r"\A\s*```[A-Za-z]*[ \t]*\n(?P<body>.*?)\n?[ \t]*```\s*\Z", re.DOTALL)
@@ -65,6 +70,12 @@ class FindingOut(BaseModel):
     suggestion: SuggestionOut | None = None
     rule_id: str | None = None
 
+    @field_validator("side", "severity", "category", mode="before")
+    @classmethod
+    def _enum_as_lowercase(cls, value: Any) -> Any:
+        # "High" or " security" is the right value in the wrong case: keep the finding.
+        return value.strip().lower() if isinstance(value, str) else value
+
     @field_validator("rule_id", mode="before")
     @classmethod
     def _rule_id_as_text(cls, value: Any) -> Any:
@@ -90,6 +101,8 @@ class ReviewOut(BaseModel):
 
     summary: str
     findings: list[FindingOut]
+    risk: RiskLevel | None = None
+    checklist: tuple[str, ...] = ()
 
     def to_domain(self) -> tuple[Finding, ...]:
         return tuple(finding.to_domain() for finding in self.findings)
@@ -100,6 +113,9 @@ class _ReviewEnvelope(BaseModel):
 
     summary: str
     findings: list[Any]
+    # v2 fields, checked one by one so a bad value costs the field, not the review.
+    risk: Any = None
+    checklist: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +124,11 @@ class ParsedReview:
     dropped_findings: int
     trimmed_findings: int = 0
     unknown_rule_ids: int = 0
+    # Schema field that failed first, per dropped finding: names only, never values.
+    dropped_fields: dict[str, int] = field(default_factory=dict)
+    risk_invalid: bool = False
+    checklist_invalid_items: int = 0
+    checklist_trimmed: int = 0
 
 
 def strip_code_fence(text: str) -> str:
@@ -143,21 +164,111 @@ def parse_review(raw_reply: str, rule_ids: frozenset[str] = frozenset()) -> Pars
         ) from None
 
     valid: list[FindingOut] = []
+    failed_fields: Counter[str] = Counter()
     for item in envelope.findings:
         try:
             valid.append(FindingOut.model_validate(item))
-        except ValidationError:
-            continue
+        except ValidationError as exc:
+            failed_fields[_failed_field(exc)] += 1
     valid, unknown_rule_ids = _known_rule_ids(valid, rule_ids)
     kept = valid
     if len(valid) > FINDINGS_MAX:
         # Over the limit, keep the most severe: the dashboard reads them first. sorted() is
         # stable, so findings of equal severity keep the model's order.
         kept = sorted(valid, key=lambda finding: _SEVERITY_RANK[finding.severity])[:FINDINGS_MAX]
-    review = ReviewOut(summary=envelope.summary.strip()[:SUMMARY_MAX_LENGTH], findings=kept)
+    risk, risk_invalid = _parse_risk(envelope.risk)
+    checklist, invalid_items, trimmed_items = _parse_checklist(envelope.checklist)
+    review = ReviewOut(
+        summary=envelope.summary.strip()[:SUMMARY_MAX_LENGTH],
+        findings=kept,
+        risk=risk,
+        checklist=checklist,
+    )
     return ParsedReview(
         review=review,
         dropped_findings=len(envelope.findings) - len(valid),
         trimmed_findings=len(valid) - len(kept),
         unknown_rule_ids=unknown_rule_ids,
+        dropped_fields=dict(failed_fields),
+        risk_invalid=risk_invalid,
+        checklist_invalid_items=invalid_items,
+        checklist_trimmed=trimmed_items,
+    )
+
+
+def _parse_risk(value: Any) -> tuple[RiskLevel | None, bool]:
+    """The risk and whether a value was given but unusable; absent is not invalid (v1)."""
+    if value is None:
+        return None, False
+    if isinstance(value, str):
+        try:
+            return RiskLevel(value.strip().lower()), False
+        except ValueError:
+            pass
+    return None, True
+
+
+def _parse_checklist(value: Any) -> tuple[tuple[str, ...], int, int]:
+    """Items as one-line strings, at most CHECKLIST_MAX_ITEMS; plus invalid and cut counts."""
+    if value is None:
+        return (), 0, 0
+    if not isinstance(value, list):
+        return (), 1, 0
+    items: list[str] = []
+    invalid = 0
+    for item in value:
+        text = " ".join(item.split())[:CHECKLIST_ITEM_MAX_LENGTH] if isinstance(item, str) else ""
+        if text:
+            items.append(text)
+        else:
+            invalid += 1
+    return tuple(items[:CHECKLIST_MAX_ITEMS]), invalid, max(len(items) - CHECKLIST_MAX_ITEMS, 0)
+
+
+def _failed_field(error: ValidationError) -> str:
+    location = error.errors()[0]["loc"]
+    return str(location[0]) if location else "finding"
+
+
+class _SummaryEnvelope(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    summary: str
+    risk: Any = None
+    checklist: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedSummary:
+    """The executive-summary agent's reply (prompts/summary_v1.md)."""
+
+    summary: str
+    risk: RiskLevel | None
+    checklist: tuple[str, ...]
+    risk_invalid: bool = False
+    checklist_invalid_items: int = 0
+    checklist_trimmed: int = 0
+
+
+def parse_summary(raw_reply: str) -> ParsedSummary:
+    """Validate a summary reply; raise InvalidReviewJSONError when it has no usable summary."""
+    try:
+        payload = json.loads(strip_code_fence(raw_reply))
+    except json.JSONDecodeError as exc:
+        raise InvalidReviewJSONError(f"reply is not valid JSON ({exc.msg})") from None
+    try:
+        envelope = _SummaryEnvelope.model_validate(payload)
+    except ValidationError as exc:
+        raise InvalidReviewJSONError(
+            f"reply does not match the summary schema ({exc.error_count()} error(s))"
+        ) from None
+    risk, risk_invalid = _parse_risk(envelope.risk)
+    checklist, invalid_items, trimmed_items = _parse_checklist(envelope.checklist)
+    return ParsedSummary(
+        summary=envelope.summary.strip()[:SUMMARY_MAX_LENGTH],
+        risk=risk,
+        checklist=checklist,
+        risk_invalid=risk_invalid,
+        checklist_invalid_items=invalid_items,
+        checklist_trimmed=trimmed_items,
     )

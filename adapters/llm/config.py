@@ -1,6 +1,7 @@
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from domain.errors import LLMConfigurationError
 
@@ -12,7 +13,9 @@ DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_TEMPERATURE = 0.0
 # Providers that receive no max_tokens may reserve the whole context window for the reply
 # and reject the request outright, so a reply budget is always sent.
-DEFAULT_MAX_TOKENS = 4096
+# 4096 cut the JSON reply of a 29-file eval bundle mid-string (21 findings took 4837
+# tokens), and a cut reply fails parsing twice, so the review failed outright (issue #55).
+DEFAULT_MAX_TOKENS = 16384
 # Hard input budget, as recommended for qwen3-coder: a bigger prompt is refused before any
 # provider is called. Fitting context into the budget is the context builder's job.
 DEFAULT_MAX_INPUT_TOKENS = 32000
@@ -22,6 +25,20 @@ DEFAULT_TYPESAFE_MODEL = "jev-latest"
 DEFAULT_REFLECTION_KEEP_THRESHOLD = 0.5
 DEFAULT_REFLECTION_TIMEOUT_SECONDS = 15.0
 DEFAULT_RULES_SCREEN_THRESHOLD = 0.7
+
+# The system prompt and output schema travel together (PIPELINE_SPEC.md §10).
+PROMPT_VERSIONS = ("v1", "v2")
+DEFAULT_PROMPT_VERSION = "v2"
+
+
+class ReviewScope(StrEnum):
+    """How much of the pull request one first-pass LLM call sees."""
+
+    PR = "pr"  # the whole diff in one call
+    FILE = "file"  # one call per changed file, findings merged
+
+
+DEFAULT_REVIEW_SCOPE = ReviewScope.PR
 
 _TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
 _FALSE_VALUES = frozenset({"false", "0", "no", "off"})
@@ -67,6 +84,8 @@ class LLMSettings:
     max_tokens: int = DEFAULT_MAX_TOKENS
     max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS
     reflection: ReflectionSettings = field(default_factory=ReflectionSettings)
+    prompt_version: str = DEFAULT_PROMPT_VERSION
+    review_scope: ReviewScope = DEFAULT_REVIEW_SCOPE
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "LLMSettings":
@@ -133,6 +152,16 @@ class _EnvReader:
             max_tokens=self._positive_int("LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS),
             max_input_tokens=self._positive_int("LLM_MAX_INPUT_TOKENS", DEFAULT_MAX_INPUT_TOKENS),
             reflection=self._reflection(),
+            prompt_version=self._choice(
+                "LLM_PROMPT_VERSION", PROMPT_VERSIONS, DEFAULT_PROMPT_VERSION
+            ),
+            review_scope=ReviewScope(
+                self._choice(
+                    "LLM_REVIEW_SCOPE",
+                    tuple(scope.value for scope in ReviewScope),
+                    DEFAULT_REVIEW_SCOPE.value,
+                )
+            ),
         )
 
     def _reflection(self) -> ReflectionSettings:
@@ -160,6 +189,14 @@ class _EnvReader:
                 maximum=1.0,
             ),
         )
+
+    def _choice(self, name: str, allowed: tuple[str, ...], default: str) -> str:
+        value = self._text(name).lower() or default
+        if value not in allowed:
+            raise LLMConfigurationError(
+                f"{name} must be one of {', '.join(allowed)}, got '{value}'"
+            )
+        return value
 
     def _text(self, name: str) -> str:
         return self._env.get(name, "").strip()

@@ -91,7 +91,10 @@ setup_deploy_user() {
   home=$(getent passwd "$DEPLOY_USER" | cut -d: -f6)
   ssh_dir="$home/.ssh"
   install -d -m 700 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$ssh_dir"
-  printf '%s\n' "$DEPLOY_PUBKEY" > "$ssh_dir/authorized_keys"
+  # Append, never overwrite: team members' keys added by hand must survive a re-run.
+  touch "$ssh_dir/authorized_keys"
+  grep -qxF "$DEPLOY_PUBKEY" "$ssh_dir/authorized_keys" \
+    || printf '%s\n' "$DEPLOY_PUBKEY" >> "$ssh_dir/authorized_keys"
   chown "$DEPLOY_USER:$DEPLOY_USER" "$ssh_dir/authorized_keys"
   chmod 600 "$ssh_dir/authorized_keys"
 }

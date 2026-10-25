@@ -180,3 +180,32 @@ def aggregate(scores: Iterable[CaseScore]) -> CorpusScore:
         severity_errors=sum(s.severity_errors for s in scored),
         dropped=sum(s.dropped for s in all_scores),
     )
+
+
+NEAR_MISS_LINES = 2
+
+
+def near_misses(case: Case, score: CaseScore) -> int:
+    """False positives that point at a missed defect but miss the key.
+
+    A near miss sits in the defect's file and side, on the same line in another category, or
+    within NEAR_MISS_LINES lines in the same category. It still scores as an FP and an FN;
+    the count only tells a wrong anchor apart from a defect the model never saw.
+    """
+    matched = {scored.finding.key for scored in score.findings if scored.verdict is Verdict.TP}
+    missed = [defect for defect in case.expected if defect.key not in matched]
+    count = 0
+    for scored in score.findings:
+        if scored.verdict not in (Verdict.FP, Verdict.HALLUCINATION):
+            continue
+        finding = scored.finding
+        for defect in missed:
+            same_place = defect.path == finding.path and defect.side is finding.side
+            close = abs(defect.line - finding.line) <= NEAR_MISS_LINES
+            if same_place and (
+                defect.line == finding.line or (close and defect.category is finding.category)
+            ):
+                count += 1
+                missed.remove(defect)
+                break
+    return count

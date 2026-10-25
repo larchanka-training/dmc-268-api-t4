@@ -34,6 +34,8 @@ def build_gateway(
         max_input_tokens=settings.max_input_tokens,
         verifier=_build_verifier(settings, transport=transport),
         rule_screen=_build_rule_screen(settings, transport=transport),
+        prompt_version=settings.prompt_version,
+        review_scope=settings.review_scope,
     )
 
 
