@@ -9,6 +9,7 @@ from domain.auth import Session, SignInAttempt
 from domain.models import ReviewResult
 from domain.publishing import PublishPlan
 from domain.repositories import Repository
+from domain.repository_rules import ParsedRules
 from domain.tenancy import Organization, User
 
 if TYPE_CHECKING:
@@ -114,6 +115,34 @@ class RepositoriesCache(Protocol):
     ) -> None: ...
 
     async def drop(self, installation_id: int) -> None: ...
+
+
+class RepositoryContents(Protocol):
+    """Reads one file of a repository at a ref, as the installation sees it."""
+
+    async def read_file(
+        self,
+        installation_id: int,
+        repo_full_name: str,
+        path: str,
+        ref: str,
+        *,
+        max_bytes: int,
+    ) -> bytes | None:
+        """The raw bytes, or None when the file (or the ref) does not exist.
+
+        Reads at most `max_bytes + 1` bytes, so the caller can tell an oversized
+        file from one that fits without holding all of it. Raises
+        ForgePermissionError when the installation may not read contents, and
+        ForgeUnavailableError for everything transient.
+        """
+        ...
+
+
+class RulesParser(Protocol):
+    """Turns rules.md text into the rules a review would apply."""
+
+    def parse(self, markdown: str) -> ParsedRules: ...
 
 
 # --- Review pipeline: pull request context and jobs ------------------------

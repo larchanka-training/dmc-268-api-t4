@@ -310,6 +310,35 @@ class FakeInstallationGateway:
         return self.repositories
 
 
+class FakeRepositoryContents:
+    """Serves files from a dict keyed by (repo_full_name, path, ref); never touches the network."""
+
+    def __init__(
+        self,
+        files: dict[tuple[str, str, str], bytes] | None = None,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.files = files or {}
+        self.error = error
+        self.calls: list[tuple[int, str, str, str, int]] = []
+
+    async def read_file(
+        self,
+        installation_id: int,
+        repo_full_name: str,
+        path: str,
+        ref: str,
+        *,
+        max_bytes: int,
+    ) -> bytes | None:
+        self.calls.append((installation_id, repo_full_name, path, ref, max_bytes))
+        if self.error is not None:
+            raise self.error
+        content = self.files.get((repo_full_name, path, ref))
+        return None if content is None else content[: max_bytes + 1]
+
+
 def build_test_app(
     clock: FixedClock,
     identity: "FakeIdentityProvider",
@@ -321,6 +350,7 @@ def build_test_app(
     webhook_secret: str = TEST_WEBHOOK_SECRET,
     job_events: Any = None,
     findings: Any = None,
+    job_rules: Any = None,
 ) -> Any:
     service = repositories or RepositoriesService(
         gateway=FakeInstallationGateway(),
@@ -341,6 +371,7 @@ def build_test_app(
         webhook_secret=webhook_secret,
         job_events=job_events,
         findings=findings,
+        job_rules=job_rules,
     )
 
 
