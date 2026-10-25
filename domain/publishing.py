@@ -263,7 +263,7 @@ def assess_risk(
     return max(risk, floor, key=RISK_ORDER.index)
 
 
-DISMISSED_NOTE = "The summary and checklist above were written before that check."
+DISMISSED_NOTE = "The summary and checklist were written before that check."
 
 
 def dismissed_line(dismissed: int) -> str:
