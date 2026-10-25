@@ -127,7 +127,7 @@ print_summary() {
   echo "docker service: $(systemctl is-active docker)"
   echo "rsync: $(rsync --version 2>/dev/null | awk 'NR == 1' || echo n/a)"
   id "$DEPLOY_USER"
-  stat -c '%A %U:%G %n' "$APP_DIR" "$APP_DIR/frontend"
+  stat -c '%A %U:%G %n' "$APP_DIR" "$APP_DIR/frontend" "$APP_DIR/logs"
   local protocols
   # awk reads all of resolvectl's output: an early exit would SIGPIPE it and trip pipefail.
   protocols=$(resolvectl status 2>/dev/null | awk '/^ *Protocols:/ && !seen { sub(/^ +/, ""); print; seen = 1 }')
