@@ -80,9 +80,13 @@ def rules_file_url(repo_full_name: str, ref: str) -> str:
 
 
 def new_rules_file_url(repo_full_name: str, branch: str) -> str:
-    """GitHub's page that creates the rules file on `branch`."""
+    """GitHub's page that creates the rules file on `branch`.
+
+    Slashes in the branch name stay literal, as in the links GitHub itself builds
+    (`/new/feature/x`); GitHub matches the longest existing branch.
+    """
     return (
-        f"{_repository_url(repo_full_name)}/new/{quote(branch, safe='')}"
+        f"{_repository_url(repo_full_name)}/new/{quote(branch, safe='/')}"
         f"?filename={quote(RULES_PATH, safe='')}"
     )
 

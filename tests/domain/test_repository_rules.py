@@ -58,7 +58,7 @@ def test_the_file_urls_point_at_the_blob_and_the_create_page() -> None:
     )
     assert (
         new_rules_file_url("acme/payments", "feature/x")
-        == "https://github.com/acme/payments/new/feature%2Fx?filename=.review%2Frules.md"
+        == "https://github.com/acme/payments/new/feature/x?filename=.review%2Frules.md"
     )
 
 

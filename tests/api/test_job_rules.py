@@ -76,7 +76,7 @@ async def test_rules_absent_link_to_the_pr_branch(auth_clock: FixedClock) -> Non
     assert body["status"] == "absent"
     assert body["rules"] == []
     assert body["file_url"] == (
-        f"https://github.com/{REPO}/new/feature%2Fx?filename=.review%2Frules.md"
+        f"https://github.com/{REPO}/new/feature/x?filename=.review%2Frules.md"
     )
 
 
