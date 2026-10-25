@@ -386,10 +386,16 @@ def test_the_smoke_renders_the_check_run_summary_the_worker_would_publish() -> N
 
 
 @pytest.mark.parametrize("name", ["review_v2", SUMMARY_PROMPT])
-def test_summary_and_risk_rules_describe_the_change_not_the_findings(name: str) -> None:
+def test_the_risk_rule_rates_the_change_area_not_defects(name: str) -> None:
     prompt = load_prompt(name)
+    risk_rule = prompt[prompt.index("- `risk`") :].split("\n- ")[0]
 
-    assert "critical/high defect" not in prompt and "critical/high finding" not in prompt
+    assert "defect" not in risk_rule and "finding" not in risk_rule.replace("findings'", "")
+    assert "auth, payments, migrations, concurrency, public API" in risk_rule
+
+
+def test_the_summary_agent_keeps_defects_out_of_its_summary() -> None:
+    prompt = load_prompt(SUMMARY_PROMPT)
+
     assert "Mention the most serious finding" not in prompt
     assert "describe the change, never defects" in prompt
-    assert "the findings' severity is added by code" in prompt
