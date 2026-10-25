@@ -281,7 +281,7 @@ async def test_the_summary_agent_sees_file_notes_but_not_the_diff() -> None:
     user = json.loads(transport.requests[2].content)["messages"][1]["content"]
     assert "+a = 2" not in user and "L1 |" not in user
     assert "File app/a.py (+1 -1)" in user and "File app/b.py (+1 -1)" in user
-    assert "finding line=1 severity=critical category=security:" in user
+    assert "severity=" not in user and "sort parameter" not in user
     assert user.count(FILE_REVIEWS_END) == 1
     assert user.count(UNTRUSTED_END) == 0
 
