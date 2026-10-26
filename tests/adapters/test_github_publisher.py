@@ -19,7 +19,7 @@ from domain.errors import (
 )
 from domain.models import Category, DiffSide, Finding, FindingPosition, Severity
 from domain.ports import ExistingCheckRun, PullRequestTarget
-from domain.publishing import CommentableLines, PublishPlan, build_plan
+from domain.publishing import CommentableLines, PublishPlan, build_plan, build_skipped_plan
 from tests.conftest import FixedClock, RecordingTransport, github_fixture
 
 KEY_PATH = Path(__file__).resolve().parent.parent / "fixtures" / "github" / "app_key.pem"
@@ -255,3 +255,45 @@ async def test_a_server_error_is_retryable(auth_clock: FixedClock) -> None:
 
     with pytest.raises(ForgeUnavailableError, match="HTTP 502"):
         await publisher.publish(TARGET, plan_with(2))
+
+
+async def test_a_skipped_plan_posts_only_the_check_run(auth_clock: FixedClock) -> None:
+    publisher, transport = publisher_for(auth_clock, github())
+    plan = build_skipped_plan(estimated_tokens=58_214, limit=32_000, reviewable_files=59)
+
+    await publisher.publish(TARGET, plan)
+
+    (check,) = sent(transport, "POST", "/check-runs")
+    assert check["conclusion"] == "skipped"
+    assert check["output"] == {"title": "Skipped: pull request too large", "summary": plan.summary}
+    assert sent(transport, "POST", "/reviews") == []
+
+
+async def test_find_check_run_returns_this_apps_check_on_the_head(
+    auth_clock: FixedClock,
+) -> None:
+    def check(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"total_count": 1, "check_runs": [{"id": 777}]})
+
+    publisher, transport = publisher_for(auth_clock, github(check=check))
+
+    found = await publisher.find_check_run(TARGET)
+
+    assert found == ExistingCheckRun(id=777, head_sha=HEAD)
+    [request] = [r for r in transport.requests if "/check-runs" in r.url.path]
+    assert request.method == "GET"
+    assert request.url.path == f"/repos/acme/web/commits/{HEAD}/check-runs"
+    assert dict(request.url.params) == {
+        "check_name": CHECK_RUN_NAME,
+        "filter": "latest",
+        "app_id": "123456",
+    }
+
+
+async def test_find_check_run_is_none_without_one(auth_clock: FixedClock) -> None:
+    def check(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"total_count": 0, "check_runs": []})
+
+    publisher, _ = publisher_for(auth_clock, github(check=check))
+
+    assert await publisher.find_check_run(TARGET) is None

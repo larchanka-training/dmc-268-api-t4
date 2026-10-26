@@ -448,6 +448,10 @@ class ReviewPublisher(Protocol):
         existing_check: ExistingCheckRun | None = None,
     ) -> PublishOutcome: ...
 
+    async def find_check_run(self, target: PullRequestTarget) -> ExistingCheckRun | None:
+        """The bot's check run on the target's head SHA, when an earlier job left one."""
+        ...
+
 
 class JobEventsSource(Protocol):
     """Where the API reads job progress for the SSE stream."""

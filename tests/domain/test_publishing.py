@@ -24,6 +24,7 @@ from domain.publishing import (
     assess_risk,
     at_least,
     build_plan,
+    build_skipped_plan,
     fingerprint,
     fingerprint_in,
 )
@@ -512,3 +513,21 @@ def test_the_summary_with_dismissals_stays_under_the_check_run_cap() -> None:
     )
 
     assert len(plan.summary) <= SUMMARY_MAX_LENGTH < 65_535
+
+
+def test_the_skipped_plan_says_why_and_posts_no_review() -> None:
+    plan = build_skipped_plan(estimated_tokens=58_214, limit=32_000, reviewable_files=59)
+
+    assert plan.conclusion is CheckConclusion.SKIPPED
+    assert plan.verdict is Verdict.SKIPPED
+    assert plan.comments == ()
+    assert plan.needs_review is False
+    assert plan.summary == (
+        "<!-- dmc268:summary -->\n"
+        "## ⏭️ Review skipped: pull request too large\n"
+        "\n"
+        "The review input is about 58,214 tokens; the limit is 32,000.\n"
+        "Reviewable files: 59.\n"
+        "\n"
+        "Split the pull request into smaller ones to get an AI review."
+    )
