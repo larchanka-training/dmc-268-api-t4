@@ -1,7 +1,5 @@
 """Request plumbing: service lookup, the session dependency, CSRF and cookies."""
 
-import logging
-import re
 from dataclasses import dataclass
 from typing import cast
 
@@ -28,7 +26,6 @@ NO_STORE = "no-store"
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 _REQUESTED_WITH = "fetch"
-_CALLBACK_PATH = re.compile(r"^/auth/[^/]+/callback$")
 _WEBHOOK_PREFIX = "/webhooks/"
 
 
@@ -173,25 +170,3 @@ def enforce_csrf(request: Request) -> JSONResponse | None:
     if origin != services(request).settings.app_origin:
         return api_error_response(ApiError(403, "csrf"))
     return None
-
-
-class CallbackQueryLogFilter(logging.Filter):
-    """Drop the query string from access-log lines for the OAuth callback.
-
-    uvicorn logs the full path, and on the callback that contains the
-    authorization code.
-    """
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        args = record.args
-        if not isinstance(args, tuple) or len(args) < 3 or not isinstance(args[2], str):
-            return True
-        full_path = args[2]
-        if "?" not in full_path:
-            return True
-        path = full_path.split("?", 1)[0]
-        if _CALLBACK_PATH.match(path):
-            scrubbed = list(args)
-            scrubbed[2] = path
-            record.args = tuple(scrubbed)
-        return True

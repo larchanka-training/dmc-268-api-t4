@@ -101,7 +101,7 @@ class GitHubIdentityProvider:
             ).get("installations")
             organizations = await self._map_organizations(client, token, user, installations)
         logger.info(
-            "github profile loaded",
+            "identity.profile.loaded",
             extra={"provider": PROVIDER_NAME, "organizations": len(organizations)},
         )
         return Profile(user=user, organizations=organizations)
@@ -199,8 +199,8 @@ class GitHubIdentityProvider:
         )
         if response.status_code in _MEMBERSHIP_UNREADABLE:
             logger.warning(
-                "github membership unreadable",
-                extra={"provider": PROVIDER_NAME, "status": response.status_code},
+                "identity.membership.unreadable",
+                extra={"provider": PROVIDER_NAME, "http.status": response.status_code},
             )
             return None
         body = self._json(response, "/user/memberships/orgs")

@@ -34,6 +34,7 @@ from domain.ports import (
     ReviewRequest,
 )
 from domain.publishing import CheckConclusion, PublishPlan
+from tests.conftest import all_log_text, log_events
 from tests.worker.test_process import (
     DESCRIPTION_SENTINEL,
     DIFF_SENTINEL,
@@ -222,6 +223,32 @@ async def test_a_failed_step_write_does_not_stop_the_review() -> None:
     assert len(publisher.calls) == 1
 
 
+async def test_a_failed_step_write_logs_the_step_and_the_error_class_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = MemoryJobStore()
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
+
+    await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(gateway=FakeGateway(), publisher=FakePublisher()),
+        steps=BrokenStepRecorder(),
+    )
+
+    records = log_events(caplog, "job.step_record.failed")
+    assert [record.step for record in records] == [
+        "CLAIMED",
+        "FETCH_DIFF",
+        "LLM_CALL",
+        "POST_FEEDBACK",
+    ]
+    assert {record.error_type for record in records} == {"ConnectionError"}
+    assert "database restarting" not in all_log_text(caplog)
+
+
 # --- published findings -----------------------------------------------------
 
 
@@ -307,9 +334,9 @@ async def test_a_store_failure_after_posting_still_completes_the_job(
     assert len(publisher.plans) == 1
     stored = await store.get(job_id)
     assert stored is not None and stored.status is ReviewJobStatus.COMPLETED
-    [record] = [r for r in caplog.records if "findings not kept" in r.getMessage()]
-    assert "exc_class=RuntimeError" in record.getMessage()
-    assert "database went away" not in record.getMessage()
+    [record] = log_events(caplog, "job.findings.not_kept")
+    assert record.error_type == "RuntimeError"
+    assert "database went away" not in all_log_text(caplog)
 
 
 class VerifiedGateway(FakeGateway):
@@ -448,10 +475,12 @@ async def test_a_failed_skipped_check_run_still_records_the_job(
     assert done is False
     assert error_kind == "skip_diff_too_large"
     assert len(gateway.requests) == 1
-    [line] = [r.getMessage() for r in caplog.records if "skipped check run" in r.getMessage()]
-    assert "outcome=failed exc_class=ForgeUnavailableError" in line
-    assert "estimated_tokens=58214 limit=32000" in line
-    assert "HTTP 502" not in line
+    [record] = log_events(caplog, "job.skipped_check_run")
+    assert record.levelname == "WARNING"
+    assert record.outcome == "failed"
+    assert record.error_type == "ForgeUnavailableError"
+    assert (record.input_tokens, record.max_input_tokens) == (58214, 32000)
+    assert "HTTP 502" not in all_log_text(caplog)
 
 
 @pytest.mark.parametrize(

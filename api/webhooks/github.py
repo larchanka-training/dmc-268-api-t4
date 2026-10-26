@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 from adapters.github.config import PROVIDER_NAME
 from adapters.github.payload import parse_pull_request_event, reviewable_action
 from adapters.github.signature import SIGNATURE_HEADER, verify_webhook_signature
+from adapters.observability.logging import bind_fields
 from api.deps import ApiError
 from domain.errors import WebhookPayloadError, WebhookSignatureError
 from domain.jobs import clamp_for_storage
@@ -138,6 +139,12 @@ async def receive_github_webhook(request: Request) -> Response:
         # never 200.
         raise ApiError(401, "invalid_signature") from None
 
+    # Routing metadata on every line below; the signature has been verified.
+    delivery_id = request.headers.get(DELIVERY_HEADER)
+    fields: dict[str, object] = {"provider": PROVIDER_NAME, "delivery_id": delivery_id}
+    # And on any Sentry event this request raises, as a tag.
+    bind_fields(delivery_id=delivery_id)
+
     try:
         payload = json.loads(raw)
     except ValueError:
@@ -150,13 +157,19 @@ async def receive_github_webhook(request: Request) -> Response:
     # anything unknown get 204 so GitHub stops redelivering them.
     gh_event = request.headers.get(EVENT_HEADER)
     if gh_event != PULL_REQUEST_EVENT:
-        logger.info("github webhook ignored: event=%s action=%s", gh_event, get_action(payload))
+        logger.info(
+            "webhook.ignored",
+            extra={**fields, "gh_event": gh_event, "action": get_action(payload)},
+        )
         return Response(status_code=204)
 
     if reviewable_action(payload) is None:
         # Step 2 point 5: a non-reviewable action is not an error; it simply
         # does not review.
-        logger.info("github webhook ignored: event=pull_request action=%s", get_action(payload))
+        logger.info(
+            "webhook.ignored",
+            extra={**fields, "gh_event": PULL_REQUEST_EVENT, "action": get_action(payload)},
+        )
         return Response(status_code=204)
 
     try:
@@ -164,24 +177,27 @@ async def receive_github_webhook(request: Request) -> Response:
     except WebhookPayloadError as error:
         # The reason names fields only, never payload content, so it is safe
         # to log; the response keeps the fixed ApiError wire shape.
-        logger.warning("github webhook payload rejected: %s", error.reason)
+        logger.warning("webhook.rejected", extra={**fields, "reason": error.reason})
         raise ApiError(400, "invalid_payload") from None
 
+    bind_fields(installation_id=event.installation_id)
     logger.info(
-        "github webhook accepted: event=pull_request action=%s repo=%s "
-        "pr=%s installation=%s head=%s base=%s",
-        event.action.value,
-        event.repo_full_name,
-        event.pr_number,
-        event.installation_id,
-        event.head_sha[:7],
-        event.base_sha[:7],
+        "webhook.accepted",
+        extra={
+            **fields,
+            "action": event.action.value,
+            "repo": event.repo_full_name,
+            "pr_number": event.pr_number,
+            "installation_id": event.installation_id,
+            "head_sha": event.head_sha[:7],
+            "base_sha": event.base_sha[:7],
+        },
     )
 
     try:
         job = NewReviewJob(
             provider=PROVIDER_NAME,
-            delivery_id=request.headers.get(DELIVERY_HEADER),
+            delivery_id=delivery_id,
             installation_id=event.installation_id,
             repo_id=event.repo_id,
             repo_full_name=event.repo_full_name,
@@ -206,12 +222,26 @@ async def receive_github_webhook(request: Request) -> Response:
     job_id = await deps.jobs.enqueue(job)
     if job_id is None:
         logger.info(
-            "github webhook duplicate delivery: action=%s repo=%s pr=%s",
-            event.action.value,
-            event.repo_full_name,
-            event.pr_number,
+            "webhook.duplicate",
+            extra={
+                **fields,
+                "action": event.action.value,
+                "repo": event.repo_full_name,
+                "pr_number": event.pr_number,
+            },
         )
         return JSONResponse({"status": "duplicate"}, status_code=202)
+    # The delivery id meets the job id here, so one delivery can be followed to its
+    # review (docs/BACKEND_ARCHITECTURE.md § Observability).
+    logger.info(
+        "job.enqueued",
+        extra={
+            **fields,
+            "job_id": job_id,
+            "repo": event.repo_full_name,
+            "pr_number": event.pr_number,
+        },
+    )
 
     if deps.dispatch_inline:
         # Memory dev mode only: the API process claims inline. With the

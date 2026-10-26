@@ -66,7 +66,7 @@ class GitHubInstallationGateway:
                     break
             else:
                 logger.warning(
-                    "repository listing hit the page cap",
+                    "github.repositories.page_cap",
                     extra={
                         "provider": PROVIDER_NAME,
                         "installation_id": installation_id,
@@ -75,7 +75,7 @@ class GitHubInstallationGateway:
                 )
 
         logger.info(
-            "repositories listed",
+            "github.repositories.listed",
             extra={
                 "provider": PROVIDER_NAME,
                 "installation_id": installation_id,

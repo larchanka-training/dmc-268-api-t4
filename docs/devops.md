@@ -60,11 +60,14 @@ VPS у Contabo (Debian 13), /opt/dmc268, docker compose project "dmc268"
 | `AI_DMC268_URL` | org variable | api | → `LLM_PRIMARY_BASE_URL` |
 | `LLM_PRIMARY_MODEL` | repo variable | api | id модели Eurouter, сейчас `qwen3-coder-30b-a3b` (см. «Открытые вопросы»). Если переменную удалить, строка в `.env` не пишется, deploy выдаёт warning |
 | `LLM_PRIMARY_PROVIDER_ORDER` | repo variable | api, llm-smoke | провайдеры Eurouter по порядку, например `scaleway,ovhcloud`. Пусто = маршрутизация Eurouter по умолчанию. Подробности в `docs/llm-gateway.md` |
+| `SENTRY_DSN` | repo secret | api | DSN проекта Sentry → `SENTRY_DSN` в `.env` для api и worker. Без него деплой не стартует (docs/observability.md) |
 | `VPS_DMC268_U`, `VPS_DMC268_P` | org secret | — | root-вход по паролю, используется только в `bootstrap.yml` |
 | `GITHUB_TOKEN` | автоматически | api | push образа в GHCR; на сервере `docker login` → pull → `docker logout` |
 
 `/opt/dmc268/.env` на сервере создаётся из этих значений при каждом деплое: владелец `deploy`,
-права `600`. В образ и в репозиторий секреты не попадают.
+права `600`. В образ и в репозиторий секреты не попадают. Ещё деплой пишет константы:
+`LLM_TIMEOUT_SECONDS=300` (решение 17), `ENV=production` и `LOG_DIR=/logs` (JSON-логи в
+ротируемые файлы `/opt/dmc268/logs`, см. docs/observability.md § Local fallback).
 
 ## Как задеплоить вручную
 

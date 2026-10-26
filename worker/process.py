@@ -26,6 +26,8 @@ from collections.abc import Awaitable
 from dataclasses import dataclass, replace
 from datetime import datetime
 
+from adapters.observability.config import DEFAULT_ENV, read_env
+from adapters.observability.logging import bind_context
 from domain.diff import parse_diff, split_into_chunks
 from domain.diff_filter import filter_files
 from domain.errors import (
@@ -79,13 +81,15 @@ class ReviewStage:
 
 #: Dev-only escape hatch: when "1", the fetched diff text is logged verbatim
 #: after the fetch. This knowingly deviates from AGENTS.md hard rule 3 (raw
-#: diffs are never logged) and is the only place in the codebase that does.
+#: diffs are never logged) and is the only place in the codebase that does,
+#: so it works only in ENV=local (docs/observability.md § What is never
+#: logged); the log allowlist also drops ``diff_text`` everywhere else.
 DEBUG_LOG_DIFF_ENV = "DEBUG_LOG_DIFF"
 
 
 def _debug_log_diff_enabled() -> bool:
     # Read per call, not at import, so tests and operators can flip it.
-    return os.environ.get(DEBUG_LOG_DIFF_ENV, "") == "1"
+    return os.environ.get(DEBUG_LOG_DIFF_ENV, "") == "1" and read_env(os.environ) == DEFAULT_ENV
 
 
 def _clip(value: str, limit: int = 2000) -> str:
@@ -116,12 +120,13 @@ class _Steps:
         self._current = step
         if self._recorder is not None:
             await self._guarded(
+                step,
                 self._recorder.start(
                     self._claimed.job_id,
                     self._claimed.attempt,
                     step,
                     worker_id=self._claimed.worker_id,
-                )
+                ),
             )
 
     async def end(self, status: StepStatus, error_kind: str | None = None) -> None:
@@ -129,6 +134,7 @@ class _Steps:
         if step is None or self._recorder is None:
             return
         await self._guarded(
+            step,
             self._recorder.finish(
                 self._claimed.job_id,
                 self._claimed.attempt,
@@ -136,17 +142,20 @@ class _Steps:
                 status,
                 worker_id=self._claimed.worker_id,
                 error_kind=error_kind,
-            )
+            ),
         )
 
-    async def _guarded(self, write: Awaitable[None]) -> None:
+    async def _guarded(self, step: JobStep, write: Awaitable[None]) -> None:
         try:
             await write
         except Exception as err:
             self._log.error(
-                "review job step record failed: job_id=%s exc_class=%s",
-                self._claimed.job_id,
-                type(err).__name__,
+                "job.step_record.failed",
+                extra={
+                    "job_id": self._claimed.job_id,
+                    "step": str(step),
+                    "error_type": type(err).__name__,
+                },
             )
 
 
@@ -187,8 +196,38 @@ async def process_claimed_job(
     job now), when the run failed terminally (FAILED), or when a retryable
     failure sent it to RETRYING. Unexpected errors — including the store
     raising on a terminal transition — are swallowed: a claimed job has no
-    caller to raise to; only the exception class is logged.
+    caller to raise to. A job that ends FAILED is logged at error with its
+    exception, which is what makes it one Sentry event; the log line itself
+    carries the exception's type and frames, never its message.
+
+    Every line logged and every Sentry event raised during the run carries the
+    job's context (docs/observability.md § Fields).
     """
+    with bind_context(**_bound_fields(claimed)):
+        return await _process(claimed, vcs, jobs, review=review, steps=steps, logger=logger)
+
+
+def _bound_fields(claimed: ClaimedJob) -> dict[str, object]:
+    payload = claimed.payload
+    return {
+        "job_id": claimed.job_id,
+        "installation_id": payload.installation_id,
+        "repo_id": payload.repo_id,
+        "pr_number": payload.pr_number,
+        "head_sha": payload.head_sha,
+        "attempt": claimed.attempt,
+    }
+
+
+async def _process(
+    claimed: ClaimedJob,
+    vcs: GitProvider,
+    jobs: JobRepository,
+    *,
+    review: ReviewStage | None,
+    steps: StepRecorder | None,
+    logger: logging.Logger | None,
+) -> bool:
     log = logger if logger is not None else logging.getLogger(__name__)
     started = time.monotonic()
     job_id = claimed.job_id
@@ -205,12 +244,13 @@ async def process_claimed_job(
             # Logged before parsing on purpose: a diff that fails to parse is
             # exactly the case a developer needs to see.
             log.info(
-                "review job diff (%s=1): job_id=%s repo=%s pr=%s diff_text=%s",
-                DEBUG_LOG_DIFF_ENV,
-                job_id,
-                payload.repo_full_name,
-                payload.pr_number,
-                context.diff_text,
+                "job.diff.debug",
+                extra={
+                    "job_id": job_id,
+                    "repo": payload.repo_full_name,
+                    "pr_number": payload.pr_number,
+                    "diff_text": context.diff_text,
+                },
             )
         files = parse_diff(context.diff_text)
         filtered = filter_files(files)
@@ -219,12 +259,14 @@ async def process_claimed_job(
             f"{entry.path} ({entry.reason.value})" for entry in filtered.skipped
         )
         log.info(
-            "review job files: job_id=%s repo=%s pr=%s reviewable=[%s] skipped=[%s]",
-            job_id,
-            payload.repo_full_name,
-            payload.pr_number,
-            _clip(kept_paths),
-            _clip(skipped_paths),
+            "job.files",
+            extra={
+                "job_id": job_id,
+                "repo": payload.repo_full_name,
+                "pr_number": payload.pr_number,
+                "reviewable_paths": _clip(kept_paths),
+                "skipped_paths": _clip(skipped_paths),
+            },
         )
         stats = JobStats(
             files_total=len(files),
@@ -295,39 +337,52 @@ async def process_claimed_job(
             started,
             error_kind=error_kind,
             retryable=retryable,
-            exc_class=type(err).__name__,
+            error=err,
         )
 
     try:
         completed = await jobs.complete(job_id, stats, worker_id=claimed.worker_id)
     except Exception as err:
         log.error(
-            "review job store error on completion: job_id=%s provider=%s repo=%s "
-            "pr_number=%s exc_class=%s duration_ms=%.0f",
-            job_id,
-            payload.provider,
-            payload.repo_full_name,
-            payload.pr_number,
-            type(err).__name__,
-            (time.monotonic() - started) * 1000,
+            "job.store.failed",
+            extra={
+                **_job_fields(claimed),
+                "stage": "complete",
+                "error_type": type(err).__name__,
+                "duration_ms": _elapsed_ms(started),
+            },
         )
         return False
     if not completed:
         return False
     log.info(
-        "review job completed: job_id=%s provider=%s repo=%s pr_number=%s "
-        "files=%d reviewable=%d hunks=%d chunks=%d duration_ms=%.0f",
-        job_id,
-        payload.provider,
-        payload.repo_full_name,
-        payload.pr_number,
-        stats.files_total,
-        stats.files_reviewable,
-        stats.hunks_total,
-        stats.chunks_total,
-        (time.monotonic() - started) * 1000,
+        "job.finished",
+        extra={
+            **_job_fields(claimed),
+            "outcome": ReviewJobStatus.COMPLETED.value,
+            "files": stats.files_total,
+            "reviewable": stats.files_reviewable,
+            "hunks": stats.hunks_total,
+            "chunks": stats.chunks_total,
+            "duration_ms": _elapsed_ms(started),
+        },
     )
     return True
+
+
+def _job_fields(claimed: ClaimedJob) -> dict[str, object]:
+    """The fields every job event carries."""
+    payload = claimed.payload
+    return {
+        "job_id": claimed.job_id,
+        "provider": payload.provider,
+        "repo": payload.repo_full_name,
+        "pr_number": payload.pr_number,
+    }
+
+
+def _elapsed_ms(started: float) -> int:
+    return round((time.monotonic() - started) * 1000)
 
 
 def _pull_request_target(claimed: ClaimedJob, head_sha: str) -> PullRequestTarget:
@@ -360,26 +415,21 @@ async def _publish_skipped(
         limit=too_large.limit,
         reviewable_files=reviewable_files,
     )
-    outcome, exc_class = "published", "-"
+    fields: dict[str, object] = {
+        **_job_fields(claimed),
+        "input_tokens": too_large.estimated_tokens,
+        "max_input_tokens": too_large.limit,
+    }
     try:
         existing = await publisher.find_check_run(target)
         await publisher.publish(target, plan, existing)
     except Exception as err:
-        outcome, exc_class = "failed", type(err).__name__
-    payload = claimed.payload
-    log.log(
-        logging.INFO if outcome == "published" else logging.WARNING,
-        "review job skipped check run: job_id=%s provider=%s repo=%s pr_number=%s "
-        "estimated_tokens=%d limit=%d outcome=%s exc_class=%s",
-        claimed.job_id,
-        payload.provider,
-        payload.repo_full_name,
-        payload.pr_number,
-        too_large.estimated_tokens,
-        too_large.limit,
-        outcome,
-        exc_class,
-    )
+        log.warning(
+            "job.skipped_check_run",
+            extra={**fields, "outcome": "failed", "error_type": type(err).__name__},
+        )
+        return
+    log.info("job.skipped_check_run", extra={**fields, "outcome": "published"})
 
 
 async def _keep_findings(
@@ -394,16 +444,13 @@ async def _keep_findings(
     try:
         await comments.record(claimed.job_id, findings)
     except Exception as err:
-        payload = claimed.payload
         log.error(
-            "review job findings not kept: job_id=%s provider=%s repo=%s pr_number=%s "
-            "findings=%d exc_class=%s",
-            claimed.job_id,
-            payload.provider,
-            payload.repo_full_name,
-            payload.pr_number,
-            len(findings),
-            type(err).__name__,
+            "job.findings.not_kept",
+            extra={
+                **_job_fields(claimed),
+                "findings": len(findings),
+                "error_type": type(err).__name__,
+            },
         )
 
 
@@ -415,17 +462,18 @@ async def _record_failure(
     *,
     error_kind: str,
     retryable: bool,
-    exc_class: str,
+    error: Exception,
 ) -> bool:
     """Record RETRYING or FAILED with the store, then log which one it was.
 
-    The exception class is logged — never its message, which is safe by
-    construction today but is not guaranteed to stay that way. The store
-    calls are guarded: raising while handling a failure would lose the
-    log-and-stop contract, so a store error is logged (exc_class only) and
-    the function still returns False. A None status means the lease was
-    lost; nothing is logged because the job's new owner logs its own run."""
-    payload = claimed.payload
+    FAILED is logged at error with the exception: one Sentry event per failed
+    job, its message replaced by the error_kind in production
+    (adapters/observability/sentry.py), and in the log line only the type and
+    frames. RETRYING stays at info and is never an event. The store calls are
+    guarded: raising while handling a failure would lose the log-and-stop
+    contract, so a store error is logged (error_type only) and the function
+    still returns False. A None status means the lease was lost; nothing is
+    logged because the job's new owner logs its own run."""
     try:
         status = await jobs.fail(
             claimed.job_id,
@@ -435,31 +483,30 @@ async def _record_failure(
         )
     except Exception as err:
         log.error(
-            "review job store error on failure record: job_id=%s provider=%s repo=%s "
-            "pr_number=%s error_kind=%s exc_class=%s duration_ms=%.0f",
-            claimed.job_id,
-            payload.provider,
-            payload.repo_full_name,
-            payload.pr_number,
-            error_kind,
-            type(err).__name__,
-            (time.monotonic() - started) * 1000,
+            "job.store.failed",
+            extra={
+                **_job_fields(claimed),
+                "stage": "fail",
+                "error_kind": error_kind,
+                "error_type": type(err).__name__,
+                "duration_ms": _elapsed_ms(started),
+            },
         )
         return False
     if status is ReviewJobStatus.RETRYING:
         await _log_retrying(jobs, claimed, log, started, error_kind=error_kind)
         return False
     if status is ReviewJobStatus.FAILED:
-        log.warning(
-            "review job failed: job_id=%s provider=%s repo=%s pr_number=%s "
-            "error_kind=%s exc_class=%s duration_ms=%.0f",
-            claimed.job_id,
-            payload.provider,
-            payload.repo_full_name,
-            payload.pr_number,
-            error_kind,
-            exc_class,
-            (time.monotonic() - started) * 1000,
+        log.error(
+            "job.finished",
+            exc_info=error,
+            extra={
+                **_job_fields(claimed),
+                "outcome": ReviewJobStatus.FAILED.value,
+                "error_kind": error_kind,
+                "error_type": type(error).__name__,
+                "duration_ms": _elapsed_ms(started),
+            },
         )
     return False
 
@@ -476,7 +523,6 @@ async def _log_retrying(
     which computed it with its own clock and rng. A supersede between the
     fail and this read-back leaves the job with no next_attempt_at; it is
     logged as '-'. The read is guarded like every other store call."""
-    payload = claimed.payload
     next_attempt_at: datetime | None = None
     try:
         stored = await jobs.get(claimed.job_id)
@@ -484,25 +530,22 @@ async def _log_retrying(
             next_attempt_at = stored.next_attempt_at
     except Exception as err:
         log.error(
-            "review job store error on retry record: job_id=%s provider=%s repo=%s "
-            "pr_number=%s error_kind=%s exc_class=%s duration_ms=%.0f",
-            claimed.job_id,
-            payload.provider,
-            payload.repo_full_name,
-            payload.pr_number,
-            error_kind,
-            type(err).__name__,
-            (time.monotonic() - started) * 1000,
+            "job.store.failed",
+            extra={
+                **_job_fields(claimed),
+                "stage": "get",
+                "error_kind": error_kind,
+                "error_type": type(err).__name__,
+                "duration_ms": _elapsed_ms(started),
+            },
         )
     log.info(
-        "review job retrying: job_id=%s provider=%s repo=%s pr_number=%s "
-        "error_kind=%s attempt=%d next_attempt_at=%s duration_ms=%.0f",
-        claimed.job_id,
-        payload.provider,
-        payload.repo_full_name,
-        payload.pr_number,
-        error_kind,
-        claimed.attempt + 1,
-        next_attempt_at.isoformat() if next_attempt_at is not None else "-",
-        (time.monotonic() - started) * 1000,
+        "job.retrying",
+        extra={
+            **_job_fields(claimed),
+            "error_kind": error_kind,
+            "attempt": claimed.attempt + 1,
+            "next_attempt_at": next_attempt_at.isoformat() if next_attempt_at else None,
+            "duration_ms": _elapsed_ms(started),
+        },
     )

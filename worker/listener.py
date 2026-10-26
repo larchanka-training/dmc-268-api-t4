@@ -18,6 +18,7 @@ import logging
 import asyncpg  # type: ignore[import-untyped]
 
 from adapters.db.repository import NOTIFY_CHANNEL
+from worker.periodic import ConnectionFactory
 
 #: Pause before reconnecting after a lost or failed connection. The
 #: listener is latency-only, so a fixed 1s pause is always safe.
@@ -25,28 +26,43 @@ RECONNECT_PAUSE_SECONDS = 1.0
 
 
 async def listen_for_jobs(
-    dsn: str, wake: asyncio.Event, *, logger: logging.Logger | None = None
+    dsn: str,
+    wake: asyncio.Event,
+    *,
+    logger: logging.Logger | None = None,
+    connect: ConnectionFactory | None = None,
 ) -> None:
     """Long-running: relay ``NOTIFY review_jobs`` to ``wake.set()``.
 
     Runs until cancelled. Never raises: connection failures are logged
     with the exception class only — the message could echo the DSN, which
     carries credentials (AGENTS.md hard rule 2) — and retried after
-    RECONNECT_PAUSE_SECONDS. Cancellation propagates and closes the
-    connection; correctness never depends on this coroutine at all.
+    RECONNECT_PAUSE_SECONDS. A run of failures logs one warning when it
+    starts and one info when it ends, not one line per retry: the retry
+    runs every second, and the database being down is "Target down"'s alert
+    (docs/observability.md § Levels). Cancellation propagates and closes
+    the connection; correctness never depends on this coroutine at all.
+    ``connect`` is the test seam, as in worker.periodic.
     """
     log = logger if logger is not None else logging.getLogger(__name__)
+    open_connection = connect if connect is not None else asyncpg.connect
+    failing = False
     while True:
         connection = None
         try:
-            connection = await asyncpg.connect(dsn)
+            connection = await open_connection(dsn)
+            if failing:
+                log.info("worker.listener.restored")
+                failing = False
             await _listen_until_lost(connection, wake, log)
             # Reached only when the server dropped the connection.
-            log.warning("job listener connection lost; reconnecting")
+            log.warning("worker.listener.lost")
         except asyncio.CancelledError:
             raise
         except Exception as err:
-            log.error("job listener connection failed: exc_class=%s", type(err).__name__)
+            if not failing:
+                log.warning("worker.listener.failed", extra={"error_type": type(err).__name__})
+                failing = True
         finally:
             if connection is not None:
                 with contextlib.suppress(Exception):
@@ -65,7 +81,7 @@ async def _listen_until_lost(
     lost = asyncio.Event()
     connection.add_termination_listener(lambda _connection: lost.set())
     await connection.add_listener(NOTIFY_CHANNEL, lambda *args: wake.set())
-    log.info("job listener ready: channel=%s", NOTIFY_CHANNEL)
+    log.info("worker.listener.ready", extra={"channel": NOTIFY_CHANNEL})
     # A termination listener fires for loss and for close alike; nothing
     # else closes this connection, so this returns only on loss.
     await lost.wait()

@@ -79,7 +79,7 @@ class GitHubVCSClient:
             installation_id, repo_full_name, number, detail, commits, diff_text
         )
         logger.info(
-            "pull request fetched",
+            "github.pull_request.fetched",
             extra={
                 "provider": PROVIDER_NAME,
                 "installation_id": installation_id,
@@ -89,7 +89,7 @@ class GitHubVCSClient:
                 "commits": len(context.commits),
                 "dropped_commits": dropped_commits,
                 "diff_bytes": len(diff_text.encode("utf-8")),
-                "duration_seconds": round(time.monotonic() - started, 3),
+                "duration_ms": round((time.monotonic() - started) * 1000),
             },
         )
         return context
@@ -130,7 +130,7 @@ class GitHubVCSClient:
             )
         if url is not None:
             logger.warning(
-                "commit listing hit the page cap",
+                "github.commits.page_cap",
                 extra={
                     "provider": PROVIDER_NAME,
                     "pages": MAX_COMMIT_PAGES,

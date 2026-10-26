@@ -42,8 +42,8 @@ inside the image:
 docker compose exec api alembic upgrade head
 ```
 
-Without it the worker logs `claim attempt failed: exc_class=ProgrammingError`
-on every tick and no job is ever processed. Pulling new migrations? Run the
+Without it the worker logs `worker.claim.failed` with `error_type=ProgrammingError`
+(once per claim slot, until the schema exists) and no job is ever processed. Pulling new migrations? Run the
 same command again — `upgrade head` is idempotent.
 
 `docker-compose.yml` is the local stack: it builds from this tree, binds the API and

@@ -1,8 +1,10 @@
 import asyncio
 import hashlib
 import hmac
+import io
 import json
-from collections.abc import AsyncIterator, Callable
+import logging
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,13 +12,20 @@ from typing import Any
 
 import httpx
 import pytest
+import sentry_sdk
+import structlog
 from fastapi.testclient import TestClient
+from sentry_sdk.envelope import Envelope
+from sentry_sdk.transport import Transport
 
 from adapters.jobs.memory import MemoryJobStore
 from adapters.llm.keys import KeyPool
 from adapters.llm.openai_compat import OpenAICompatibleProvider
 from adapters.memory.auth import InMemorySessionStore, InMemorySignInAttemptStore
 from adapters.memory.repositories import InMemoryRepositoriesCache
+from adapters.observability.config import LoggingSettings, SentrySettings
+from adapters.observability.logging import configure_logging
+from adapters.observability.sentry import init_sentry
 from api.config import AppSettings
 from api.main import create_app
 from api.webhooks.github import BACKGROUND_TASKS
@@ -117,6 +126,93 @@ def make_provider(
 @pytest.fixture
 def clock() -> FakeClock:
     return FakeClock()
+
+
+# --- Log helpers (docs/observability.md § Logs) ---------------------------
+
+
+def log_events(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
+    """The captured records of one dotted event; their fields are record attributes."""
+    return [record for record in caplog.records if record.msg == event]
+
+
+@pytest.fixture
+def json_logs() -> Iterator[io.StringIO]:
+    """Every logger's output as production JSON lines in a StringIO. The global
+    logging state (root handlers and level, uvicorn's loggers, structlog) is put
+    back afterwards, so no other test sees it."""
+    root = logging.getLogger()
+    saved_root = (list(root.handlers), root.level)
+    uvicorn = [logging.getLogger(name) for name in ("uvicorn", "uvicorn.error", "uvicorn.access")]
+    saved_uvicorn = [(list(lg.handlers), lg.propagate, lg.disabled) for lg in uvicorn]
+    stream = io.StringIO()
+    configure_logging(LoggingSettings(environment="production"), "test", stream=stream)
+    try:
+        yield stream
+    finally:
+        for handler in list(root.handlers):
+            if handler not in saved_root[0]:
+                root.removeHandler(handler)
+                handler.close()
+        root.setLevel(saved_root[1])
+        for lg, (handlers, propagate, disabled) in zip(uvicorn, saved_uvicorn, strict=True):
+            lg.handlers[:] = handlers
+            lg.propagate = propagate
+            lg.disabled = disabled
+        structlog.reset_defaults()
+
+
+SENTRY_TEST_DSN = "https://public@o0.ingest.sentry.example/0"
+
+
+class CaptureTransport(Transport):
+    """Keeps every envelope instead of sending it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.envelopes: list[Envelope] = []
+
+    def capture_envelope(self, envelope: Envelope) -> None:
+        self.envelopes.append(envelope)
+
+    def payloads(self, kind: str) -> list[dict[str, Any]]:
+        return [
+            item.payload.json
+            for envelope in self.envelopes
+            for item in envelope.items
+            if item.type == kind and item.payload.json is not None
+        ]
+
+    def dump(self) -> str:
+        return json.dumps(self.payloads("event") + self.payloads("transaction"), default=str)
+
+
+@pytest.fixture
+def sentry_capture() -> Iterator[CaptureTransport]:
+    """The real SDK in production mode, its envelopes kept in memory; afterwards
+    the client is replaced by a disabled one, so no other test reports."""
+    transport = CaptureTransport()
+    settings = SentrySettings(dsn=SENTRY_TEST_DSN, environment="production", release="r1")
+    init_sentry(settings, transport=transport)
+    try:
+        yield transport
+    finally:
+        sentry_sdk.flush()
+        sentry_sdk.init(dsn=None, default_integrations=False, auto_enabling_integrations=False)
+
+
+def json_lines(stream: io.StringIO) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in stream.getvalue().splitlines() if line]
+
+
+def all_log_text(caplog: pytest.LogCaptureFixture) -> str:
+    """Every captured record as text, fields included. A "never logged" assertion
+    has to search this, not ``caplog.text``: values travel in ``extra`` fields,
+    which ``caplog.text`` does not show."""
+    return "\n".join(
+        record.getMessage() + " " + " ".join(str(value) for value in record.__dict__.values())
+        for record in caplog.records
+    )
 
 
 # --- Sign-in helpers (spec 001) ------------------------------------------
@@ -422,6 +518,13 @@ def client(
     with TestClient(app, base_url=TEST_ORIGIN) as test_client:
         test_client.sessions = test_client_sessions  # type: ignore[attr-defined]
         yield test_client
+
+
+@pytest.fixture(autouse=True)
+def no_sentry_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hard rule 4: a SENTRY_DSN exported in the shell that runs pytest must not
+    make build_app or the worker entry point send real events."""
+    monkeypatch.delenv("SENTRY_DSN", raising=False)
 
 
 @pytest.fixture(autouse=True)

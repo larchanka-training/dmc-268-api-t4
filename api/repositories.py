@@ -33,7 +33,7 @@ async def list_repositories(
         # A malformed or negative cursor. The value is echoed nowhere.
         raise ApiError(400, "bad_cursor") from None
     except ForgeUnavailableError as failure:
-        logger.warning("repository listing failed", extra={"reason": failure.reason})
+        logger.warning("repositories.list.failed", extra={"reason": failure.reason})
         raise ApiError(502, "forge_unavailable") from None
     return _page_json(page)
 

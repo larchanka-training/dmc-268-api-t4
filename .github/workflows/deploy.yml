@@ -72,6 +72,7 @@ jobs:
           HAS_GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET != '' }}
           HAS_GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY != '' }}
           HAS_GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET != '' }}
+          HAS_SENTRY_DSN: ${{ secrets.SENTRY_DSN != '' }}
         run: |
           set -euo pipefail
           # The site name embeds the server IP: mask it before anything can print it.
@@ -93,6 +94,7 @@ jobs:
           [ "$HAS_GH_CLIENT_SECRET" = true ] || missing+=(secrets.GH_CLIENT_SECRET)
           [ "$HAS_GH_APP_PRIVATE_KEY" = true ] || missing+=(secrets.GH_APP_PRIVATE_KEY)
           [ "$HAS_GH_WEBHOOK_SECRET" = true ] || missing+=(secrets.GH_WEBHOOK_SECRET)
+          [ "$HAS_SENTRY_DSN" = true ] || missing+=(secrets.SENTRY_DSN)
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "**Deploy not started:** missing ${missing[*]}" >> "$GITHUB_STEP_SUMMARY"
             echo "::error::missing ${missing[*]}"
@@ -154,6 +156,7 @@ jobs:
           GITHUB_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
           GITHUB_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
           GITHUB_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: |
           set -euo pipefail
           env_line() { printf '%s=%s\n' "$1" "$(printf '%s' "$2" | tr -d '\r\n')"; }
@@ -163,6 +166,9 @@ jobs:
           ENC_PASSWORD=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=''))" "$POSTGRES_PASSWORD")
           {
             env_line IMAGE_TAG "$IMAGE_TAG"
+            env_line ENV production
+            # Rotated JSON log files on the host volume (docs/observability.md § Local fallback).
+            env_line LOG_DIR /logs
             env_line POSTGRES_USER dmc
             env_line POSTGRES_DB dmc268
             env_line POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
@@ -181,6 +187,7 @@ jobs:
             env_line GITHUB_APP_SLUG             "$GITHUB_APP_SLUG"
             env_line GITHUB_APP_PRIVATE_KEY_PATH $APP_DIR/github-app.pem
             env_line GITHUB_WEBHOOK_SECRET       "$GITHUB_WEBHOOK_SECRET"
+            env_line SENTRY_DSN                  "$SENTRY_DSN"
             if [ -n "$LLM_PRIMARY_MODEL" ]; then env_line LLM_PRIMARY_MODEL "$LLM_PRIMARY_MODEL"; fi
             if [ -n "$LLM_PRIMARY_PROVIDER_ORDER" ]; then env_line LLM_PRIMARY_PROVIDER_ORDER "$LLM_PRIMARY_PROVIDER_ORDER"; fi
           } | ssh deploy-target "umask 077 && cat > $APP_DIR/.env.new && mv $APP_DIR/.env.new $APP_DIR/.env"

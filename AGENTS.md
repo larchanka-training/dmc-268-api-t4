@@ -12,9 +12,9 @@ Target layout: [docs/BACKEND_ARCHITECTURE.md § Planned code layout](docs/BACKEN
 |---|---|---|
 | `docs/`, `SYSTEM_DESIGN.md`, `main.py` | exists | design documents, FastAPI stub |
 | `domain/` | exists | models, ports (`domain/ports.py`), errors; pure Python |
-| `adapters/` | exists (`llm/`, `github/`, `identity/`, `memory/`, `jobs/`, `db/`) | `jobs/` holds the in-memory `JobRepository`; `db/` holds config/models/session/repository (`PostgresJobStore`); `github/publisher.py` posts reviews; `github/contents.py` reads a repository file (rules.md preview); `db/job_events.py` records pipeline steps and reads them back for the SSE stream (`memory/job_events.py` is its in-memory twin for tests); `db/review_comments.py` keeps published findings (`memory/review_comments.py` is its twin); `gitlab/`, `stripe/`, `vault/` planned; tenancy/billing/auth/config tables still planned |
+| `adapters/` | exists (`llm/`, `github/`, `identity/`, `memory/`, `jobs/`, `db/`, `observability/`) | `observability/` sets up JSON logging and Sentry (docs/observability.md); `jobs/` holds the in-memory `JobRepository`; `db/` holds config/models/session/repository (`PostgresJobStore`); `github/publisher.py` posts reviews; `github/contents.py` reads a repository file (rules.md preview); `db/job_events.py` records pipeline steps and reads them back for the SSE stream (`memory/job_events.py` is its in-memory twin for tests); `db/review_comments.py` keeps published findings (`memory/review_comments.py` is its twin); `gitlab/`, `stripe/`, `vault/` planned; tenancy/billing/auth/config tables still planned |
 | `tests/` | exists | pytest suite |
-| `api/` | exists | auth, `/repositories`, `/webhooks/github`, `/jobs`, `/jobs/{id}`, `/jobs/{id}/rules` and the job events stream (`api/jobs.py`), app factory; `/v1` routes planned |
+| `api/` | exists | auth, `/repositories`, `/webhooks/github`, `/jobs`, `/jobs/{id}`, `/jobs/{id}/rules` and the job events stream (`api/jobs.py`), the access log (`api/access_log.py`), app factory; `/v1` routes planned |
 | `worker/` | exists (`process.py` processes one job; `loop.py` claim/LISTEN/poll, `run_worker`; `listener.py` LISTEN; `periodic.py` advisory-lock leader + lease reaper; `config.py`, `__main__.py`) | remaining periodic tasks planned: usage rollover, credential health, retention purge, grace expiry |
 | `ops/` | planned | `replay.py` |
 | `evals/`, `test-prs-dataset/` | exists | LLM eval harness (`python -m evals validate\|run`) and the 29-case gold dataset; see [test-prs-dataset/README.md](test-prs-dataset/README.md) |
@@ -60,6 +60,13 @@ re-export rather than editing it by hand.
 7. Before a commit, all five commands above are green ([docs/specs/llm-gateway.md](docs/specs/llm-gateway.md), PR #8).
 8. Where `docs/BACKEND_ARCHITECTURE.md` and `docs/WORKFLOW_DESIGN.md` disagree on
    behaviour, the workflow document wins ([docs/BACKEND_ARCHITECTURE.md](docs/BACKEND_ARCHITECTURE.md), last line).
+9. A log call is a dotted event name with its values in `extra`, never format arguments or
+   an f-string. A new field goes on `ALLOWED_FIELDS` in `adapters/observability/logging.py`,
+   a new event into the Events table. A field that can hold content (diff, prompt, model
+   reply, PR title or description, file content, a request or response body, a token) never
+   goes on the allowlist: log a count or a length instead
+   ([docs/observability.md § Events, § What is never logged](docs/observability.md);
+   `tests/adapters/test_observability_logging.py` checks every call).
 
 ## Where to read more
 

@@ -86,9 +86,8 @@ class JevRuleScreen:
             response = await self._client.ask_noul(rules_block(rules), _questions(len(rules)))
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning(
-                "rule screen failed (%s), %d rule(s) checked by patterns only",
-                describe_jev_error(exc),
-                len(rules),
+                "llm.rule_screen.failed",
+                extra={"reason": describe_jev_error(exc), "rules": len(rules)},
             )
             return RuleScreenReport(VerificationOutcome.FAILED, unchanged)
         return self._decide(response, rules, time.monotonic() - started)
@@ -107,14 +106,15 @@ class JevRuleScreen:
         dropped = len(rules) - len(kept)
         usage = response.usage or {}
         logger.info(
-            "rule screen model=%s duration=%.2fs kept=%d dropped=%d unanswered=%d "
-            "input_tokens=%s output_tokens=%s",
-            response.model,
-            duration,
-            len(kept),
-            dropped,
-            scores.count(None),
-            usage.get("input_tokens", "n/a"),
-            usage.get("output_tokens", "n/a"),
+            "llm.rule_screen.finished",
+            extra={
+                "model": response.model,
+                "duration_ms": round(duration * 1000),
+                "kept": len(kept),
+                "dropped": dropped,
+                "unanswered": scores.count(None),
+                "input_tokens": usage.get("input_tokens"),
+                "output_tokens": usage.get("output_tokens"),
+            },
         )
         return RuleScreenReport(VerificationOutcome.PASSED, renumber_rules(kept), dropped, scores)

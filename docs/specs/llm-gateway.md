@@ -125,7 +125,9 @@ KeyPool:
 
 Ошибки провайдера → ProviderUnavailableError: таймаут, ошибка соединения, 5xx,
 все ключи в cooldown/выключены. 400/404 (плохая модель, плохой запрос) → тоже
-ProviderUnavailableError с кодом и первыми 200 символами тела (без ключа).
+ProviderUnavailableError с кодом и первыми 200 символами тела (без ключа): код
+в `reason`, тело в `detail`. Тело может повторять запрос, поэтому в лог идёт только
+`reason` (docs/observability.md § What is never logged).
 
 FallbackLLMGateway: пробует провайдеров по порядку; на ProviderUnavailableError или
 LLMOutputError → следующий; все упали → AllProvidersFailedError со списком причин.
@@ -162,8 +164,9 @@ prompt.py кладёт title, description и diff внутрь этих марк
 какой провайдер, какой HTTP-код/причина. Никогда — тело промпта или ключ.
 В лог (logging, logger "adapters.llm"): INFO — провайдер, модель, длительность, число
 findings; WARNING — 429/cooldown ключа (маска ключа), fallback на следующего провайдера,
-число выброшенных finding; ERROR — AllProvidersFailedError. Текст диффа и ответов
-модели в лог не пишется.
+число выброшенных finding, AllProvidersFailedError (событие `llm.call.failed`). Не ERROR:
+воркер повторяет job, а событием Sentry становится только финальный FAILED
+(docs/observability.md § Levels). Текст диффа и ответов модели в лог не пишется.
 </error_handling>
 
 <tests>

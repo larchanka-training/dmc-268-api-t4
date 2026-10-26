@@ -16,6 +16,7 @@ certifi==2026.7.22
     # via
     #   httpcore
     #   httpx
+    #   sentry-sdk
 cffi==2.1.1 ; platform_python_implementation != 'PyPy'
     # via cryptography
 click==8.5.0
@@ -54,12 +55,16 @@ pydantic-core==2.46.5
     # via pydantic
 pyjwt==2.15.1
     # via dmc-268-api-t4
+sentry-sdk==2.73.0
+    # via dmc-268-api-t4
 sqlalchemy==2.1.4
     # via
     #   alembic
     #   dmc-268-api-t4
 starlette==1.7.0
     # via fastapi
+structlog==26.1.0
+    # via dmc-268-api-t4
 typing-extensions==4.16.0
     # via
     #   alembic
@@ -75,5 +80,7 @@ typing-inspection==0.4.4
     # via
     #   fastapi
     #   pydantic
+urllib3==2.8.0
+    # via sentry-sdk
 uvicorn==0.54.0
     # via dmc-268-api-t4

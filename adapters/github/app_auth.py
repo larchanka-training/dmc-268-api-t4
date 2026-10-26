@@ -111,7 +111,7 @@ class GitHubAppAuth:
         if not isinstance(value, str) or not value:
             raise ForgeUnavailableError(PROVIDER_NAME, "token response carried no token")
         logger.info(
-            "installation token minted",
+            "github.token.minted",
             extra={"provider": PROVIDER_NAME, "installation_id": installation_id},
         )
         return InstallationToken(value=value, expires_at=_parse_expiry(expires_at_raw))

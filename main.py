@@ -1,13 +1,11 @@
-import logging
-import os
-
+from adapters.observability.config import LoggingSettings
+from adapters.observability.logging import configure_logging
 from api.main import build_app
 
-# uvicorn configures only its own `uvicorn.*` loggers; without a root handler
-# the application's INFO records (webhook routing decisions, worker stats)
-# never reach the console. basicConfig is a no-op when a real logging config
-# (pytest, `--log-config`) has already installed handlers, so this only
-# affects bare `uvicorn main:app` runs. LOG_LEVEL overrides the default.
-logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
+# uvicorn configures only its own `uvicorn.*` loggers, and before it imports this
+# module: configure_logging gives the root logger JSON handlers (stdout, plus
+# LOG_DIR's rotated file) and routes uvicorn's server logs through them
+# (docs/observability.md § Logs). LOG_LEVEL overrides the default INFO.
+configure_logging(LoggingSettings.from_env(), service="api")
 
 app = build_app()

@@ -7,7 +7,14 @@ from adapters.llm.config import LLMSettings
 from adapters.llm.gateway import FallbackLLMGateway
 from domain.errors import AllProvidersFailedError
 from domain.ports import ReviewRequest
-from tests.conftest import FakeClock, RecordingTransport, make_provider, replies
+from tests.conftest import (
+    FakeClock,
+    RecordingTransport,
+    all_log_text,
+    log_events,
+    make_provider,
+    replies,
+)
 
 KEY_ONE = "sk-test-leakcheck-0000000001"
 KEY_TWO = "sk-test-leakcheck-0000000002"
@@ -37,11 +44,11 @@ async def test_keys_never_appear_in_logs_or_errors(
     ):
         await FallbackLLMGateway([primary, fallback]).review(request)
 
-    rendered = [str(excinfo.value), repr(excinfo.value), caplog.text]
+    rendered = [str(excinfo.value), repr(excinfo.value), all_log_text(caplog)]
     rendered += [str(cause) for cause in excinfo.value.causes]
     for key in ALL_KEYS:
         assert all(key not in text for text in rendered), key
-    assert "sk-…0001" in caplog.text
+    assert "sk-…0001" in [r.key_masked for r in log_events(caplog, "llm.key.rate_limited")]
     assert "sk-…0003" in str(excinfo.value)
 
 
