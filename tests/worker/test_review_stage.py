@@ -6,7 +6,13 @@ import pytest
 
 from adapters.jobs.memory import MemoryJobStore
 from adapters.memory.review_comments import MemoryReviewCommentStore
-from domain.errors import AllProvidersFailedError, ProviderUnavailableError
+from domain.errors import (
+    AllProvidersFailedError,
+    ForgeUnavailableError,
+    LLMInputTooLargeError,
+    LLMOutputError,
+    ProviderUnavailableError,
+)
 from domain.findings import NewPublishedFinding
 from domain.jobs import JobStep, StepStatus
 from domain.models import (
@@ -27,11 +33,13 @@ from domain.ports import (
     ReviewJobStatus,
     ReviewRequest,
 )
-from domain.publishing import PublishPlan
+from domain.publishing import CheckConclusion, PublishPlan
 from tests.worker.test_process import (
+    DESCRIPTION_SENTINEL,
     DIFF_SENTINEL,
     GOOD_DIFF,
     HEAD_SHA,
+    TITLE_SENTINEL,
     FakeGitProvider,
     claim,
     enqueue,
@@ -339,3 +347,150 @@ async def test_the_worker_passes_the_verifier_dismissals_to_the_check_run() -> N
     assert plan.risk is RiskLevel.MEDIUM
     assert "1 possible issue was checked by the verifier and dismissed." in plan.summary
     assert "- Check the redirect targets" in plan.summary
+
+
+class CheckRunForge:
+    """A publisher that keeps one check run per head SHA, like GitHub does for an App."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[tuple[PullRequestTarget, PublishPlan, ExistingCheckRun | None]] = []
+        self.check_runs: dict[str, int] = {}
+        self.updates = 0
+
+    async def find_check_run(self, target: PullRequestTarget) -> ExistingCheckRun | None:
+        check_id = self.check_runs.get(target.head_sha)
+        return None if check_id is None else ExistingCheckRun(check_id, target.head_sha)
+
+    async def publish(
+        self,
+        target: PullRequestTarget,
+        plan: PublishPlan,
+        existing_check: ExistingCheckRun | None = None,
+    ) -> PublishOutcome:
+        self.calls.append((target, plan, existing_check))
+        if self.error is not None:
+            raise self.error
+        if existing_check is not None and existing_check.head_sha == target.head_sha:
+            self.updates += 1
+            check_id = existing_check.id
+        else:
+            check_id = 100 + len(self.check_runs)
+            self.check_runs[target.head_sha] = check_id
+        return PublishOutcome(
+            check_run_id=check_id, check_run_url=None, review_id=None, review_url=None, comments=()
+        )
+
+
+TOO_LARGE = LLMInputTooLargeError(58_214, 32_000)
+
+
+async def run_too_large(
+    publisher: CheckRunForge, delivery_id: str = "d-1"
+) -> tuple[bool, str, FakeGateway]:
+    store = MemoryJobStore()
+    job_id = await enqueue(store, make_payload(delivery_id=delivery_id))
+    claimed = await claim(store)
+    gateway = FakeGateway(error=TOO_LARGE)
+    done = await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(gateway=gateway, publisher=publisher),
+    )
+    stored = await store.get(job_id)
+    assert stored is not None
+    assert stored.status is ReviewJobStatus.FAILED
+    assert stored.error_kind == "skip_diff_too_large"
+    return done, stored.error_kind, gateway
+
+
+async def test_a_pull_request_over_the_budget_gets_a_skipped_check_run() -> None:
+    publisher = CheckRunForge()
+
+    done, _, gateway = await run_too_large(publisher)
+
+    assert done is False
+    assert len(gateway.requests) == 1
+    [(target, plan, existing)] = publisher.calls
+    assert target.head_sha == HEAD_SHA
+    assert existing is None
+    assert plan.conclusion is CheckConclusion.SKIPPED
+    assert plan.comments == ()
+    assert plan.needs_review is False
+    assert "58,214 tokens" in plan.summary
+    assert "32,000" in plan.summary
+    # GOOD_DIFF keeps app/users.py and skips package-lock.json.
+    assert "Reviewable files: 1." in plan.summary
+
+
+async def test_a_second_run_on_the_same_head_updates_the_skipped_check_run() -> None:
+    publisher = CheckRunForge()
+
+    await run_too_large(publisher, delivery_id="d-1")
+    await run_too_large(publisher, delivery_id="d-2")
+
+    assert len(publisher.check_runs) == 1
+    assert publisher.updates == 1
+    (_, _, first), (_, _, second) = publisher.calls
+    assert first is None
+    assert second == ExistingCheckRun(id=publisher.check_runs[HEAD_SHA], head_sha=HEAD_SHA)
+
+
+async def test_a_failed_skipped_check_run_still_records_the_job(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    publisher = CheckRunForge(error=ForgeUnavailableError("github", "POST returned HTTP 502"))
+
+    with caplog.at_level("WARNING"):
+        done, error_kind, gateway = await run_too_large(publisher)
+
+    assert done is False
+    assert error_kind == "skip_diff_too_large"
+    assert len(gateway.requests) == 1
+    [line] = [r.getMessage() for r in caplog.records if "skipped check run" in r.getMessage()]
+    assert "outcome=failed exc_class=ForgeUnavailableError" in line
+    assert "estimated_tokens=58214 limit=32000" in line
+    assert "HTTP 502" not in line
+
+
+@pytest.mark.parametrize(
+    ("error", "diff_text", "error_kind"),
+    [
+        (
+            AllProvidersFailedError([ProviderUnavailableError("p", "down")]),
+            GOOD_DIFF,
+            "provider_unavailable",
+        ),
+        (LLMOutputError("p", "bad"), GOOD_DIFF, "llm_output_invalid"),
+        (None, "this is not a unified diff", "diff_parse_failed"),
+    ],
+)
+async def test_other_failures_publish_nothing(
+    error: Exception | None, diff_text: str, error_kind: str
+) -> None:
+    store = MemoryJobStore()
+    job_id = await enqueue(store, make_payload())
+    claimed = await claim(store)
+    publisher = CheckRunForge()
+
+    await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(diff_text)),
+        store,
+        review=ReviewStage(gateway=FakeGateway(error=error), publisher=publisher),
+    )
+
+    assert publisher.calls == []
+    stored = await store.get(job_id)
+    assert stored is not None and stored.error_kind == error_kind
+
+
+async def test_the_skipped_check_run_carries_no_diff_or_pull_request_text() -> None:
+    publisher = CheckRunForge()
+
+    await run_too_large(publisher)
+
+    [(_, plan, _)] = publisher.calls
+    for sentinel in (DIFF_SENTINEL, TITLE_SENTINEL, DESCRIPTION_SENTINEL, "app/users.py"):
+        assert sentinel not in plan.summary

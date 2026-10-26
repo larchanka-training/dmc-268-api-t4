@@ -65,12 +65,14 @@ class CheckConclusion(StrEnum):
     SUCCESS = "success"
     NEUTRAL = "neutral"
     FAILURE = "failure"
+    SKIPPED = "skipped"
 
 
 class Verdict(StrEnum):
     CLEAN = "clean"
     COMMENTS = "comments"
     CHANGES_REQUESTED = "changes_requested"
+    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +362,43 @@ def build_plan(
         conclusion=conclusion,
         stats=stats,
         risk=risk,
+    )
+
+
+SKIPPED_TOO_LARGE_ADVICE = "Split the pull request into smaller ones to get an AI review."
+
+
+def build_skipped_plan(*, estimated_tokens: int, limit: int, reviewable_files: int) -> PublishPlan:
+    """The Check Run for a pull request over the LLM input budget (issue #55 follow-up).
+
+    Without it the job fails with nothing on the pull request, and the author cannot tell
+    a broken bot from a clean review. Counts only: no path, no diff text.
+    """
+    summary = "\n".join(
+        [
+            SUMMARY_MARKER,
+            "## ⏭️ Review skipped: pull request too large",
+            "",
+            f"The review input is about {estimated_tokens:,} tokens; the limit is {limit:,}.",
+            f"Reviewable files: {reviewable_files}.",
+            "",
+            SKIPPED_TOO_LARGE_ADVICE,
+        ]
+    )
+    return PublishPlan(
+        comments=(),
+        summary=summary,
+        verdict=Verdict.SKIPPED,
+        review_event=ReviewEvent.COMMENT,
+        conclusion=CheckConclusion.SKIPPED,
+        stats=PublishStats(
+            received=0,
+            outside_diff=0,
+            below_threshold=0,
+            already_posted=0,
+            over_limit=0,
+            by_severity={},
+        ),
     )
 
 

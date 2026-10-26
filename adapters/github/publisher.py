@@ -47,6 +47,8 @@ _CHECK_TITLE = {
     "success": "No issues found",
     "neutral": "Issues worth a look",
     "failure": "Changes requested",
+    # The only skip today is a pull request over the LLM input budget (issue #55).
+    "skipped": "Skipped: pull request too large",
 }
 _SIDE = {DiffSide.OLD: "LEFT", DiffSide.NEW: "RIGHT"}
 _REVIEW_COMMENTS_PER_PAGE = 100
@@ -119,6 +121,38 @@ class GitHubReviewPublisher:
             comments=comments,
             inline_fallback=fallback,
         )
+
+    async def find_check_run(self, target: PullRequestTarget) -> ExistingCheckRun | None:
+        """The newest check run of this App named CHECK_RUN_NAME on the head SHA."""
+        token = await self._app_auth.installation_token(target.installation_id)
+        async with httpx.AsyncClient(
+            base_url=self._settings.api_base_url,
+            timeout=self._settings.timeout_seconds,
+            transport=self._transport,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        ) as client:
+            # Another App may name its check the same; PATCHing that one answers 403.
+            params = {
+                "check_name": CHECK_RUN_NAME,
+                "filter": "latest",
+                "app_id": self._settings.app_id,
+            }
+            response = await self._send(
+                client,
+                "GET",
+                f"/repos/{target.owner}/{target.repo}/commits/{target.head_sha}/check-runs",
+                params=params,
+            )
+        runs = _object(response).get("check_runs")
+        for run in runs if isinstance(runs, list) else []:
+            check_id = _int(run.get("id")) if isinstance(run, dict) else None
+            if check_id is not None:
+                return ExistingCheckRun(id=check_id, head_sha=target.head_sha)
+        return None
 
     async def _upsert_check_run(
         self,

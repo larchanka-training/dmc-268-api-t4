@@ -629,6 +629,31 @@ the verifier dismissed findings; …)», «No issues found in this review.», с
 файлов, максимальный risk и первые пункты чеклистов. В режиме `pr` summary, risk и
 checklist приходят из того же единственного вызова.
 
+### Пропуск слишком большого PR
+
+Когда оценка входа больше `LLM_MAX_INPUT_TOKENS`, шлюз бросает `LLMInputTooLargeError` до
+вызова провайдера. Раньше job заканчивался FAILED и на PR не появлялось ничего: автор не мог
+отличить сломанного бота от чистого ревью (живой случай: PR #60, 61 файл, три job без
+следа). Теперь worker (`worker/process.py`, `_publish_skipped`) публикует Check Run
+«AI review» на head SHA:
+
+- conclusion `skipped`, title «Skipped: pull request too large»;
+- summary (`domain.publishing.build_skipped_plan`) — только числа, без путей, diff и
+  заголовка PR:
+
+```
+<!-- dmc268:summary -->
+## ⏭️ Review skipped: pull request too large
+
+The review input is about 58,214 tokens; the limit is 32,000.
+Reviewable files: 59.
+
+Split the pull request into smaller ones to get an AI review.
+```
+
+(числа из фикстуры `tests/domain/test_publishing.py`; лимит — `DEFAULT_MAX_INPUT_TOKENS`).
+Review и inline-комментариев нет (`needs_review` ложно).
+
 ### Решения
 
 1. **`LLM_MAX_TOKENS` по умолчанию 16384.** Обрезанный JSON не чинится повтором, а ответ
@@ -650,3 +675,24 @@ checklist приходят из того же единственного выз�
    её промптом стоили precision или стабильности (таблица выше). Если suggestion важнее,
    следующий шаг — отдельный проход за suggestion только для опубликованных находок, а не
    правка основного промпта.
+8. **Статус job при пропуске — FAILED, `error_kind = skip_diff_too_large`, как раньше.**
+   `ReviewJobStatus.SKIPPED` есть в enum и в CHECK-ограничении, но перехода в него у
+   `JobRepository` нет (только `complete` и `fail`); новый переход потребовал бы правки
+   обоих хранилищ, а миграции и смена статуса в задачу не входят. Дашборды и логи
+   остаются сравнимыми.
+9. **Повторный прогон обновляет Check Run, а не создаёт второй.** Worker не хранит id
+   Check Run, поэтому в порт `ReviewPublisher` добавлен `find_check_run(target)`: GitHub
+   `GET /repos/{owner}/{repo}/commits/{sha}/check-runs?check_name=AI review&filter=latest&app_id=<GITHUB_APP_ID>`
+   (`app_id` всегда: `GITHUB_APP_ID` обязателен, а без него можно PATCH-ить чужой check с тем же именем — это 403). Найденный
+   передаётся в существующий `publish(..., existing_check)`, который делает PATCH.
+   Вызывается **только на пути пропуска**: обычное ревью по-прежнему создаёт новый Check
+   Run на каждом прогоне — это прежнее поведение, его исправление отдельной задачей.
+10. **Публикация пропуска — best effort.** Ошибка `find_check_run` или `publish`
+    (`ForgeUnavailableError` и любая другая) пишется в лог классом исключения, job
+    записывается как без Check Run; LLM повторно не вызывается. Лог одной строкой:
+    `review job skipped check run: job_id=… estimated_tokens=… limit=… outcome=published|failed exc_class=…`
+    (PR #60 со структурными логами ещё не в `main`, поэтому формат прежний).
+11. **Шаг `LLM_CALL` пишется FAILED с `skip_diff_too_large`**, отдельного шага
+    `POST_FEEDBACK` для пропуска нет: публикация идёт внутри обработки ошибки шлюза.
+12. **Title привязан к conclusion `skipped`.** Пропуск сейчас один (слишком большой PR);
+    если появится другой, title придётся брать из плана.
