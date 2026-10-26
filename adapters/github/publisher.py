@@ -135,10 +135,12 @@ class GitHubReviewPublisher:
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         ) as client:
-            params: dict[str, Any] = {"check_name": CHECK_RUN_NAME, "filter": "latest"}
             # Another App may name its check the same; PATCHing that one answers 403.
-            if self._settings.app_id:
-                params["app_id"] = self._settings.app_id
+            params = {
+                "check_name": CHECK_RUN_NAME,
+                "filter": "latest",
+                "app_id": self._settings.app_id,
+            }
             response = await self._send(
                 client,
                 "GET",

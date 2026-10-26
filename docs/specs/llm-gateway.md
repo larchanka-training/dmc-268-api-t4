@@ -683,7 +683,7 @@ Review и inline-комментариев нет (`needs_review` ложно).
 9. **Повторный прогон обновляет Check Run, а не создаёт второй.** Worker не хранит id
    Check Run, поэтому в порт `ReviewPublisher` добавлен `find_check_run(target)`: GitHub
    `GET /repos/{owner}/{repo}/commits/{sha}/check-runs?check_name=AI review&filter=latest&app_id=<GITHUB_APP_ID>`
-   (`app_id` — чтобы не PATCH-ить чужой check с тем же именем, это 403). Найденный
+   (`app_id` всегда: `GITHUB_APP_ID` обязателен, а без него можно PATCH-ить чужой check с тем же именем — это 403). Найденный
    передаётся в существующий `publish(..., existing_check)`, который делает PATCH.
    Вызывается **только на пути пропуска**: обычное ревью по-прежнему создаёт новый Check
    Run на каждом прогоне — это прежнее поведение, его исправление отдельной задачей.
