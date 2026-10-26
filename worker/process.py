@@ -258,6 +258,7 @@ async def process_claimed_job(
                 posted_fingerprints=posted,
                 model_risk=result.risk,
                 checklist=result.checklist,
+                dismissed_by_verifier=result.rejected_by_verifier,
             )
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                 return False

@@ -20,9 +20,8 @@ FINDINGS_END = "<<<END_UNTRUSTED_FINDINGS>>>"
 FILE_REVIEWS_START = "<<<UNTRUSTED_FILE_REVIEWS>>>"
 FILE_REVIEWS_END = "<<<END_UNTRUSTED_FILE_REVIEWS>>>"
 # The executive-summary agent of the per-file scope (issue #55): it reads the per-file
-# results, never the diff.
+# summaries, never the diff and never the findings, which the verifier may still discard.
 SUMMARY_PROMPT = "summary_v1"
-SUMMARY_HEADLINE_MAX_LENGTH = 200
 
 JSON_CORRECTION = (
     "Your previous reply was not valid JSON. Return only the JSON object described in the "
@@ -167,13 +166,12 @@ def build_messages(
 
 @dataclass(frozen=True, slots=True)
 class FileReview:
-    """One file's first-pass result, as the summary agent sees it."""
+    """One file's first-pass summary, as the summary agent sees it."""
 
     path: str
     added: int
     deleted: int
     summary: str
-    findings: tuple[Finding, ...]
 
 
 def _indented(text: str) -> str:
@@ -191,13 +189,6 @@ def file_reviews_block(request: ReviewRequest, reviews: Sequence[FileReview]) ->
     for review in reviews:
         lines.append(f"File {escape_markers(review.path)} (+{review.added} -{review.deleted})")
         lines.extend(["  summary:", _indented(review.summary)])
-        for finding in review.findings:
-            headline = (finding.message.splitlines() or [""])[0][:SUMMARY_HEADLINE_MAX_LENGTH]
-            lines.append(
-                f"  finding line={finding.position.line} severity={finding.severity} "
-                f"category={finding.category}:"
-            )
-            lines.append(_indented(headline))
     lines.append(FILE_REVIEWS_END)
     return "\n".join(lines)
 

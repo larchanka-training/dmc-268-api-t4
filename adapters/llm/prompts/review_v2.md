@@ -32,9 +32,9 @@ release risk; tell the human reviewer what to check.
   gutter out of `message` and `suggestion`.
 - `suggestion`: `{"before": [current lines verbatim], "after": [new lines]}` or `null`.
 - `rule_id`: the repository rule (`R1`, ...) the finding violates, or `null`.
-- `risk` of merging the change: `high` (a critical/high defect, or auth, payments, migrations
-  or concurrency changes), `medium` (a real defect or behaviour change in shared code), `low`
-  (contained or no behaviour change).
+- `risk` of merging the change: `high` (auth, payments, migrations, concurrency, public API
+  or infra changes), `medium` (behaviour change in shared code), `low` (contained or no
+  behaviour change).
 - `checklist`: up to 5 short checks for the human reviewer specific to this change, not
   generic advice; `[]` if none.
 

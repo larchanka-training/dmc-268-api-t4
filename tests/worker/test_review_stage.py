@@ -15,7 +15,9 @@ from domain.models import (
     Finding,
     FindingPosition,
     ReviewResult,
+    RiskLevel,
     Severity,
+    VerificationOutcome,
 )
 from domain.ports import (
     ExistingCheckRun,
@@ -300,3 +302,40 @@ async def test_a_store_failure_after_posting_still_completes_the_job(
     [record] = [r for r in caplog.records if "findings not kept" in r.getMessage()]
     assert "exc_class=RuntimeError" in record.getMessage()
     assert "database went away" not in record.getMessage()
+
+
+class VerifiedGateway(FakeGateway):
+    """The PR #16 shape: the model said High, the verifier dismissed its only finding."""
+
+    async def review(self, request: ReviewRequest) -> ReviewResult:
+        self.requests.append(request)
+        return ReviewResult(
+            summary="Reworks the URL handling.",
+            findings=(),
+            provider="p",
+            model="m",
+            verification=VerificationOutcome.PASSED,
+            rejected_by_verifier=1,
+            risk=RiskLevel.HIGH,
+            checklist=("Check the redirect targets",),
+        )
+
+
+async def test_the_worker_passes_the_verifier_dismissals_to_the_check_run() -> None:
+    store = MemoryJobStore()
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
+    publisher = FakePublisher()
+
+    done = await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(gateway=VerifiedGateway(), publisher=publisher),
+    )
+
+    assert done is True
+    [(_, plan)] = publisher.calls
+    assert plan.risk is RiskLevel.MEDIUM
+    assert "1 possible issue was checked by the verifier and dismissed." in plan.summary
+    assert "- Check the redirect targets" in plan.summary

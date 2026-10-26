@@ -281,7 +281,7 @@ async def test_the_summary_agent_sees_file_notes_but_not_the_diff() -> None:
     user = json.loads(transport.requests[2].content)["messages"][1]["content"]
     assert "+a = 2" not in user and "L1 |" not in user
     assert "File app/a.py (+1 -1)" in user and "File app/b.py (+1 -1)" in user
-    assert "finding line=1 severity=critical category=security:" in user
+    assert "severity=" not in user and "sort parameter" not in user
     assert user.count(FILE_REVIEWS_END) == 1
     assert user.count(UNTRUSTED_END) == 0
 
@@ -383,3 +383,19 @@ def test_the_smoke_renders_the_check_run_summary_the_worker_would_publish() -> N
     assert "Bumps two constants." in summary
     assert "**Risk: High** (the model said Low; the findings set the floor)" in summary
     assert "- Run the tests" in summary
+
+
+@pytest.mark.parametrize("name", ["review_v2", SUMMARY_PROMPT])
+def test_the_risk_rule_rates_the_change_area_not_defects(name: str) -> None:
+    prompt = load_prompt(name)
+    risk_rule = prompt[prompt.index("- `risk`") :].split("\n- ")[0]
+
+    assert "defect" not in risk_rule and "finding" not in risk_rule.replace("findings'", "")
+    assert "auth, payments, migrations, concurrency, public API" in risk_rule
+
+
+def test_the_summary_agent_keeps_defects_out_of_its_summary() -> None:
+    prompt = load_prompt(SUMMARY_PROMPT)
+
+    assert "Mention the most serious finding" not in prompt
+    assert "describe the change, never defects" in prompt

@@ -240,16 +240,44 @@ def risk_floor(findings: Iterable[Finding]) -> RiskLevel:
     return RiskLevel.LOW
 
 
-def assess_risk(model_risk: RiskLevel | None, findings: Iterable[Finding]) -> RiskLevel:
+def assess_risk(
+    model_risk: RiskLevel | None, findings: Iterable[Finding], *, dismissed: int = 0
+) -> RiskLevel:
     """The model's risk, never below what the findings imply; the floor alone without one.
 
     The model sees the whole change and may rate it higher than its findings do, but a
     critical finding must never sit under a "Low" headline (issue #55).
+
+    The model rates the risk before the verifier runs, so it may have counted findings the
+    verifier then dismissed. When the verifier dismissed any (`dismissed` > 0), the model's
+    risk is capped at max(floor, Medium): a dismissed finding can never leave "High" behind
+    on its own, while the change area alone can still justify Medium.
     """
     floor = risk_floor(findings)
     if model_risk is None:
         return floor
-    return max(model_risk, floor, key=RISK_ORDER.index)
+    risk = model_risk
+    if dismissed > 0:
+        cap = max(floor, RiskLevel.MEDIUM, key=RISK_ORDER.index)
+        risk = min(risk, cap, key=RISK_ORDER.index)
+    return max(risk, floor, key=RISK_ORDER.index)
+
+
+DISMISSED_NOTE = "The summary and checklist were written before that check."
+
+
+def dismissed_line(dismissed: int) -> str:
+    """Counts only: the dismissed findings' text is never shown.
+
+    The model writes the summary and checklist before the verifier runs, and a prompt rule
+    keeping defects out of them cost eval precision and recall (issue #55 follow-up), so the
+    Check Run says plainly which came first.
+    """
+    if dismissed == 1:
+        counted = "1 possible issue was checked by the verifier and dismissed."
+    else:
+        counted = f"{dismissed} possible issues were checked by the verifier and dismissed."
+    return f"{counted} {DISMISSED_NOTE}"
 
 
 def build_plan(
@@ -262,6 +290,7 @@ def build_plan(
     redact: Redactor = _no_redaction,
     model_risk: RiskLevel | None = None,
     checklist: tuple[str, ...] = (),
+    dismissed_by_verifier: int = 0,
 ) -> PublishPlan:
     received = tuple(findings)
     in_diff = [finding for finding in received if lines.contains(finding.position)]
@@ -310,7 +339,7 @@ def build_plan(
         over_limit=len(fresh) - len(kept),
         by_severity=dict(Counter(str(finding.severity) for finding in loud_enough)),
     )
-    risk = assess_risk(model_risk, loud_enough)
+    risk = assess_risk(model_risk, loud_enough, dismissed=dismissed_by_verifier)
     summary = render_summary(
         model_summary=model_summary,
         verdict=verdict,
@@ -321,6 +350,7 @@ def build_plan(
         risk=risk,
         model_risk=model_risk,
         checklist=checklist,
+        dismissed=dismissed_by_verifier,
     )
     return PublishPlan(
         comments=comments,
@@ -420,10 +450,15 @@ def render_comment(
 
 def _risk_line(risk: RiskLevel, model_risk: RiskLevel | None) -> str:
     line = f"**Risk: {_RISK_LABEL[risk]}**"
-    if model_risk is not None and model_risk is not risk:
-        return f"{line} (the model said {_RISK_LABEL[model_risk]}; the findings set the floor)"
     if model_risk is None:
         return f"{line} (from the findings' severity)"
+    if RISK_ORDER.index(risk) > RISK_ORDER.index(model_risk):
+        return f"{line} (the model said {_RISK_LABEL[model_risk]}; the findings set the floor)"
+    if RISK_ORDER.index(risk) < RISK_ORDER.index(model_risk):
+        return (
+            f"{line} (the model said {_RISK_LABEL[model_risk]} before the verifier dismissed "
+            "findings; without a published finding to back it, the risk is capped)"
+        )
     return line
 
 
@@ -438,15 +473,18 @@ def render_summary(
     risk: RiskLevel | None = None,
     model_risk: RiskLevel | None = None,
     checklist: tuple[str, ...] = (),
+    dismissed: int = 0,
 ) -> str:
     """The overview: verdict, the model's summary, risk, checklist, risks by severity, files."""
     parts = [SUMMARY_MARKER, f"## {_VERDICT_LABEL[verdict]}", ""]
     if model_summary.strip():
         parts.extend([redact(model_summary.strip()), ""])
-    shown_risk = assess_risk(model_risk, findings) if risk is None else risk
+    shown_risk = assess_risk(model_risk, findings, dismissed=dismissed) if risk is None else risk
     parts.extend([_risk_line(shown_risk, model_risk), ""])
     if not findings:
         parts.extend([NO_ISSUES_LINE, ""])
+    if dismissed > 0:
+        parts.extend([dismissed_line(dismissed), ""])
     if checklist:
         parts.extend(["### Checklist for the reviewer", ""])
         parts.extend(f"- {redact(item)}" for item in checklist)

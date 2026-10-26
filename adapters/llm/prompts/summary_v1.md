@@ -7,11 +7,12 @@ Reply with one JSON object only, no prose or code fences:
  "risk": "low",
  "checklist": ["<check>"]}
 
-- `summary`: the change as a whole, not file by file. Mention the most serious finding if
-  there is one.
-- `risk` of merging: `high` (a critical/high finding, or auth, payments, migrations or
-  concurrency changes), `medium` (a real defect or behaviour change in shared code), `low`
-  (contained or no behaviour change).
+- `summary`, `risk` and `checklist` describe the change, never defects: findings are
+  published separately, and a later check may discard them.
+- `summary`: the change as a whole, not file by file.
+- `risk` of the area the change touches; the findings' severity is added by code: `high`
+  (auth, payments, migrations, concurrency, public API, infra), `medium` (behaviour change in
+  shared code), `low` (contained or no behaviour change).
 - `checklist`: up to 5 short checks for the human reviewer specific to this change, not
   generic advice; `[]` if none.
 

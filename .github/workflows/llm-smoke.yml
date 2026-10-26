@@ -8,6 +8,14 @@ on:
         type: choice
         options: [default, v1, v2]
         default: default
+      fixture:
+        description: Diff to review (negative controls show how the Check Run reads when the verifier dismisses a finding)
+        type: choice
+        options:
+          - tests/fixtures/sql_injection.diff
+          - test-prs-dataset/neg-whitelisted-order-by/change.diff
+          - test-prs-dataset/hold-neg-safe-loaders-and-escaping/change.diff
+        default: tests/fixtures/sql_injection.diff
 
 permissions:
   contents: read
@@ -38,13 +46,14 @@ jobs:
           LLM_TIMEOUT_SECONDS: "300"
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
           LLM_PROMPT_VERSION: ${{ inputs.prompt_version != 'default' && inputs.prompt_version || '' }}
+          FIXTURE: ${{ inputs.fixture || 'tests/fixtures/sql_injection.diff' }}
         run: |
           # GitHub runs steps with bash -e; failures are classified below, so -e is off.
           set +e -uo pipefail
           result="$RUNNER_TEMP/review.json"
           errors="$RUNNER_TEMP/smoke.err"
           # stdout holds the model's findings text: keep it out of the public log and summary.
-          .venv/bin/python -m adapters.llm.smoke tests/fixtures/sql_injection.diff \
+          .venv/bin/python -m adapters.llm.smoke "$FIXTURE" \
             --title "Add a sortable users list" --check-run "$RUNNER_TEMP/check-run.md" \
             >"$result" 2>"$errors"
           status=$?
@@ -81,8 +90,8 @@ jobs:
                   print(f"| {severity} | {category} | {count} |")
           PY
           # The Check Run summary as the worker would publish it, model text masked: headings,
-          # the risk line, the no-issues line and the reviewed paths stay, every other line
-          # becomes its length.
+          # the risk line, the no-issues and dismissed lines and the reviewed paths stay, every
+          # other line becomes its length.
           .venv/bin/python - "$RUNNER_TEMP/check-run.md" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import sys
 
@@ -95,6 +104,8 @@ jobs:
                   print(line)
               elif line.startswith(("**Risk:", "No issues found", "<!--")) or not line.strip():
                   print(line)
+              elif "checked by the verifier and dismissed." in line:
+                  print(line)
               elif section.startswith("### Files reviewed"):
                   print(line)
               else:
@@ -102,7 +113,7 @@ jobs:
           print("```")
           PY
           count=$(.venv/bin/python -c "import json,sys; print(len(json.load(open(sys.argv[1]))['findings']))" "$result")
-          if [ "$count" -eq 0 ]; then
+          if [ "$count" -eq 0 ] && [ "$FIXTURE" = "tests/fixtures/sql_injection.diff" ]; then
             echo "::error::the model returned no findings for a diff with a SQL injection"
             exit 1
           fi
