@@ -330,6 +330,15 @@ _LOG_METHODS = frozenset({"debug", "info", "warning", "error", "exception", "cri
 _LOGGER_NAMES = frozenset({"logger", "log", "_log", "target"})
 _EVENT = re.compile(r"[a-z_]+(?:\.[a-z_]+)+")
 _SPEC = REPO_ROOT / "docs" / "observability.md"
+#: Shown with every failure: whoever reads it (a person or an agent) learns the fix and
+#: the one wrong fix, putting a content field on the allowlist to make the test pass.
+_HOW_TO_FIX = (
+    "Log a dotted event name (job.finished) with its values in extra={...}, never %s "
+    "arguments or an f-string. A new field goes on ALLOWED_FIELDS in "
+    "adapters/observability/logging.py, unless it can hold content (diff, prompt, model "
+    "reply, PR title or description, file content, a request or response body, a token): "
+    "log a count or a length instead. See docs/observability.md § What is never logged."
+)
 
 
 @dataclass(frozen=True)
@@ -417,22 +426,25 @@ def _log_calls(path: Path) -> list[_LogCall]:
 def _problems(call: _LogCall) -> list[str]:
     problems = []
     if not (isinstance(call.event, str) and _EVENT.fullmatch(call.event)):
-        problems.append(f"{call.where}: the message is not a dotted event name")
+        problems.append(f"{call.where}: the message is not a dotted event name (job.finished)")
     if call.format_args:
-        problems.append(f"{call.where}: format arguments; pass fields in extra")
+        problems.append(f"{call.where}: format arguments; pass the values as extra fields")
     allowed = ALLOWED_FIELDS | LOCAL_ONLY_FIELDS
-    problems += [
-        f"{call.where}: field {key!r} is not on the allowlist"
-        for key in call.fields
-        if key not in allowed
-    ]
+    for key in call.fields:
+        if key.startswith("<unresolved"):
+            problems.append(
+                f"{call.where}: extra spreads **{key[len('<unresolved ') : -1]}, which this "
+                "check cannot follow; build the dict in the same module"
+            )
+        elif key not in allowed:
+            problems.append(f"{call.where}: field {key!r} is not on ALLOWED_FIELDS")
     return problems
 
 
 def test_every_log_call_is_a_dotted_event_with_allowlisted_fields() -> None:
     problems = [p for path in _sources() for call in _log_calls(path) for p in _problems(call)]
 
-    assert problems == []
+    assert problems == [], "\n".join([*problems, _HOW_TO_FIX])
 
 
 def test_the_call_site_check_sees_a_bad_call(tmp_path: Path) -> None:
@@ -448,6 +460,20 @@ def test_the_call_site_check_sees_a_bad_call(tmp_path: Path) -> None:
     assert len(_problems(call)) == 3
 
 
+def test_the_call_site_check_names_a_spread_it_cannot_follow(tmp_path: Path) -> None:
+    opaque = tmp_path / "opaque.py"
+    opaque.write_text(
+        "import logging\nlogger = logging.getLogger(__name__)\n"
+        'logger.info("job.done", extra={**fields_from_elsewhere()})\n',
+        "utf-8",
+    )
+
+    [call] = _log_calls(opaque)
+
+    [problem] = _problems(call)
+    assert "extra spreads **fields_from_elsewhere()" in problem
+
+
 def test_the_events_table_in_the_spec_matches_the_code() -> None:
     text = _SPEC.read_text("utf-8")
     section = text[text.index("### Events") : text.index("### What is never logged")]
@@ -455,5 +481,11 @@ def test_the_events_table_in_the_spec_matches_the_code() -> None:
 
     emitted = {call.event for path in _sources() for call in _log_calls(path)}
 
-    assert documented - emitted == set(), "documented but never logged"
-    assert emitted - documented == set(), "logged but missing from the spec's Events table"
+    assert documented - emitted == set(), (
+        "in the Events table of docs/observability.md but never logged: remove the row, "
+        "or rename it if the event was renamed"
+    )
+    assert emitted - documented == set(), (
+        "logged but missing from the Events table of docs/observability.md: add a row "
+        "(event, level, when it is logged, fields)"
+    )

@@ -84,14 +84,14 @@ class GitHubRepositoryContents:
                 await response.aclose()
 
         logger.info(
-            "repository file read",
+            "github.file.read",
             extra={
                 "provider": PROVIDER_NAME,
                 "installation_id": installation_id,
                 "repo": repo_full_name,
                 "found": content is not None,
                 "bytes": 0 if content is None else len(content),
-                "duration_seconds": round(time.monotonic() - started, 3),
+                "duration_ms": round((time.monotonic() - started) * 1000),
             },
         )
         return content

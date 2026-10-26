@@ -128,6 +128,7 @@ def init_sentry(settings: SentrySettings, *, transport: Transport | None = None)
             SqlalchemyIntegration(),
         ],
         traces_sampler=traces_sampler,
+        trace_propagation_targets=[],
         before_send=scrub_event(production=production),
         before_send_transaction=scrub_event(production=production),
         before_breadcrumb=scrub_breadcrumb(production=production),

@@ -29,6 +29,12 @@ Rules come from [AGENTS.md](../../../AGENTS.md) and
   [docs/configuration.md](../../../docs/configuration.md); [docs/llm-gateway.md](../../../docs/llm-gateway.md), PR #8).
 - **Retention.** Raw diffs, prompts and model responses are not stored or logged
   ([docs/BACKEND_ARCHITECTURE.md § Secret redaction](../../../docs/BACKEND_ARCHITECTURE.md)).
+- **Logging.** An addition to `ALLOWED_FIELDS` (`adapters/observability/logging.py`) is a
+  security change: a field that can hold content (diff, prompt, model reply, PR title or
+  description, file content, a request or response body, a token) is a finding even with
+  the tests green, because the allowlist is what keeps it out of production logs; ask for a
+  count or a length instead
+  ([docs/observability.md § What is never logged](../../../docs/observability.md)).
 - **Tests.** New behaviour has tests; no test reaches the network (`httpx.MockTransport`,
   recorded fixtures); no `sleep`, an injected clock instead
   ([docs/BACKEND_ARCHITECTURE.md § Testing strategy](../../../docs/BACKEND_ARCHITECTURE.md);

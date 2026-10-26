@@ -12,6 +12,7 @@ import json
 import logging
 from typing import Any
 
+import httpx
 import pytest
 import sentry_sdk
 from fastapi.testclient import TestClient
@@ -106,6 +107,7 @@ def test_init_turns_off_every_default_that_leaks_data(
     assert options["include_local_variables"] is False
     assert options["max_request_body_size"] == "never"
     assert options["traces_sampler"] is traces_sampler
+    assert options["trace_propagation_targets"] == []
     for hook in ("before_send", "before_send_transaction", "before_breadcrumb"):
         assert callable(options[hook])
 
@@ -308,6 +310,27 @@ def test_production_logging_breadcrumbs_reach_events_without_values(
     crumbs = event["breadcrumbs"]["values"]
     assert crumbs[-1]["message"] == "job.files"
     assert "SECRET-REPO" not in sentry_capture.dump()
+
+
+async def test_outgoing_calls_carry_no_trace_headers_but_keep_their_span(
+    sentry_capture: CaptureTransport,
+) -> None:
+    sent: list[httpx.Headers] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.headers)
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with sentry_sdk.start_transaction(name="job.process", op="queue.task", sampled=True):
+            await client.get("https://api.github.com/repos/acme/app/pulls/1")
+    sentry_sdk.flush()
+
+    [headers] = sent
+    assert "sentry-trace" not in headers
+    assert "baggage" not in headers
+    [transaction] = sentry_capture.payloads("transaction")
+    assert [span["op"] for span in transaction["spans"]] == ["http.client"]
 
 
 def test_api_log_lines_carry_the_request_trace_ids(

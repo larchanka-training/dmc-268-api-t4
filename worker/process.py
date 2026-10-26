@@ -120,12 +120,13 @@ class _Steps:
         self._current = step
         if self._recorder is not None:
             await self._guarded(
+                step,
                 self._recorder.start(
                     self._claimed.job_id,
                     self._claimed.attempt,
                     step,
                     worker_id=self._claimed.worker_id,
-                )
+                ),
             )
 
     async def end(self, status: StepStatus, error_kind: str | None = None) -> None:
@@ -133,6 +134,7 @@ class _Steps:
         if step is None or self._recorder is None:
             return
         await self._guarded(
+            step,
             self._recorder.finish(
                 self._claimed.job_id,
                 self._claimed.attempt,
@@ -140,16 +142,20 @@ class _Steps:
                 status,
                 worker_id=self._claimed.worker_id,
                 error_kind=error_kind,
-            )
+            ),
         )
 
-    async def _guarded(self, write: Awaitable[None]) -> None:
+    async def _guarded(self, step: JobStep, write: Awaitable[None]) -> None:
         try:
             await write
         except Exception as err:
             self._log.error(
                 "job.step_record.failed",
-                extra={"job_id": self._claimed.job_id, "error_type": type(err).__name__},
+                extra={
+                    "job_id": self._claimed.job_id,
+                    "step": str(step),
+                    "error_type": type(err).__name__,
+                },
             )
 
 
@@ -409,26 +415,21 @@ async def _publish_skipped(
         limit=too_large.limit,
         reviewable_files=reviewable_files,
     )
-    outcome, exc_class = "published", "-"
+    fields: dict[str, object] = {
+        **_job_fields(claimed),
+        "input_tokens": too_large.estimated_tokens,
+        "max_input_tokens": too_large.limit,
+    }
     try:
         existing = await publisher.find_check_run(target)
         await publisher.publish(target, plan, existing)
     except Exception as err:
-        outcome, exc_class = "failed", type(err).__name__
-    payload = claimed.payload
-    log.log(
-        logging.INFO if outcome == "published" else logging.WARNING,
-        "review job skipped check run: job_id=%s provider=%s repo=%s pr_number=%s "
-        "estimated_tokens=%d limit=%d outcome=%s exc_class=%s",
-        claimed.job_id,
-        payload.provider,
-        payload.repo_full_name,
-        payload.pr_number,
-        too_large.estimated_tokens,
-        too_large.limit,
-        outcome,
-        exc_class,
-    )
+        log.warning(
+            "job.skipped_check_run",
+            extra={**fields, "outcome": "failed", "error_type": type(err).__name__},
+        )
+        return
+    log.info("job.skipped_check_run", extra={**fields, "outcome": "published"})
 
 
 async def _keep_findings(

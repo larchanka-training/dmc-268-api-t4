@@ -152,7 +152,7 @@ async def read_job_rules(
     except InstallationGoneError:
         raise ApiError(404, "not_found") from None
     except ForgeUnavailableError as failure:
-        logger.warning("rules fetch failed", extra={"reason": failure.reason})
+        logger.warning("rules.read.failed", extra={"job_id": job_id, "reason": failure.reason})
         raise ApiError(502, "forge_unavailable") from None
     if preview is None:
         raise ApiError(404, "not_found")

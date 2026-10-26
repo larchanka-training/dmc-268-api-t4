@@ -66,7 +66,7 @@ ALLOWED_FIELDS = frozenset(
         "http.method", "http.route", "http.status",
         # LLM gateway
         "provider", "model", "input_tokens", "output_tokens", "max_input_tokens",
-        "retries", "findings", "kept", "trimmed", "dropped", "dropped_fields", "cleared",
+        "findings", "kept", "trimmed", "dropped", "dropped_fields", "cleared",
         "unanswered",
         "rules", "next_provider", "screen", "dropped_pattern", "dropped_screen",
         "dropped_over_limit", "key_masked", "cooldown_seconds", "max_tokens",
@@ -76,7 +76,7 @@ ALLOWED_FIELDS = frozenset(
         "result", "user_id", "organizations", "had_session",
         # forge
         "sha", "commits", "dropped_commits", "diff_bytes", "pages", "count",
-        "comments", "inline_fallback", "conclusion",
+        "comments", "inline_fallback", "conclusion", "found", "bytes",
         # webhook
         "gh_event", "action",
         # job and worker

@@ -129,11 +129,11 @@ of `/opt/dmc268/logs`). Produced by `structlog` on top of stdlib `logging`, so e
 | `request_id` | API requests | middleware; echoed as `X-Request-ID` |
 | `delivery_id` | webhooks | `X-GitHub-Delivery` / GitLab event UUID |
 | `job_id`, `installation_id`, `repo_id`, `pr_number`, `head_sha`, `attempt`; `account_id` once tenancy lands | review context | bound once per job via `contextvars`. Jobs carry no `account_id` yet (`adapters/db/models.py:197`), so `installation_id` is the tenant key until then |
-| `step`, `outcome`, `duration_ms` | step events; `outcome` and `duration_ms` also on `job.finished` | the step helper; the worker at the terminal transition |
+| `step`, `outcome`, `duration_ms` | `step` on `job.step_record.failed`; `outcome` on `job.finished` and `job.skipped_check_run`; `duration_ms` on every event that times something | the step helper; the worker at the terminal transition |
 | `error_kind`, `error_type` | errors | `_classify` in `worker/process.py` (the closed vocabulary of [PIPELINE_SPEC.md §4.2](./PIPELINE_SPEC.md); the reaper adds `lease_expired`); exception class name |
 | `result`, `reason`, `user_id`, `organizations`, `had_session` | sign-in events | passed as `extra={…}` in `api/auth.py` and `api/github_setup.py`; lifted into the line by structlog's `ExtraAdder` |
 | `http.method`, `http.route`, `http.status`, `duration_ms` | access log | middleware (replaces uvicorn's access log) |
-| `provider`, `model`, `input_tokens`, `output_tokens`, `retries` | LLM events | gateway |
+| `provider`, `model`, `input_tokens`, `output_tokens` | LLM events | gateway |
 
 `event` is a stable dotted name, never a formatted sentence, so it can be counted and
 alerted on; values travel as fields. Third-party loggers (uvicorn, httpx, …) keep their
@@ -155,6 +155,7 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `auth.session.ended` | info | Logout deleted a session | — |
 | `github.setup.redirect` | info | GitHub sent the browser to the App's setup URL | `had_session` |
 | `repositories.list.failed` | warning | Listing repositories on GitHub failed; the API answers 502 | `reason` |
+| `rules.read.failed` | warning | Reading `.review/rules.md` for the rules preview failed; the API answers 502 | `job_id`, `reason` |
 | `queue.in_memory` | info | The API started without `DATABASE_URL`: dev mode, no worker | — |
 | `webhook.ignored` | info | A verified delivery that is not reviewed: another event, or a non-reviewable action | `delivery_id`, `provider`, `gh_event`, `action` |
 | `webhook.rejected` | warning | A verified `pull_request` payload the parser refused (400) | `delivery_id`, `provider`, `reason` |
@@ -176,13 +177,15 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `job.finished` | info for `COMPLETED`; error for `FAILED`, with the exception (one Sentry event) | The job reached a terminal status | `job_id`, `provider`, `repo`, `pr_number`, `outcome`, `duration_ms`; `files`, `reviewable`, `hunks`, `chunks` when completed; `error_kind`, `error_type` when failed |
 | `job.retrying` | info | A retryable failure; the job waits for its next attempt | `job_id`, `provider`, `repo`, `pr_number`, `error_kind`, `attempt`, `next_attempt_at`, `duration_ms` |
 | `job.store.failed` | error | A store call failed while recording the outcome | `job_id`, `provider`, `repo`, `pr_number`, `stage` (`complete`, `fail`, `get`), `error_kind`, `error_type`, `duration_ms` |
-| `job.step_record.failed` | error | Writing a `pr_review_steps` row failed; the job goes on | `job_id`, `error_type` |
+| `job.skipped_check_run` | info when published; warning when posting failed | The PR is over the input budget: the "skipped" check run says why no review appears | `job_id`, `provider`, `repo`, `pr_number`, `input_tokens` (the estimate), `max_input_tokens`, `outcome` (`published`, `failed`); `error_type` when failed |
+| `job.step_record.failed` | error | Writing a `pr_review_steps` row failed; the job goes on | `job_id`, `step`, `error_type` |
 | `job.findings.not_kept` | error | Findings were posted but not stored | `job_id`, `provider`, `repo`, `pr_number`, `findings`, `error_type` |
 | `github.token.minted` | info | An installation token was minted | `provider`, `installation_id` |
 | `github.pull_request.fetched` | info | PR detail, commits and diff fetched | `provider`, `installation_id`, `repo`, `pr_number`, `sha`, `commits`, `dropped_commits`, `diff_bytes`, `duration_ms` |
 | `github.commits.page_cap` | warning | The commit listing stopped at the page cap | `provider`, `pages`, `commits` |
 | `github.repositories.listed` | info | An installation's repositories were listed | `provider`, `installation_id`, `count` |
 | `github.repositories.page_cap` | warning | The repository listing stopped at the page cap | `provider`, `installation_id`, `pages` |
+| `github.file.read` | info | A repository file was read (the rules preview); never its content | `provider`, `installation_id`, `repo`, `found`, `bytes`, `duration_ms` |
 | `github.review.published` | info | The review was posted | `provider`, `installation_id`, `comments`, `inline_fallback`, `conclusion` |
 | `github.review.inline_rejected` | warning | GitHub refused the inline comments (422); they go into the review body | `provider`, `comments` |
 | `identity.profile.loaded` | info | Sign-in loaded the GitHub profile | `provider`, `organizations` |
@@ -560,6 +563,7 @@ written down once.
 | `max_request_body_size` | `"never"` | Webhook bodies carry PR titles and descriptions: untrusted and customer data |
 | `include_local_variables` | `False` | Stack frames would otherwise ship diffs and prompts held in locals |
 | Integrations | auto-enabling off; Starlette, FastAPI, httpx and SQLAlchemy listed (plus the SDK's defaults, logging among them) | Sentry's OpenAI/Anthropic integrations record prompts and replies by default. We call providers over raw `httpx` today; with auto-enabling off no LLM SDK integration can switch itself on if an SDK appears |
+| `trace_propagation_targets` | `[]` | The SDK's default adds `sentry-trace` and `baggage` to every outgoing request, and `baggage` names the environment, release and transaction. GitHub, the LLM providers and TypeSafe do not report to our Sentry, so the headers could not link a trace anyway. The httpx spans are still recorded. Neither trace link above uses an outgoing request: the frontend's calls are incoming, and webhook → worker goes through `trace_context`. A service of ours behind HTTP that reports to Sentry would need its URL listed here |
 | `before_send` / `before_send_transaction` | redaction of every string; the request keeps its URL and allowlisted headers (no query string, body or cookies); tags from the bound log context (`installation_id`, `job_id`, `delivery_id`, `request_id`, `error_kind`); in production the `value` of every entry in `exception.values` (the whole chain, not only the last) is replaced by the `error_kind` (empty when there is none; the type stays), `logentry.formatted` and `params` are dropped, and `extra` keeps only the log allowlist | Same rules as the logs. Redaction catches secrets, not content: a pydantic `input_value=` fragment of a model reply would otherwise become the issue title and travel on to email and Telegram |
 | `before_breadcrumb` | drop `message`/`data` from `logging` breadcrumbs in production, keep logger, level and the format string | Sentry's logging integration reads stdlib records directly and formats them with their arguments, bypassing the structlog processors |
 | `environment`, `release` | `ENV`, `IMAGE_TAG` | Errors grouped per deploy |
