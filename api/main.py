@@ -18,11 +18,13 @@ from adapters.db.review_comments import PostgresReviewCommentStore
 from adapters.db.session import build_engine
 from adapters.github.app_auth import GitHubAppAuth
 from adapters.github.config import GitHubAppSettings
+from adapters.github.contents import GitHubRepositoryContents
 from adapters.github.factory import build_vcs_client
 from adapters.github.installation import GitHubInstallationGateway
 from adapters.identity.config import GitHubIdentitySettings
 from adapters.identity.github import GitHubIdentityProvider
 from adapters.jobs.memory import MemoryJobStore
+from adapters.llm.rules import MarkdownRulesParser
 from adapters.memory.auth import InMemorySessionStore, InMemorySignInAttemptStore
 from adapters.memory.job_events import InMemoryJobEventsSource
 from adapters.memory.repositories import InMemoryRepositoriesCache
@@ -54,6 +56,7 @@ from domain.ports import (
     SignInAttemptStore,
 )
 from domain.repositories import RepositoriesService
+from domain.repository_rules import JobRulesService
 
 Next = Callable[[Request], Awaitable[Response]]
 
@@ -95,6 +98,7 @@ def create_app(
     engine: AsyncEngine | None = None,
     job_events: JobEventsSource | None = None,
     findings: ReviewCommentStore | None = None,
+    job_rules: JobRulesService | None = None,
 ) -> FastAPI:
     app = FastAPI(title="DMC-268 API", version="0.1.0", lifespan=_engine_lifespan(engine))
     app.state.services = Services(
@@ -108,6 +112,7 @@ def create_app(
         job_events=job_events if job_events is not None else InMemoryJobEventsSource(),
         jobs=jobs,
         findings=findings if findings is not None else MemoryReviewCommentStore(jobs),
+        job_rules=job_rules,
     )
     app.state.webhooks = GitHubWebhookDeps(
         jobs=jobs,
@@ -205,4 +210,9 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             InMemoryJobEventsSource() if engine is None else PostgresJobEventsSource(engine)
         ),
         findings=None if engine is None else PostgresReviewCommentStore(engine),
+        job_rules=JobRulesService(
+            jobs=jobs,
+            contents=GitHubRepositoryContents(app_settings, app_auth, transport=transport),
+            parser=MarkdownRulesParser(),
+        ),
     )

@@ -380,7 +380,7 @@ def _log_reason(error: LLMGatewayError) -> str:
 
 
 def file_review(part: ReviewRequest, result: ReviewResult) -> FileReview:
-    """What the summary agent learns about one file: path, size of the change, the result."""
+    """What the summary agent learns about one file: path, size of the change, its summary."""
     try:
         files = parse_diff(part.diff_text)
     except DiffFormatError:
@@ -391,7 +391,6 @@ def file_review(part: ReviewRequest, result: ReviewResult) -> FileReview:
         added=sum(line.kind is DiffLineKind.ADDED for line in lines),
         deleted=sum(line.kind is DiffLineKind.DELETED for line in lines),
         summary=result.summary,
-        findings=result.findings,
     )
 
 

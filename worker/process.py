@@ -55,7 +55,13 @@ from domain.ports import (
     ReviewRequest,
     StepRecorder,
 )
-from domain.publishing import DEFAULT_POLICY, CommentableLines, PublishPolicy, build_plan
+from domain.publishing import (
+    DEFAULT_POLICY,
+    CommentableLines,
+    PublishPolicy,
+    build_plan,
+    build_skipped_plan,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,13 +275,22 @@ async def _process(
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                 return False
             await progress.begin(JobStep.LLM_CALL)
-            result = await review.gateway.review(
-                ReviewRequest(
-                    diff_text=context.diff_text,
-                    pr_title=context.title,
-                    pr_description=context.description,
+            target = _pull_request_target(claimed, context.head_sha)
+            try:
+                result = await review.gateway.review(
+                    ReviewRequest(
+                        diff_text=context.diff_text,
+                        pr_title=context.title,
+                        pr_description=context.description,
+                    )
                 )
-            )
+            except LLMInputTooLargeError as too_large:
+                # The job still fails as skip_diff_too_large below; the check run only
+                # tells the author why nothing else appears.
+                await _publish_skipped(
+                    review.publisher, target, too_large, len(filtered.kept), claimed, log
+                )
+                raise
             posted = (
                 frozenset()
                 if review.comments is None
@@ -294,21 +309,12 @@ async def _process(
                 posted_fingerprints=posted,
                 model_risk=result.risk,
                 checklist=result.checklist,
+                dismissed_by_verifier=result.rejected_by_verifier,
             )
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                 return False
             await progress.begin(JobStep.POST_FEEDBACK)
-            owner, repo = payload.repo_full_name.split("/", 1)
-            outcome = await review.publisher.publish(
-                PullRequestTarget(
-                    installation_id=payload.installation_id,
-                    owner=owner,
-                    repo=repo,
-                    number=payload.pr_number,
-                    head_sha=context.head_sha,
-                ),
-                plan,
-            )
+            outcome = await review.publisher.publish(target, plan)
             stats = replace(stats, findings_published=len(outcome.comments))
             if review.comments is not None:
                 await _keep_findings(
@@ -371,6 +377,58 @@ def _job_fields(claimed: ClaimedJob) -> dict[str, object]:
 
 def _elapsed_ms(started: float) -> int:
     return round((time.monotonic() - started) * 1000)
+
+
+def _pull_request_target(claimed: ClaimedJob, head_sha: str) -> PullRequestTarget:
+    payload = claimed.payload
+    owner, repo = payload.repo_full_name.split("/", 1)
+    return PullRequestTarget(
+        installation_id=payload.installation_id,
+        owner=owner,
+        repo=repo,
+        number=payload.pr_number,
+        head_sha=head_sha,
+    )
+
+
+async def _publish_skipped(
+    publisher: ReviewPublisher,
+    target: PullRequestTarget,
+    too_large: LLMInputTooLargeError,
+    reviewable_files: int,
+    claimed: ClaimedJob,
+    log: logging.Logger,
+) -> None:
+    """Post the "skipped" check run, updating the one an earlier run left on this SHA.
+
+    Best effort: a failure is logged (exception class only) and the job is recorded as it
+    would be without the check run. The LLM is never called again for this job.
+    """
+    plan = build_skipped_plan(
+        estimated_tokens=too_large.estimated_tokens,
+        limit=too_large.limit,
+        reviewable_files=reviewable_files,
+    )
+    outcome, exc_class = "published", "-"
+    try:
+        existing = await publisher.find_check_run(target)
+        await publisher.publish(target, plan, existing)
+    except Exception as err:
+        outcome, exc_class = "failed", type(err).__name__
+    payload = claimed.payload
+    log.log(
+        logging.INFO if outcome == "published" else logging.WARNING,
+        "review job skipped check run: job_id=%s provider=%s repo=%s pr_number=%s "
+        "estimated_tokens=%d limit=%d outcome=%s exc_class=%s",
+        claimed.job_id,
+        payload.provider,
+        payload.repo_full_name,
+        payload.pr_number,
+        too_large.estimated_tokens,
+        too_large.limit,
+        outcome,
+        exc_class,
+    )
 
 
 async def _keep_findings(

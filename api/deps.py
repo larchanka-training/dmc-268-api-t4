@@ -18,6 +18,7 @@ from domain.ports import (
     SignInAttemptStore,
 )
 from domain.repositories import RepositoriesService
+from domain.repository_rules import JobRulesService
 
 SESSION_COOKIE = "__Host-session"
 OAUTH_COOKIE = "__Host-oauth"
@@ -59,6 +60,8 @@ class Services:
     job_events: JobEventsSource
     jobs: JobHistory
     findings: ReviewCommentStore
+    # None only in tests that do not wire the forge; the rules route answers 502.
+    job_rules: JobRulesService | None = None
 
 
 def services(request: Request) -> Services:

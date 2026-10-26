@@ -24,6 +24,7 @@ from domain.publishing import (
     assess_risk,
     at_least,
     build_plan,
+    build_skipped_plan,
     fingerprint,
     fingerprint_in,
 )
@@ -405,3 +406,128 @@ def test_the_summary_stays_under_the_check_run_cap_with_a_long_model_summary() -
 
     assert len(plan.summary) <= SUMMARY_MAX_LENGTH < 65_535
     assert plan.summary.startswith(SUMMARY_MARKER)
+
+
+# --- Risk after the verifier (follow-up to issue #55) ------------------------
+
+
+def test_a_high_model_risk_is_capped_when_the_verifier_dismissed_the_only_finding() -> None:
+    plan = build_plan(
+        [],
+        model_summary="Reworks the URL handling.",
+        lines=lines(),
+        model_risk=RiskLevel.HIGH,
+        dismissed_by_verifier=1,
+    )
+
+    assert plan.risk is RiskLevel.MEDIUM
+    assert "**Risk: Medium** (the model said High before the verifier dismissed" in plan.summary
+    assert "the risk is capped" in plan.summary
+    assert "1 possible issue was checked by the verifier and dismissed." in plan.summary
+    assert "written before that check" in plan.summary
+    assert NO_ISSUES_LINE in plan.summary
+
+
+def test_a_published_critical_finding_keeps_high_after_dismissals() -> None:
+    plan = build_plan(
+        [finding(severity=Severity.CRITICAL)],
+        model_summary="",
+        lines=lines(),
+        model_risk=RiskLevel.HIGH,
+        dismissed_by_verifier=1,
+    )
+
+    assert plan.risk is RiskLevel.HIGH
+    assert "**Risk: High**\n" in plan.summary
+    assert "1 possible issue was checked" in plan.summary
+
+
+def test_a_high_risk_from_the_change_area_stays_when_nothing_was_dismissed() -> None:
+    plan = build_plan(
+        [], model_summary="Adds a migration.", lines=lines(), model_risk=RiskLevel.HIGH
+    )
+
+    assert plan.risk is RiskLevel.HIGH
+    assert "**Risk: High**\n" in plan.summary
+    assert "checked by the verifier" not in plan.summary
+
+
+@pytest.mark.parametrize(
+    ("model_risk", "severities", "dismissed", "expected"),
+    [
+        (RiskLevel.HIGH, (), 2, RiskLevel.MEDIUM),
+        (RiskLevel.HIGH, (Severity.HIGH,), 1, RiskLevel.MEDIUM),
+        (RiskLevel.MEDIUM, (), 1, RiskLevel.MEDIUM),
+        (RiskLevel.LOW, (), 3, RiskLevel.LOW),
+        (RiskLevel.LOW, (Severity.CRITICAL,), 1, RiskLevel.HIGH),
+        (None, (), 1, RiskLevel.LOW),
+    ],
+)
+def test_the_verifier_cap_never_goes_below_medium_or_the_floor(
+    model_risk: RiskLevel | None,
+    severities: tuple[Severity, ...],
+    dismissed: int,
+    expected: RiskLevel,
+) -> None:
+    findings = [finding(severity=severity) for severity in severities]
+
+    assert assess_risk(model_risk, findings, dismissed=dismissed) is expected
+
+
+@pytest.mark.parametrize("model_risk", [RiskLevel.HIGH, RiskLevel.MEDIUM, RiskLevel.LOW, None])
+def test_without_dismissals_the_risk_is_exactly_as_before(model_risk: RiskLevel | None) -> None:
+    # A failed or disabled verifier dismisses nothing (rejected_by_verifier stays 0).
+    findings = [finding(severity=Severity.HIGH)]
+
+    with_zero = build_plan(
+        findings, model_summary="", lines=lines(), model_risk=model_risk, dismissed_by_verifier=0
+    )
+    default = build_plan(findings, model_summary="", lines=lines(), model_risk=model_risk)
+
+    assert with_zero.summary == default.summary
+    assert with_zero.risk is assess_risk(model_risk, findings)
+    assert "checked by the verifier" not in with_zero.summary
+
+
+def test_no_findings_and_nothing_dismissed_shows_no_issues_and_no_dismissed_line() -> None:
+    plan = build_plan([], model_summary="", lines=lines())
+
+    assert NO_ISSUES_LINE in plan.summary
+    assert "checked by the verifier" not in plan.summary
+
+
+def test_the_dismissed_line_counts_in_the_plural() -> None:
+    plan = build_plan([], model_summary="", lines=lines(), dismissed_by_verifier=3)
+
+    assert "3 possible issues were checked by the verifier and dismissed." in plan.summary
+
+
+def test_the_summary_with_dismissals_stays_under_the_check_run_cap() -> None:
+    plan = build_plan(
+        [finding()],
+        model_summary="word " * 50_000,
+        lines=lines(),
+        model_risk=RiskLevel.HIGH,
+        checklist=tuple("x" * 200 for _ in range(5)),
+        dismissed_by_verifier=49,
+    )
+
+    assert len(plan.summary) <= SUMMARY_MAX_LENGTH < 65_535
+
+
+def test_the_skipped_plan_says_why_and_posts_no_review() -> None:
+    plan = build_skipped_plan(estimated_tokens=58_214, limit=32_000, reviewable_files=59)
+
+    assert plan.conclusion is CheckConclusion.SKIPPED
+    assert plan.verdict is Verdict.SKIPPED
+    assert plan.comments == ()
+    assert plan.needs_review is False
+    assert plan.summary == (
+        "<!-- dmc268:summary -->\n"
+        "## ⏭️ Review skipped: pull request too large\n"
+        "\n"
+        "The review input is about 58,214 tokens; the limit is 32,000.\n"
+        "Reviewable files: 59.\n"
+        "\n"
+        "Split the pull request into smaller ones to get an AI review."
+    )

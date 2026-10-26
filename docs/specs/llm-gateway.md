@@ -550,17 +550,112 @@ risk, — «from the findings' severity». Граница считается п�
 фильтры публикации (в diff, не ниже `min_severity`), включая уже опубликованные раньше:
 вердикт тоже относится к PR целиком.
 
+### Summary и risk после верификатора
+
+Summary, risk и checklist модель пишет в том же ответе, что и находки, то есть до JEV.
+После деплоя PR #58 это дало противоречивые Check Run: в UI PR #16 модель нашла одну
+находку, JEV её отбросил (`kept=0 dropped=1`), а в Check Run остались «A critical issue
+exists in the URL handling logic…», «Risk: High» и «No issues found in this review.»; в API
+PR #59 — «Risk: Medium» без находок. Исправление из трёх частей:
+
+1. **Промпт.** В `review_v2.md` правило risk оценивает область изменения (auth, payments,
+   migrations, concurrency, public API, infra, общий код) и больше не упоминает дефекты
+   («a critical/high defect», «a real defect» убраны): severity находок к риску добавляет
+   код (`risk_floor`). Формулировка summary («what changed and why it matters») и чеклиста
+   осталась как на `main`, разделы «Repository rules» и «Untrusted input» не менялись.
+   `summary_v1.md` (агент режима `file`) просит summary, risk и checklist только об изменении
+   и больше не получает находки: агент работает до верификатора и сам находок не выдаёт.
+
+   Явное правило «summary и checklist — без дефектов» в `review_v2.md` проверено и
+   отклонено: оно ухудшало сами находки. Tuning P / R, по 2 прогона на вариант, в одном
+   временном окне с контролем `main`:
+
+   | Вариант `review_v2.md` | Прогоны | P | R |
+   |---|---|---|---|
+   | `main` (контроль), 4 прогона | [40153381365](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40153381365), [40164546140](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40164546140), [40164922621](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40164922621), [40165230039](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40165230039) | 65.2% | 69.1% |
+   | «summary, risk, checklist describe the change, never defects … a later check may discard them» + risk по области + новый плейсхолдер summary | [40153720865](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40153720865), [40153860466](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40153860466) | 56.4% | 61.9% |
+   | то же без «a later check may discard them» | [40154024125](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40154024125), [40154443316](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40154443316) | 60.1% | 64.3% |
+   | `findings` первыми в примере ответа | [40154146051](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40154146051), [40154568036](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40154568036) | 69.1% | 69.1% |
+   | только risk по области + плейсхолдер «what the change does and why» | [40155408659](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40155408659), [40164121830](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40164121830) | 58.5% | 57.2% |
+   | то же + «summary: what the change does and why; findings are listed separately» | [40155673287](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40155673287), [40164407212](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40164407212) | 57.1% | 59.5% |
+   | **итог: только risk по области, summary как на `main`** | [40165090569](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40165090569), [40165560735](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40165560735), [40166572148](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40166572148) | **68.8%** | **69.8%** |
+
+   Вариант с `findings` первыми отклонён по стабильности: модель часто не дописывала
+   `summary` (4 кейса schema-invalid в одном прогоне) и дважды зацикливалась до 16384
+   токенов. Вероятное объяснение остальных провалов: summary идёт в ответе перед находками
+   и служит модели рассуждением о рисках изменения; запрет писать в нём о дефектах или
+   замена «why it matters» это рассуждение убирают. Модель в этот день дрейфовала: контроль
+   `main` на 6.8 / 3.5 пункта ниже итога PR #58 (72.0% / 72.6%). Итоговый вариант на 3.2 /
+   2.8 пункта ниже итога PR #58 и не ниже контроля того же дня.
+
+   Поскольку summary может по-прежнему назвать дефект, который JEV потом отбросит, это
+   закрывает строка из пункта 3: она говорит, что summary и чеклист написаны до проверки.
+2. **Страховка в коде (`assess_risk`, `dismissed`).** Если верификатор отбросил хотя бы
+   одну находку (`ReviewResult.rejected_by_verifier > 0`), risk модели ограничивается
+   сверху значением max(нижняя граница по опубликованным находкам, Medium), а нижняя
+   граница действует как раньше:
+
+   | Risk модели | Отброшено JEV | Опубликовано | Показывается |
+   |---|---|---|---|
+   | High | 1 | ничего | Medium, «the model said High before the verifier dismissed findings; … capped» |
+   | High | 1 | critical | High |
+   | High | 1 | high | Medium |
+   | High | 0 | ничего | High (область изменения, например миграция) |
+   | Low | ≥1 | ничего | Low |
+
+   Почему Medium, а не нижняя граница: модель могла поставить High и за область изменения
+   (миграции, auth), а не только за находку. Отличить одно от другого код не может, поэтому
+   Medium — компромисс: отброшенная находка сама по себе не оставляет High, но и честно
+   рискованная область не падает до Low.
+3. **Прозрачность.** При `rejected_by_verifier > 0` в Check Run после строки risk (и после
+   «No issues found…», если находок нет) добавляется строка «1 possible issue was checked by
+   the verifier and dismissed. The summary and checklist were written before that check.»
+   (во множественном числе «N possible issues were …»). Только число, без текста находок.
+
+Верификатор упал, выключен или пропущен — `rejected_by_verifier` равен 0, Check Run такой
+же, как до этого изменения. Модель не дала risk — показывается нижняя граница, как раньше.
+Сам текст summary код не проверяет. Живая проверка: [llm-smoke 40166887696](https://github.com/larchanka-training/dmc-268-api-t4/actions/runs/40166887696)
+на негативном контроле `neg-whitelisted-order-by` — модель нашла 1 находку и поставила High,
+JEV её отбросил (`kept=0 dropped=1`), Check Run: «Risk: Medium (the model said High before
+the verifier dismissed findings; …)», «No issues found in this review.», строка об 1
+отброшенной находке.
+
 ### Режим «вызов на файл» и summary-агент
 
 `LLM_REVIEW_SCOPE=file`: diff режется по `diff --git` (`domain.diff.split_by_file`),
 каждый файл ревьюится своим вызовом (не больше 4 одновременно), находки склеиваются.
 Файл, чей вызов упал, пропускается с WARNING; если упали все, ревью падает как раньше.
 Затем один вызов summary-агента (`prompts/summary_v1.md`): ему уходят заголовок и
-описание PR, для каждого файла путь, `+N -M`, summary файла и первая строка каждой
-находки, всё внутри `<<<UNTRUSTED_FILE_REVIEWS>>>`, свободный текст с отступом. Diff
-агент не видит. Если агент не ответил или ответ невалиден, публикуются склеенные summary
+описание PR, для каждого файла путь, `+N -M` и summary файла, всё внутри
+`<<<UNTRUSTED_FILE_REVIEWS>>>`, свободный текст с отступом. Ни diff, ни находки агент не
+видит: он работает до верификатора, а находки тот ещё может отбросить. Если агент не ответил или ответ невалиден, публикуются склеенные summary
 файлов, максимальный risk и первые пункты чеклистов. В режиме `pr` summary, risk и
 checklist приходят из того же единственного вызова.
+
+### Пропуск слишком большого PR
+
+Когда оценка входа больше `LLM_MAX_INPUT_TOKENS`, шлюз бросает `LLMInputTooLargeError` до
+вызова провайдера. Раньше job заканчивался FAILED и на PR не появлялось ничего: автор не мог
+отличить сломанного бота от чистого ревью (живой случай: PR #60, 61 файл, три job без
+следа). Теперь worker (`worker/process.py`, `_publish_skipped`) публикует Check Run
+«AI review» на head SHA:
+
+- conclusion `skipped`, title «Skipped: pull request too large»;
+- summary (`domain.publishing.build_skipped_plan`) — только числа, без путей, diff и
+  заголовка PR:
+
+```
+<!-- dmc268:summary -->
+## ⏭️ Review skipped: pull request too large
+
+The review input is about 58,214 tokens; the limit is 32,000.
+Reviewable files: 59.
+
+Split the pull request into smaller ones to get an AI review.
+```
+
+(числа из фикстуры `tests/domain/test_publishing.py`; лимит — `DEFAULT_MAX_INPUT_TOKENS`).
+Review и inline-комментариев нет (`needs_review` ложно).
 
 ### Решения
 
@@ -583,3 +678,24 @@ checklist приходят из того же единственного выз�
    её промптом стоили precision или стабильности (таблица выше). Если suggestion важнее,
    следующий шаг — отдельный проход за suggestion только для опубликованных находок, а не
    правка основного промпта.
+8. **Статус job при пропуске — FAILED, `error_kind = skip_diff_too_large`, как раньше.**
+   `ReviewJobStatus.SKIPPED` есть в enum и в CHECK-ограничении, но перехода в него у
+   `JobRepository` нет (только `complete` и `fail`); новый переход потребовал бы правки
+   обоих хранилищ, а миграции и смена статуса в задачу не входят. Дашборды и логи
+   остаются сравнимыми.
+9. **Повторный прогон обновляет Check Run, а не создаёт второй.** Worker не хранит id
+   Check Run, поэтому в порт `ReviewPublisher` добавлен `find_check_run(target)`: GitHub
+   `GET /repos/{owner}/{repo}/commits/{sha}/check-runs?check_name=AI review&filter=latest&app_id=<GITHUB_APP_ID>`
+   (`app_id` всегда: `GITHUB_APP_ID` обязателен, а без него можно PATCH-ить чужой check с тем же именем — это 403). Найденный
+   передаётся в существующий `publish(..., existing_check)`, который делает PATCH.
+   Вызывается **только на пути пропуска**: обычное ревью по-прежнему создаёт новый Check
+   Run на каждом прогоне — это прежнее поведение, его исправление отдельной задачей.
+10. **Публикация пропуска — best effort.** Ошибка `find_check_run` или `publish`
+    (`ForgeUnavailableError` и любая другая) пишется в лог классом исключения, job
+    записывается как без Check Run; LLM повторно не вызывается. Лог одной строкой:
+    `review job skipped check run: job_id=… estimated_tokens=… limit=… outcome=published|failed exc_class=…`
+    (PR #60 со структурными логами ещё не в `main`, поэтому формат прежний).
+11. **Шаг `LLM_CALL` пишется FAILED с `skip_diff_too_large`**, отдельного шага
+    `POST_FEEDBACK` для пропуска нет: публикация идёт внутри обработки ошибки шлюза.
+12. **Title привязан к conclusion `skipped`.** Пропуск сейчас один (слишком большой PR);
+    если появится другой, title придётся брать из плана.
