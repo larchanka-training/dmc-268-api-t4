@@ -239,8 +239,18 @@ async def test_file_lines_reject_a_bad_range(auth_clock: FixedClock) -> None:
         return client.get(f"/jobs/{job_id}/file-lines", params=params).status_code
 
     assert status(5, 4) == 400
-    assert status(1, 1001) == 400
     assert status(0, 3) == 400
+
+
+async def test_a_long_range_is_capped(auth_clock: FixedClock) -> None:
+    long_file = "".join(f"{n}\n" for n in range(1, 1501)).encode()
+    client, job_id, _, _ = await client_for(auth_clock, files={(REPO, PATH, HEAD_SHA): long_file})
+
+    params = {"path": PATH, "from": 2, "to": 1500}
+    lines = client.get(f"/jobs/{job_id}/file-lines", params=params).json()["lines"]
+
+    assert len(lines) == 1000
+    assert (lines[0], lines[-1]) == ("2", "1001")
 
 
 async def test_file_lines_of_a_gone_installation_are_409(auth_clock: FixedClock) -> None:

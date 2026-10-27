@@ -218,8 +218,10 @@ async def read_file_lines(
     from_: Annotated[int, Query(alias="from")],
     to: int,
 ) -> dict[str, Any]:
-    if not 1 <= from_ <= to or to - from_ >= MAX_FILE_LINES:
+    if not 1 <= from_ <= to:
         raise ApiError(400, "bad_range")
+    # "Expand all" on a long gap may ask for more; it gets the first MAX_FILE_LINES.
+    to = min(to, from_ + MAX_FILE_LINES - 1)
     service = _finding_context(request)
     try:
         lines = await service.file_lines(session, job_id, path, from_, to)

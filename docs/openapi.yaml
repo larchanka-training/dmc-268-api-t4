@@ -421,8 +421,8 @@ paths:
       description: |
         Serves the "unfold context" control of the diff viewer. Same sourcing and the same
         `409` as the endpoint above; the range is clamped to the file. Only a file that one
-        of the job's findings is on can be read (`404` otherwise), at most 1000 lines per
-        request (`400 bad_range`).
+        of the job's findings is on can be read (`404` otherwise); a request returns at most
+        1000 lines, and `from` after `to` is `400 bad_range`.
       parameters:
         - $ref: "#/components/parameters/job_id"
         - name: path

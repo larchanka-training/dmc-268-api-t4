@@ -39,7 +39,7 @@ DEFAULT_CONTEXT_LINES = 3
 MAX_CONTEXT_LINES = 50
 # A larger file still gets its hunks; only its line count falls back to the diff's.
 MAX_FILE_BYTES = 1024 * 1024
-# One unfold step of the console asks for a few dozen lines; this bounds a hand-made URL.
+# One unfold step of the console asks for a few dozen lines; "expand all" may ask for more.
 MAX_FILE_LINES = 1000
 
 
