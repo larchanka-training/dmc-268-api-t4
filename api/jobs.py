@@ -78,8 +78,10 @@ async def list_jobs(
     cursor: str | None = None,
     limit: int = DEFAULT_LIMIT,
 ) -> dict[str, Any]:
-    organization = session.current_organization
-    if organization is None:
+    # Every installation the session can see, as the repository list does:
+    # personal and organisation runs show together.
+    installation_ids = frozenset(item.installation_id for item in session.organizations)
+    if not installation_ids:
         return {"items": [], "next_cursor": None}
     if not 1 <= limit <= MAX_LIMIT:
         raise ApiError(400, "bad_limit")
@@ -88,7 +90,7 @@ async def list_jobs(
     except ValueError:
         raise ApiError(400, "bad_cursor") from None
     query = JobQuery(
-        installation_ids=frozenset({organization.installation_id}),
+        installation_ids=installation_ids,
         statuses=_statuses(status),
         repository=repository,
         author=author,
