@@ -187,7 +187,9 @@ class PostgresJobStore:
             worker_id=worker_id,
         )
 
-    async def complete(self, job_id: str, stats: JobStats, *, worker_id: str) -> bool:
+    async def complete(
+        self, job_id: str, stats: JobStats, *, worker_id: str, summary: str | None = None
+    ) -> bool:
         row_id = _as_uuid(job_id)
         if row_id is None:
             return False
@@ -196,10 +198,15 @@ class PostgresJobStore:
                 text(
                     "UPDATE pr_review_jobs"
                     " SET status = 'COMPLETED', stats = CAST(:stats AS jsonb),"
-                    " finished_at = now()"
+                    " summary = :summary, finished_at = now()"
                     " WHERE id = :id AND status = 'PROCESSING' AND locked_by = :worker"
                 ),
-                {"stats": _stats_to_json(stats), "id": row_id, "worker": worker_id},
+                {
+                    "stats": _stats_to_json(stats),
+                    "summary": summary,
+                    "id": row_id,
+                    "worker": worker_id,
+                },
             )
             return result.rowcount == 1
 
@@ -417,7 +424,7 @@ _JOB_COLUMNS = (
     "id, delivery_id, provider, installation_id, repo_id, repo_full_name, pr_number,"
     " head_sha, base_sha, event_action, pr_title, author_login, head_ref, base_ref,"
     " status, stats, error_kind, created_at, started_at, finished_at, retry_count,"
-    " next_attempt_at"
+    " next_attempt_at, summary"
 )
 
 
@@ -437,6 +444,7 @@ def _job_from_row(row: Row[Any]) -> ReviewJob:
         # attempt, exactly like the memory store.
         next_attempt_at=None if status in _TERMINAL_STATUSES else row.next_attempt_at,
         started_at=row.started_at,
+        summary=row.summary,
     )
 
 

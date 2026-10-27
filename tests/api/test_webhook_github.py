@@ -119,8 +119,10 @@ class HeldJobStore:
         await self.hold.wait()
         return await self.inner.claim(worker_id)
 
-    async def complete(self, job_id: str, stats: JobStats, *, worker_id: str) -> bool:
-        return await self.inner.complete(job_id, stats, worker_id=worker_id)
+    async def complete(
+        self, job_id: str, stats: JobStats, *, worker_id: str, summary: str | None = None
+    ) -> bool:
+        return await self.inner.complete(job_id, stats, worker_id=worker_id, summary=summary)
 
     async def fail(
         self, job_id: str, error_kind: str, *, retryable: bool, worker_id: str

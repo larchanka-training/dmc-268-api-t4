@@ -216,8 +216,11 @@ async def test_published_findings_reach_the_console_and_are_not_posted_twice(
         [found] = detail["findings"]
         assert (found["path"], found["line"], found["side"]) == ("app/payments.py", 4, "new")
         assert (found["severity"], found["category"]) == ("high", "correctness")
-        assert "The charge result is ignored." in found["message"]
-        assert found["message"] == forge.reviews[0]["comments"][0]["body"]
+        # The posted Markdown carries the severity heading and the marker; the console
+        # gets the finding's own text and draws the rest from the structured fields.
+        assert found["message"] == "The charge result is ignored."
+        assert forge.reviews[0]["comments"][0]["body"].startswith("**🟠 High**")
+        assert detail["summary"].startswith("💬 Issues worth a look")
         assert found["external_url"] == (
             f"https://github.com/{REPO}/pull/{PR_NUMBER}#discussion_r7000"
         )

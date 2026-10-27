@@ -51,6 +51,7 @@ from domain.jobs import (
     ui_stage,
 )
 from domain.ports import ReviewJob, ReviewJobStatus
+from domain.publishing import comment_message
 from domain.repository_rules import RULES_PATH, RulesPreview
 
 logger = logging.getLogger(__name__)
@@ -123,8 +124,8 @@ async def read_job(
         **_job_json(job),
         # The console's 4-stage progress bar; null before the first step is recorded.
         "stage": _current_stage(steps),
-        # Not stored yet: the summary, the diagnostic log and the check run link.
-        "summary": None,
+        # Not stored yet: the diagnostic log and the check run link.
+        "summary": job.summary,
         "error_log": None,
         "external_check_url": None,
         "steps": [_step_json(step) for step in steps],
@@ -317,7 +318,9 @@ def _finding_json(finding: PublishedFinding, pull_request_url: str) -> dict[str,
         "side": str(finding.side),
         "severity": str(finding.severity),
         "category": str(finding.category),
-        "message": finding.message,
+        # The stored body is the posted Markdown; the console draws the severity,
+        # category and suggestion itself.
+        "message": comment_message(finding.message, finding.suggestion),
         "suggestion": None
         if suggestion is None
         else {"before": list(suggestion.before), "after": list(suggestion.after)},

@@ -275,6 +275,7 @@ async def _process(
             chunks_total=sum(len(split_into_chunks(diff)) for diff in filtered.kept),
             skipped_counts=tuple((reason.value, count) for reason, count in filtered.skip_counts),
         )
+        summary: str | None = None
         if review is not None:
             # LLM_CALL can take minutes (two 300 s attempts plus a fallback): renew the
             # lease before it and again before posting, and stop if it was lost.
@@ -297,6 +298,7 @@ async def _process(
                     review.publisher, target, too_large, len(filtered.kept), claimed, log
                 )
                 raise
+            await progress.begin(JobStep.POSTPROCESS)
             posted = (
                 frozenset()
                 if review.comments is None
@@ -322,6 +324,7 @@ async def _process(
             await progress.begin(JobStep.POST_FEEDBACK)
             outcome = await review.publisher.publish(target, plan)
             stats = replace(stats, findings_published=len(outcome.comments))
+            summary = plan.plain_summary
             if review.comments is not None:
                 await _keep_findings(
                     review.comments, claimed, published_findings(plan, outcome), log
@@ -341,7 +344,7 @@ async def _process(
         )
 
     try:
-        completed = await jobs.complete(job_id, stats, worker_id=claimed.worker_id)
+        completed = await jobs.complete(job_id, stats, worker_id=claimed.worker_id, summary=summary)
     except Exception as err:
         log.error(
             "job.store.failed",
