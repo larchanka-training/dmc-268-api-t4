@@ -27,7 +27,7 @@ from domain.ports import GitProvider, JobRepository, StepRecorder
 from worker.config import DEFAULT_POLL_INTERVAL_SECONDS, WorkerSettings
 from worker.listener import listen_for_jobs
 from worker.periodic import reaper_loop
-from worker.process import ReviewStage, process_claimed_job
+from worker.process import ContextStage, ReviewStage, process_claimed_job
 
 #: The production listener plus any test fake: takes the asyncpg DSN and
 #: the shared wake event, runs until cancelled.
@@ -40,6 +40,7 @@ async def claim_and_process_once(
     worker_id: str,
     *,
     review: ReviewStage | None = None,
+    context_stage: ContextStage | None = None,
     steps: StepRecorder | None = None,
     logger: logging.Logger | None = None,
 ) -> bool:
@@ -54,7 +55,9 @@ async def claim_and_process_once(
     if claimed is None:
         return False
     log = logger if logger is not None else logging.getLogger(__name__)
-    await process_claimed_job(claimed, vcs, store, review=review, steps=steps, logger=log)
+    await process_claimed_job(
+        claimed, vcs, store, review=review, context_stage=context_stage, steps=steps, logger=log
+    )
     return True
 
 
@@ -67,6 +70,7 @@ async def worker_loop(
     *,
     poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
     review: ReviewStage | None = None,
+    context_stage: ContextStage | None = None,
     steps: StepRecorder | None = None,
     logger: logging.Logger | None = None,
 ) -> None:
@@ -86,7 +90,13 @@ async def worker_loop(
         while not stop.is_set():
             try:
                 processed = await claim_and_process_once(
-                    store, vcs, worker_id, review=review, steps=steps, logger=log
+                    store,
+                    vcs,
+                    worker_id,
+                    review=review,
+                    context_stage=context_stage,
+                    steps=steps,
+                    logger=log,
                 )
             except Exception as err:
                 # A store error (database restarting) must not kill the
@@ -124,6 +134,7 @@ async def run_worker(
     engine: AsyncEngine | None = None,
     store: JobRepository | None = None,
     review: ReviewStage | None = None,
+    context_stage: ContextStage | None = None,
 ) -> None:
     """Run one worker process until ``stop`` is set, then drain and exit.
 
@@ -164,6 +175,7 @@ async def run_worker(
                 stop,
                 poll_interval=settings.poll_interval_seconds,
                 review=review,
+                context_stage=context_stage,
                 steps=steps,
                 logger=log,
             ),
