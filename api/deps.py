@@ -26,7 +26,9 @@ NO_STORE = "no-store"
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 _REQUESTED_WITH = "fetch"
-_WEBHOOK_PREFIX = "/webhooks/"
+#: Server-to-server routes: forge webhooks and the Sentry alert relay. Each verifies its
+#: own signature in the route.
+_SERVER_TO_SERVER_PREFIXES = ("/webhooks/", "/internal/alerts/")
 
 
 class ApiError(Exception):
@@ -152,15 +154,15 @@ async def optional_session(request: Request) -> Session | None:
 
 def enforce_csrf(request: Request) -> JSONResponse | None:
     """Unsafe methods need X-Requested-With: fetch and our own Origin."""
-    # Webhook deliveries are forge-to-server POSTs: they carry no cookies
-    # and no Origin or X-Requested-With headers, so the checks below would
-    # reject every legitimate delivery. Their authentication is the
-    # delivery signature, verified in the route
-    # (docs/WORKFLOW_DESIGN.md §2 Step 2).
+    # Webhook deliveries are forge-to-server POSTs, and the Sentry relay's are
+    # Sentry-to-server: they carry no cookies and no Origin or X-Requested-With
+    # headers, so the checks below would reject every legitimate delivery. Their
+    # authentication is the delivery signature, verified in the route
+    # (docs/WORKFLOW_DESIGN.md §2 Step 2; docs/observability.md § Alerts).
     # Behind uvicorn --root-path /api the request path carries the prefix
     # (/api/webhooks/github), so match on the path the router sees.
     route_path = request.scope["path"].removeprefix(request.scope.get("root_path", ""))
-    if route_path.startswith(_WEBHOOK_PREFIX):
+    if route_path.startswith(_SERVER_TO_SERVER_PREFIXES):
         return None
     if request.method in _SAFE_METHODS:
         return None

@@ -22,10 +22,11 @@ never be set outside a developer machine.
 import logging
 import os
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 
+from adapters.observability import metrics
 from adapters.observability.config import DEFAULT_ENV, read_env
 from adapters.observability.logging import bind_context
 from domain.diff import parse_diff, split_into_chunks
@@ -159,24 +160,43 @@ class _Steps:
             )
 
 
+#: Every error_kind _classify returns, and whether the job is retried for it: the
+#: closed error vocabulary of docs/PIPELINE_SPEC.md §4.2/§5. The job metrics start a
+#: series at 0 for each (docs/observability.md § Metrics).
+ERROR_KINDS: Mapping[str, bool] = {
+    "forge_unavailable": True,
+    "installation_removed": False,
+    "pr_not_found": False,
+    "diff_parse_failed": False,
+    "provider_unavailable": True,
+    "llm_output_invalid": False,
+    "skip_diff_too_large": False,
+    "internal_error": False,
+}
+
+
 def _classify(error: Exception) -> tuple[str, bool]:
-    """Map an exception to (error_kind, retryable) — the closed error
-    vocabulary of docs/PIPELINE_SPEC.md §4.2/§5."""
+    """Map an exception to (error_kind, retryable)."""
+    kind = _error_kind(error)
+    return kind, ERROR_KINDS[kind]
+
+
+def _error_kind(error: Exception) -> str:
     if isinstance(error, ForgeUnavailableError):
-        return "forge_unavailable", True
+        return "forge_unavailable"
     if isinstance(error, InstallationGoneError):
-        return "installation_removed", False
+        return "installation_removed"
     if isinstance(error, PrNotFoundError):
-        return "pr_not_found", False
+        return "pr_not_found"
     if isinstance(error, DiffFormatError):
-        return "diff_parse_failed", False
+        return "diff_parse_failed"
     if isinstance(error, (AllProvidersFailedError, ProviderUnavailableError)):
-        return "provider_unavailable", True
+        return "provider_unavailable"
     if isinstance(error, LLMOutputError):
-        return "llm_output_invalid", False
+        return "llm_output_invalid"
     if isinstance(error, LLMInputTooLargeError):
-        return "skip_diff_too_large", False
-    return "internal_error", False
+        return "skip_diff_too_large"
+    return "internal_error"
 
 
 async def process_claimed_job(
@@ -201,9 +221,12 @@ async def process_claimed_job(
     carries the exception's type and frames, never its message.
 
     Every line logged and every Sentry event raised during the run carries the
-    job's context (docs/observability.md § Fields).
+    job's context (docs/observability.md § Fields), and the run is counted in the
+    worker's job metrics (§ Metrics).
     """
-    with bind_context(**_bound_fields(claimed)):
+    if claimed.claimable_at is not None and claimed.claimed_at is not None:
+        metrics.observe_claim_latency((claimed.claimed_at - claimed.claimable_at).total_seconds())
+    with bind_context(**_bound_fields(claimed)), metrics.WORKER_IN_FLIGHT.track_inprogress():
         return await _process(claimed, vcs, jobs, review=review, steps=steps, logger=logger)
 
 
@@ -355,6 +378,9 @@ async def _process(
         return False
     if not completed:
         return False
+    metrics.record_job(
+        ReviewJobStatus.COMPLETED, None, review_seconds=_review_seconds(claimed, started)
+    )
     log.info(
         "job.finished",
         extra={
@@ -383,6 +409,15 @@ def _job_fields(claimed: ClaimedJob) -> dict[str, object]:
 
 def _elapsed_ms(started: float) -> int:
     return round((time.monotonic() - started) * 1000)
+
+
+def _review_seconds(claimed: ClaimedJob, started: float) -> float | None:
+    """Enqueue to now: the wait before this claim in the store's clock, then this
+    run's own time, so two clocks are never compared."""
+    if claimed.enqueued_at is None or claimed.claimed_at is None:
+        return None
+    waited = (claimed.claimed_at - claimed.enqueued_at).total_seconds()
+    return waited + time.monotonic() - started
 
 
 def _pull_request_target(claimed: ClaimedJob, head_sha: str) -> PullRequestTarget:
@@ -494,9 +529,11 @@ async def _record_failure(
         )
         return False
     if status is ReviewJobStatus.RETRYING:
+        metrics.record_job(status, error_kind, review_seconds=None)
         await _log_retrying(jobs, claimed, log, started, error_kind=error_kind)
         return False
     if status is ReviewJobStatus.FAILED:
+        metrics.record_job(status, error_kind, review_seconds=_review_seconds(claimed, started))
         log.error(
             "job.finished",
             exc_info=error,

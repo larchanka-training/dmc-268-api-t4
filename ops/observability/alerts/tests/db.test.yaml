@@ -1,0 +1,64 @@
+# promtool test rules: fire, not fire, absent series, suppressed by the root.
+rule_files:
+  - ../db.rules.yaml
+evaluation_interval: 1m
+
+tests:
+  - name: TargetDown fires after 2 minutes of pg_up 0
+    interval: 1m
+    input_series:
+      - {series: 'pg_up{job="postgres", instance="postgresql://postgres:5432/dmc268"}', values: '1 1 0 0 0 0'}
+    alert_rule_test:
+      - {eval_time: 1m, alertname: TargetDown, exp_alerts: []}
+      - eval_time: 4m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels: {job: postgres, instance: "postgresql://postgres:5432/dmc268", domain: db, severity: critical, owner: unassigned}
+            exp_annotations:
+              summary: Postgres does not answer the exporter.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#target-down
+
+  - name: No series, no alert
+    interval: 1h
+    input_series: []
+    alert_rule_test:
+      - {eval_time: 25h, alertname: TargetDown, exp_alerts: []}
+      - {eval_time: 25h, alertname: QueueTableBloat, exp_alerts: []}
+
+  - name: QueueTableBloat fires on 20 times more dead rows and no autovacuum in 24 h
+    interval: 1h
+    input_series:
+      - {series: 'pg_up{job="postgres", instance="pg"}', values: '1x30'}
+      - {series: 'pg_stat_user_tables_n_dead_tup{job="postgres", instance="pg", datname="dmc268", schemaname="public", relname="pr_review_jobs"}', values: '1000x30'}
+      - {series: 'pg_stat_user_tables_n_live_tup{job="postgres", instance="pg", datname="dmc268", schemaname="public", relname="pr_review_jobs"}', values: '50x30'}
+      - {series: 'pg_stat_user_tables_last_autovacuum{job="postgres", instance="pg", datname="dmc268", schemaname="public", relname="pr_review_jobs"}', values: '0x30'}
+    alert_rule_test:
+      - {eval_time: 20h, alertname: QueueTableBloat, exp_alerts: []}
+      - eval_time: 25h
+        alertname: QueueTableBloat
+        exp_alerts:
+          - exp_labels: {job: postgres, instance: pg, datname: dmc268, schemaname: public, relname: pr_review_jobs, domain: db, severity: warning, owner: unassigned}
+            exp_annotations:
+              summary: pr_review_jobs has 10 times more dead rows than live ones and no autovacuum in 24 hours.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#queue-table-bloat
+
+  - name: QueueTableBloat stays quiet after a recent autovacuum, or with few dead rows
+    interval: 1h
+    input_series:
+      - {series: 'pg_up{job="postgres", instance="pg"}', values: '1x30'}
+      - {series: 'pg_stat_user_tables_n_dead_tup{job="postgres", instance="pg", datname="dmc268", schemaname="public", relname="pr_review_jobs"}', values: '1000x30'}
+      - {series: 'pg_stat_user_tables_n_live_tup{job="postgres", instance="pg", datname="dmc268", schemaname="public", relname="pr_review_jobs"}', values: '50x30'}
+      - {series: 'pg_stat_user_tables_last_autovacuum{job="postgres", instance="pg", datname="dmc268", schemaname="public", relname="pr_review_jobs"}', values: '0+3600x30'}
+      - {series: 'pg_stat_user_tables_n_dead_tup{job="postgres", instance="pg", datname="dmc268", schemaname="public", relname="other"}', values: '100x30'}
+    alert_rule_test:
+      - {eval_time: 25h, alertname: QueueTableBloat, exp_alerts: []}
+
+  - name: QueueTableBloat is suppressed while Postgres is down
+    interval: 1h
+    input_series:
+      - {series: 'pg_up{job="postgres", instance="pg"}', values: '1x20 0x10'}
+      - {series: 'pg_stat_user_tables_n_dead_tup{job="postgres", instance="pg", datname="dmc268", schemaname="public", relname="pr_review_jobs"}', values: '1000x30'}
+      - {series: 'pg_stat_user_tables_n_live_tup{job="postgres", instance="pg", datname="dmc268", schemaname="public", relname="pr_review_jobs"}', values: '50x30'}
+      - {series: 'pg_stat_user_tables_last_autovacuum{job="postgres", instance="pg", datname="dmc268", schemaname="public", relname="pr_review_jobs"}', values: '0x30'}
+    alert_rule_test:
+      - {eval_time: 25h, alertname: QueueTableBloat, exp_alerts: []}

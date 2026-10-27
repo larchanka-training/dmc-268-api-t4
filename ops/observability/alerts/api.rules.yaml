@@ -1,0 +1,52 @@
+# Alert rules, domain api (docs/observability.md § Alerts). Prometheus format, tested by
+# `promtool test rules` (tests/api.test.yaml) and pushed by ops/observability/sync.py.
+# Dependants say `unless on() (up{job="api"} == 0)`: one outage, one alert.
+groups:
+  - name: api
+    interval: 1m
+    rules:
+      # Root: the API answers no scrape.
+      - alert: TargetDown
+        expr: up{job="api"} == 0
+        for: 2m
+        labels: {domain: api, severity: critical, owner: unassigned}
+        annotations:
+          summary: The API answers no scrape.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#target-down
+
+      # /health is left out: the Docker healthcheck alone would hide a 5xx spike.
+      - alert: ApiErrorRate
+        expr: |
+          (
+            sum(increase(http_requests_total{route!="/health", status_class="5xx"}[10m]))
+              / sum(increase(http_requests_total{route!="/health"}[10m]))
+            > 0.05
+          )
+          and on() sum(increase(http_requests_total{route!="/health"}[10m])) >= 20
+          unless on() (up{job="api"} == 0)
+        labels: {domain: api, severity: critical, owner: unassigned}
+        annotations:
+          summary: Over 5% of API requests answered 5xx in 10 minutes.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#api-error-rate
+
+      # GitHub fails a webhook that is not answered within 10 s. The SSE stream is
+      # never in the histogram (adapters/observability/metrics.py).
+      - alert: ApiLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket{route!="/health"}[10m]))
+          ) > 2
+          unless on() (up{job="api"} == 0)
+        labels: {domain: api, severity: warning, owner: unassigned}
+        annotations:
+          summary: API p95 latency over 2 s for 10 minutes.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#api-latency
+
+      # session_rejected is left out: one tab polling after its session expired
+      # exceeds 20 by itself. Quiet until phase 5 adds the metric.
+      - alert: SecurityEvents
+        expr: increase(security_events_total{kind!="session_rejected"}[15m]) > 20
+        labels: {domain: api, severity: warning, owner: unassigned}
+        annotations:
+          summary: Over 20 security refusals of one kind in 15 minutes.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#security-events

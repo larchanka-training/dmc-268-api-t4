@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from adapters.jobs.memory import MemoryJobStore
+from adapters.observability import metrics
 from api.webhooks.github import MAX_BODY, drain_background_tasks
 from domain.ports import (
     ClaimedJob,
@@ -531,3 +532,65 @@ async def test_a_duplicate_delivery_is_logged(
 
     [record] = log_events(caplog, "webhook.duplicate")
     assert record.action == "opened"
+
+
+# --- webhook_deliveries_total (docs/observability.md § Application) -----------
+
+
+def delivered(outcome: str) -> float:
+    labels = {"provider": "github", "outcome": outcome}
+    return metrics.API_REGISTRY.get_sample_value("webhook_deliveries_total", labels) or 0.0
+
+
+class FailingJobStore(HeldJobStore):
+    """The database is down at enqueue: the route answers 5xx."""
+
+    async def enqueue(self, job: NewReviewJob) -> str | None:
+        raise ConnectionError("database restarting")
+
+
+@pytest.mark.parametrize(
+    ("outcome", "body", "options"),
+    [
+        ("unauthorized", opened_body(), {"signed": False}),
+        ("too_large", b"a" * (MAX_BODY + 1), {"signed": False}),
+        ("rejected", b"not json", {}),
+        ("filtered", b"{}", {"event": "ping"}),
+        ("filtered", opened_body("labeled"), {}),
+        ("enqueued", opened_body(), {}),
+    ],
+)
+async def test_each_delivery_counts_one_outcome(
+    auth_clock: FixedClock, outcome: str, body: bytes, options: dict[str, Any]
+) -> None:
+    store = HeldJobStore(auth_clock)
+    app = build_test_app(auth_clock, FakeIdentityProvider(), jobs=store)
+    before = {name: delivered(name) for name in metrics.WEBHOOK_OUTCOMES}
+
+    await post_delivery(app, body, **options)
+
+    after = {name: delivered(name) for name in metrics.WEBHOOK_OUTCOMES}
+    assert {name: after[name] - before[name] for name in after if after[name] != before[name]} == {
+        outcome: 1
+    }
+
+
+async def test_a_redelivery_counts_as_duplicate(auth_clock: FixedClock) -> None:
+    app = build_test_app(auth_clock, FakeIdentityProvider(), jobs=HeldJobStore(auth_clock))
+    await post_delivery(app, opened_body())
+    enqueued, duplicate = delivered("enqueued"), delivered("duplicate")
+
+    response = await post_delivery(app, opened_body())
+
+    assert response.json() == {"status": "duplicate"}
+    assert (delivered("enqueued"), delivered("duplicate")) == (enqueued, duplicate + 1)
+
+
+async def test_a_delivery_the_api_fails_to_store_counts_as_error(auth_clock: FixedClock) -> None:
+    app = build_test_app(auth_clock, FakeIdentityProvider(), jobs=FailingJobStore(auth_clock))
+    before = delivered("error")
+
+    with pytest.raises(ConnectionError):
+        await post_delivery(app, opened_body())
+
+    assert delivered("error") == before + 1

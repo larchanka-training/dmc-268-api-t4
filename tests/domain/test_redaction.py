@@ -7,6 +7,7 @@ from domain.redaction import RULESET_VERSION, redact
 
 GITHUB_TOKEN = "ghp_" + "A1b2C3d4E5" * 4  # 40 characters after the prefix
 PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nIBAAKC\n-----END RSA PRIVATE KEY-----"
+TELEGRAM_TOKEN = "123456789:" + "AAH" + "x1Y2z3" * 5 + "_-"  # 35 characters after the colon
 
 
 @pytest.mark.parametrize(
@@ -26,6 +27,12 @@ PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nIBAAKC\n-----END RSA PRIVATE KEY
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.c2lnbmF0dXJlLXNpZw",
         ),
         (f"key:\n{PEM}\n", "private_key", "MIIEow"),
+        (
+            f'HTTP Request: POST https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage "200 OK"',
+            "telegram_bot_token",
+            TELEGRAM_TOKEN,
+        ),
+        (f"ALERTS_TELEGRAM_BOT_TOKEN={TELEGRAM_TOKEN}", "telegram_bot_token", TELEGRAM_TOKEN),
     ],
 )
 def test_each_rule_replaces_its_secret(text: str, rule: str, secret: str) -> None:
@@ -67,6 +74,7 @@ def test_the_report_counts_matches_and_carries_the_ruleset_version() -> None:
         "sk-…abcd",  # a key already masked by adapters/llm/keys.py
         "ghp_short",  # a prefix without a token behind it
         "plain text with a sk- in it",
+        "started 2026-10-26T12:00:00Z, job 42:queued",  # a time and a short id:word pair
     ],
 )
 def test_lookalikes_are_left_alone(text: str) -> None:

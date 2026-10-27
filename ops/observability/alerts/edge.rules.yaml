@@ -1,0 +1,38 @@
+# Alert rules, domain edge (docs/observability.md § Alerts). The probe series come from
+# Grafana Synthetic Monitoring (ops/observability/synthetics/uptime.json, job dmc268-site).
+groups:
+  - name: edge
+    interval: 1m
+    rules:
+      # Root, measured entirely outside the VPS: both runs of the last 4 minutes failed
+      # from at least 2 of the 3 probe locations.
+      - alert: SiteUnreachable
+        expr: count(max_over_time(probe_success{job="dmc268-site"}[4m]) == 0) >= 2
+        labels: {domain: edge, severity: critical, owner: unassigned}
+        annotations:
+          summary: The site's /api/health fails from 2 of 3 probe locations.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#site-unreachable
+
+      # Caddy's status codes are on its request histogram: caddy_http_requests_total
+      # has no code label.
+      - alert: Edge5xx
+        expr: |
+          (
+            sum(increase(caddy_http_request_duration_seconds_count{code=~"5.."}[10m]))
+              / sum(increase(caddy_http_request_duration_seconds_count[10m]))
+            > 0.05
+          )
+          and on() sum(increase(caddy_http_request_duration_seconds_count[10m])) >= 20
+          unless on() (up{job="api"} == 0)
+        labels: {domain: edge, severity: critical, owner: unassigned}
+        annotations:
+          summary: Over 5% of requests at Caddy answered 5xx in 10 minutes.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#edge-5xx
+
+      # Caddy renews at 30 days left, so 14 means renewal is failing.
+      - alert: TlsCertificateExpiry
+        expr: min(probe_ssl_earliest_cert_expiry{job="dmc268-site"}) - time() < 14 * 86400
+        labels: {domain: edge, severity: warning, owner: unassigned}
+        annotations:
+          summary: The site's TLS certificate expires in under 14 days.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#tls-certificate-expiry

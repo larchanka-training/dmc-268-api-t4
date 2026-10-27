@@ -89,6 +89,10 @@ async def _table_names(url: str) -> set[str]:
     return {row[0] for row in await _fetch_all(url, TABLES_SQL)}
 
 
+async def _extensions(url: str) -> set[str]:
+    return {row[0] for row in await _fetch_all(url, "SELECT extname FROM pg_extension")}
+
+
 async def _recreate_test_database(admin_dsn: str) -> None:
     conn = await asyncpg.connect(admin_dsn)
     try:
@@ -213,12 +217,17 @@ def test_review_comments_constraints_and_cascade(migrated_url: str) -> None:
     assert left[0][0] == 0
 
 
+def test_upgrade_head_creates_pg_stat_statements(migrated_url: str) -> None:
+    assert asyncio.run(_extensions(migrated_url)) >= {"pg_stat_statements"}
+
+
 def test_downgrade_base_drops_tables(migrated_url: str) -> None:
     run_alembic(migrated_url, "downgrade", "base")
     tables = asyncio.run(_table_names(migrated_url))
     assert "pr_review_jobs" not in tables
     assert "pr_review_steps" not in tables
     assert "pr_review_comments" not in tables
+    assert "pg_stat_statements" not in asyncio.run(_extensions(migrated_url))
 
 
 def test_reupgrade_head_is_repeatable(migrated_url: str) -> None:
@@ -227,5 +236,6 @@ def test_reupgrade_head_is_repeatable(migrated_url: str) -> None:
     assert "pr_review_jobs" in tables
     assert "pr_review_steps" in tables
     assert "pr_review_comments" in tables
+    assert "pg_stat_statements" in asyncio.run(_extensions(migrated_url))
     versions = asyncio.run(_fetch_all(migrated_url, "SELECT version_num FROM alembic_version"))
-    assert versions[0][0] == "0002"
+    assert versions[0][0] == "0003"

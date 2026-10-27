@@ -1,0 +1,85 @@
+# promtool test rules: fire, not fire, absent series, suppressed by the root.
+rule_files:
+  - ../monitoring.rules.yaml
+evaluation_interval: 1m
+
+tests:
+  - name: TelemetryMissing fires 5 minutes after the last sample, and with none at all
+    interval: 1m
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1 1 1'}
+    alert_rule_test:
+      - {eval_time: 6m, alertname: TelemetryMissing, exp_alerts: []}
+      - eval_time: 8m
+        alertname: TelemetryMissing
+        exp_alerts:
+          - exp_labels: {job: api, domain: monitoring, severity: critical, owner: unassigned}
+            exp_annotations: &telemetry_missing
+              summary: No sample from the VPS for 5 minutes.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#telemetry-missing
+
+  - name: No series at all is the root's own case; the others stay quiet
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: TelemetryMissing
+        exp_alerts:
+          - exp_labels: {job: api, domain: monitoring, severity: critical, owner: unassigned}
+            exp_annotations: *telemetry_missing
+      - {eval_time: 20m, alertname: MonitoringBroken, exp_alerts: []}
+      - {eval_time: 20m, alertname: RelayFailing, exp_alerts: []}
+
+  - name: TelemetryMissing stays quiet while samples arrive
+    interval: 1m
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1x10'}
+    alert_rule_test:
+      - {eval_time: 10m, alertname: TelemetryMissing, exp_alerts: []}
+
+  - name: MonitoringBroken fires after 15 minutes of failed pushes, metrics or logs
+    interval: 1m
+    input_series:
+      - {series: 'prometheus_remote_storage_samples_failed_total{job="alloy", instance="a", component_id="prometheus.remote_write.cloud"}', values: '0+5x30'}
+      - {series: 'loki_write_dropped_entries_total{job="alloy", instance="a", component_id="loki.write.cloud"}', values: '0+5x30'}
+    alert_rule_test:
+      - {eval_time: 10m, alertname: MonitoringBroken, exp_alerts: []}
+      - eval_time: 20m
+        alertname: MonitoringBroken
+        exp_alerts:
+          - exp_labels: {job: alloy, instance: a, component_id: prometheus.remote_write.cloud, domain: monitoring, severity: warning, owner: unassigned}
+            exp_annotations: &monitoring_broken
+              summary: Alloy's pushes to Grafana Cloud have failed for 15 minutes.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#monitoring-broken
+          - exp_labels: {job: alloy, instance: a, component_id: loki.write.cloud, domain: monitoring, severity: warning, owner: unassigned}
+            exp_annotations: *monitoring_broken
+
+  - name: MonitoringBroken stays quiet after a short burst of failures
+    interval: 1m
+    input_series:
+      - {series: 'prometheus_remote_storage_samples_failed_total{job="alloy", instance="a", component_id="prometheus.remote_write.cloud"}', values: '0+5x5 25x25'}
+    alert_rule_test:
+      - {eval_time: 20m, alertname: MonitoringBroken, exp_alerts: []}
+
+  - name: RelayFailing fires on a failure, not without one
+    interval: 1m
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1x5'}
+      - {series: 'alert_relay_failures_total{job="api", instance="api:9100"}', values: '0 0 1 1'}
+    alert_rule_test:
+      - {eval_time: 1m, alertname: RelayFailing, exp_alerts: []}
+      - eval_time: 3m
+        alertname: RelayFailing
+        exp_alerts:
+          - exp_labels: {job: api, instance: "api:9100", domain: monitoring, severity: warning, owner: unassigned}
+            exp_annotations:
+              summary: The Sentry relay failed to post to Telegram.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#relay-failing
+
+  - name: RelayFailing is suppressed while the API is down
+    interval: 1m
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1 1 0 0'}
+      - {series: 'alert_relay_failures_total{job="api", instance="api:9100"}', values: '0 1 1 1'}
+    alert_rule_test:
+      - {eval_time: 3m, alertname: RelayFailing, exp_alerts: []}
