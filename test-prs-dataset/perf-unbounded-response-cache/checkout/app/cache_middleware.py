@@ -1,0 +1,22 @@
+from starlette.middleware.base import BaseHTTPMiddleware
+
+_RESPONSE_CACHE: dict[str, bytes] = {}
+
+
+class ResponseCache(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        key = str(request.url)
+        if request.method == "GET" and key in _RESPONSE_CACHE:
+            return _build_response(_RESPONSE_CACHE[key])
+        response = await call_next(request)
+        if request.method == "GET" and response.status_code == 200:
+            body = b"".join([chunk async for chunk in response.body_iterator])
+            _RESPONSE_CACHE[key] = body
+            return _build_response(body)
+        return response
+
+
+def _build_response(body: bytes):
+    from starlette.responses import Response
+
+    return Response(body, media_type="application/json")
