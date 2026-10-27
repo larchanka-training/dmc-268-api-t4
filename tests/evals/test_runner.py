@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -11,6 +12,7 @@ from domain.errors import (
     LLMOutputError,
     ProviderUnavailableError,
 )
+from domain.repository_rules import RULES_MAX_BYTES
 from evals.loader import load_case
 from evals.models import Case
 from evals.runner import LiveRunner, classify_failure
@@ -106,3 +108,99 @@ async def test_no_message_text_reaches_the_results(sql_case: Case) -> None:
     assert VALID_FINDING["message"] not in rendered
     assert "whitelist the column names" not in rendered
     assert FAKE_KEY_A not in rendered
+
+
+async def test_context_sources_are_sent_on_the_review_request(
+    sql_case: Case, tmp_path: Path
+) -> None:
+    from evals.context import CaseContextSource
+
+    checkout = tmp_path / "head"
+    (checkout / "app").mkdir(parents=True)
+    source = "def list_users(sort):\n    return sorted(sort)\n"
+    (checkout / "app/users.py").write_text(source, encoding="utf-8")
+    rules = tmp_path / "rules.md"
+    rules.write_text("- Prefer safe sorting", encoding="utf-8")
+    seen: list[httpx.Request] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return chat_response(review_json(VALID_FINDING))
+
+    await LiveRunner(
+        LLMSettings.from_env(ENV),
+        transport=httpx.MockTransport(transport),
+        context_sources={sql_case.id: CaseContextSource(checkout=checkout, rules=rules)},
+    ).run(sql_case)
+
+    body = json.loads(seen[0].content)
+    user = body["messages"][1]["content"]
+    assert "safe sorting" in user
+    assert "def list_users" in user
+
+
+@pytest.mark.parametrize(
+    "rules_content",
+    [b"OVERSIZED_RULE_SECRET" + b"x" * RULES_MAX_BYTES, b"INVALID_UTF8_RULE_SECRET\xff"],
+    ids=["oversized", "invalid-utf8"],
+)
+async def test_invalid_rules_files_are_ignored(
+    sql_case: Case, tmp_path: Path, rules_content: bytes
+) -> None:
+    from evals.context import CaseContextSource
+
+    rules = tmp_path / "rules.md"
+    rules.write_bytes(rules_content)
+    seen: list[httpx.Request] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return chat_response(review_json(VALID_FINDING))
+
+    record = await LiveRunner(
+        LLMSettings.from_env(ENV),
+        transport=httpx.MockTransport(transport),
+        context_sources={sql_case.id: CaseContextSource(rules=rules)},
+    ).run(sql_case)
+
+    assert record.score.status is RunStatus.OK
+    prompt = json.loads(seen[0].content)["messages"][1]["content"]
+    assert "OVERSIZED_RULE_SECRET" not in prompt
+    assert "INVALID_UTF8_RULE_SECRET" not in prompt
+
+
+@pytest.mark.parametrize("escape", ["traversal", "absolute", "symlink"])
+async def test_context_does_not_read_paths_outside_checkout(
+    sql_case: Case, tmp_path: Path, escape: str
+) -> None:
+    from evals.context import CaseContextSource
+
+    checkout = tmp_path / "checkout"
+    app = checkout / "app"
+    app.mkdir(parents=True)
+    diff_path = "app/users.py"
+    secret = tmp_path / "secret.py"
+    secret.write_text("SECRET_OUTSIDE_CHECKOUT", encoding="utf-8")
+    if escape == "traversal":
+        diff_path = "../secret.py"
+    elif escape == "absolute":
+        diff_path = str(secret)
+    else:
+        (app / "users.py").symlink_to(secret)
+    diff = sql_case.read_diff().replace("app/users.py", diff_path)
+    fixture = tmp_path / "case.diff"
+    fixture.write_text(diff, encoding="utf-8")
+    case = replace(sql_case, fixture=fixture)
+    seen: list[httpx.Request] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return chat_response(review_json(VALID_FINDING))
+
+    await LiveRunner(
+        LLMSettings.from_env(ENV),
+        transport=httpx.MockTransport(transport),
+        context_sources={case.id: CaseContextSource(checkout=checkout)},
+    ).run(case)
+
+    assert "SECRET_OUTSIDE_CHECKOUT" not in json.loads(seen[0].content)["messages"][1]["content"]

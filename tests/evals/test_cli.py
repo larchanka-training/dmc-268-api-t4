@@ -102,3 +102,55 @@ def test_run_exits_nonzero_when_nothing_could_be_measured(
         cli.main(["run", str(DATASET), "--only", "sec-sql-sort-injection"])
         == cli.EXIT_NOTHING_MEASURED
     )
+
+
+def test_context_manifest_is_validated_and_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    manifest = tmp_path / "context.json"
+    manifest.write_text(
+        json.dumps({"sec-sql-sort-injection": {"checkout": "checkout"}}), encoding="utf-8"
+    )
+    runner = fake_runner(chat_response(review_json(VALID_FINDING)))
+    monkeypatch.setattr(cli, "LiveRunner", lambda settings, **kwargs: runner)
+    set_env(monkeypatch)
+
+    result = cli.main(
+        [
+            "run",
+            str(DATASET),
+            "--only",
+            "sec-sql-sort-injection",
+            "--context-manifest",
+            str(manifest),
+        ]
+    )
+
+    assert result == 0
+    assert "context enabled" in capsys.readouterr().out
+
+
+def test_context_manifest_missing_paths_are_clear_input_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest = tmp_path / "context.json"
+    manifest.write_text(
+        json.dumps({"sec-sql-sort-injection": {"checkout": "missing"}}), encoding="utf-8"
+    )
+
+    assert (
+        cli.main(
+            [
+                "run",
+                str(DATASET),
+                "--only",
+                "sec-sql-sort-injection",
+                "--context-manifest",
+                str(manifest),
+            ]
+        )
+        == cli.EXIT_BAD_INPUT
+    )
+    assert "context manifest error" in capsys.readouterr().err
