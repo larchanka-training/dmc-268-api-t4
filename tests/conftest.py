@@ -447,6 +447,7 @@ def build_test_app(
     job_events: Any = None,
     findings: Any = None,
     job_rules: Any = None,
+    finding_context: Any = None,
 ) -> Any:
     service = repositories or RepositoriesService(
         gateway=FakeInstallationGateway(),
@@ -468,6 +469,7 @@ def build_test_app(
         job_events=job_events,
         findings=findings,
         job_rules=job_rules,
+        finding_context=finding_context,
     )
 
 

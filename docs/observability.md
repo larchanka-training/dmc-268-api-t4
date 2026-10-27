@@ -156,6 +156,7 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `github.setup.redirect` | info | GitHub sent the browser to the App's setup URL | `had_session` |
 | `repositories.list.failed` | warning | Listing repositories on GitHub failed; the API answers 502 | `reason` |
 | `rules.read.failed` | warning | Reading `.review/rules.md` for the rules preview failed; the API answers 502 | `job_id`, `reason` |
+| `finding_context.read.failed` | warning | Reading a finding's diff or file lines from the forge failed; the API answers 502 | `job_id`, `reason` |
 | `queue.in_memory` | info | The API started without `DATABASE_URL`: dev mode, no worker | — |
 | `webhook.ignored` | info | A verified delivery that is not reviewed: another event, or a non-reviewable action | `delivery_id`, `provider`, `gh_event`, `action` |
 | `webhook.rejected` | warning | A verified `pull_request` payload the parser refused (400) | `delivery_id`, `provider`, `reason` |
@@ -186,6 +187,8 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `github.repositories.listed` | info | An installation's repositories were listed | `provider`, `installation_id`, `count` |
 | `github.repositories.page_cap` | warning | The repository listing stopped at the page cap | `provider`, `installation_id`, `pages` |
 | `github.file.read` | info | A repository file was read (the rules preview); never its content | `provider`, `installation_id`, `repo`, `found`, `bytes`, `duration_ms` |
+| `github.compare.fetched` | info | The diff between a job's base and head was fetched for a finding's context; never its content | `provider`, `installation_id`, `repo`, `found`, `diff_bytes`, `duration_ms` |
+| `finding_context.unavailable` | info | A finding's code could not be rebuilt (installation or commit gone, line not in the diff) | `job_id`, `reason` |
 | `github.review.published` | info | The review was posted | `provider`, `installation_id`, `comments`, `inline_fallback`, `conclusion` |
 | `github.review.inline_rejected` | warning | GitHub refused the inline comments (422); they go into the review body | `provider`, `comments` |
 | `identity.profile.loaded` | info | Sign-in loaded the GitHub profile | `provider`, `organizations` |
