@@ -1,10 +1,12 @@
-"""What `.review/rules.md` holds at a review job's pull request head, for the console.
+"""What `.review/rules.md` holds at a review job's base revision, for the console.
 
-The run screen shows whether the pull request's own branch carries a rules file and a
-read-only preview of the parsed rules. The file is read at the job's head SHA, the
-revision docs/RULES_FORMAT_SPEC.md §1 says reviews read rules from, through the
-`RepositoryContents` port, and parsed through the `RulesParser` port, the same parser
-the review prompt uses.
+The run screen shows whether the pull request's base branch carries a rules file
+and a read-only preview of the parsed rules. The file is read at the job's
+`base_sha` — the target branch the pull request merges into, so the PR author
+cannot steer their own review's rules (team decision 2026-10-27, superseding
+RULES_FORMAT_SPEC.md §1 [R1]; the same revision the review applies) — through
+the `RepositoryContents` port, and parsed through the `RulesParser` port, the
+same parser the review prompt uses.
 
 Limits and statuses follow docs/RULES_FORMAT_SPEC.md §4, §5 and §7. Rule text is
 returned to the console but never logged.
@@ -124,39 +126,39 @@ class JobRulesService:
 
     async def _read(self, job: "ReviewJob") -> RulesPreview:
         payload = job.payload
-        head_sha = payload.head_sha
+        base_sha = payload.base_sha
         try:
             raw = await self._contents.read_file(
                 payload.installation_id,
                 payload.repo_full_name,
                 RULES_PATH,
-                head_sha,
+                base_sha,
                 max_bytes=RULES_MAX_BYTES,
             )
         except ForgePermissionError:
             return RulesPreview(
-                ref=head_sha,
+                ref=base_sha,
                 status=RulesStatus.IGNORED_FORBIDDEN,
-                file_url=rules_file_url(payload.repo_full_name, head_sha),
+                file_url=rules_file_url(payload.repo_full_name, base_sha),
             )
         if raw is None:
             return RulesPreview(
-                ref=head_sha,
+                ref=base_sha,
                 status=RulesStatus.ABSENT,
                 # A file cannot be created at a SHA, only on a branch.
                 file_url=(
                     None
-                    if not payload.head_ref
-                    else new_rules_file_url(payload.repo_full_name, payload.head_ref)
+                    if not payload.base_ref
+                    else new_rules_file_url(payload.repo_full_name, payload.base_ref)
                 ),
             )
 
-        file_url = rules_file_url(payload.repo_full_name, head_sha)
+        file_url = rules_file_url(payload.repo_full_name, base_sha)
         decoded = decode_rules_file(raw)
         if isinstance(decoded, RulesStatus):
-            return RulesPreview(ref=head_sha, status=decoded, file_url=file_url)
+            return RulesPreview(ref=base_sha, status=decoded, file_url=file_url)
         return RulesPreview(
-            ref=head_sha,
+            ref=base_sha,
             status=RulesStatus.APPLIED,
             file_url=file_url,
             parsed=self._parser.parse(decoded),

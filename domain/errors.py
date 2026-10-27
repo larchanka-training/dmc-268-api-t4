@@ -182,3 +182,12 @@ class DiffFormatError(Exception):
         super().__init__(f"malformed diff at line {line_number}: {reason}")
         self.reason = reason
         self.line_number = line_number
+
+
+class SymbolParseError(Exception):
+    """The syntax tree of a file could not be trusted at the changed lines.
+
+    Raised by a `SymbolIndex` implementation: the caller falls back to a plain
+    line window, never fails the review. The message carries a reason only —
+    never source content (AGENTS.md hard rule 3).
+    """

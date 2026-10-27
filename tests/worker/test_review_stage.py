@@ -152,6 +152,7 @@ class FakeStepRecorder:
         *,
         worker_id: str,
         error_kind: str | None = None,
+        metrics: dict[str, int | str] | None = None,
     ) -> None:
         self.calls.append((str(step), str(status), error_kind))
 

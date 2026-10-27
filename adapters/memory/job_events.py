@@ -5,10 +5,68 @@ in-memory dev mode records no steps, so there every stream answers 404.
 """
 
 import asyncio
-from dataclasses import replace
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from datetime import datetime
 
-from domain.jobs import JobEvent, JobSnapshot
+from domain.jobs import JobEvent, JobSnapshot, JobStep, StepStatus
 from domain.ports import ReviewJobStatus
+
+
+@dataclass
+class _RunningStep:
+    step: JobStep
+    attempt: int
+    started_at: datetime
+
+
+class InMemoryStepRecorder:
+    """Implements `domain.ports.StepRecorder` in memory: the twin of
+    `PostgresStepRecorder` for tests and the in-memory dev mode.
+
+    Keeps the latest record per (step, attempt), like the `pr_review_steps`
+    table does, and returns them through `records()` for assertions.
+    """
+
+    def __init__(self) -> None:
+        self._steps: dict[tuple[str, int, JobStep], dict[str, object]] = {}
+        self._running: dict[tuple[str, str], _RunningStep] = {}
+
+    async def start(self, job_id: str, attempt: int, step: JobStep, *, worker_id: str) -> None:
+        self._running[(job_id, worker_id)] = _RunningStep(step, attempt, datetime.now())
+
+    async def finish(
+        self,
+        job_id: str,
+        attempt: int,
+        step: JobStep,
+        status: StepStatus,
+        *,
+        worker_id: str,
+        error_kind: str | None = None,
+        metrics: Mapping[str, int | str] | None = None,
+    ) -> None:
+        key = (job_id, worker_id)
+        running = self._running.pop(key, None)
+        started = running.started_at if running is not None else datetime.now()
+        self._steps[(job_id, attempt, step)] = {
+            "step": step,
+            "attempt": attempt,
+            "status": status,
+            "started_at": started,
+            "finished_at": datetime.now(),
+            "error_kind": error_kind,
+            "metrics": dict(metrics) if metrics else None,
+        }
+
+    def records(self, job_id: str) -> tuple[dict[str, object], ...]:
+        return tuple(
+            record
+            for (record_job_id, _, _), record in sorted(
+                self._steps.items(), key=lambda item: (item[0][1], item[1]["started_at"])
+            )
+            if record_job_id == job_id
+        )
 
 
 class InMemoryJobEventsSource:

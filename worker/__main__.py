@@ -17,19 +17,22 @@ import signal
 from contextlib import suppress
 
 from adapters.clock import SystemClock
+from adapters.context import TreeSitterSymbolIndex
 from adapters.github.app_auth import GitHubAppAuth
 from adapters.github.config import GitHubAppSettings
+from adapters.github.contents import GitHubRepositoryContents
 from adapters.github.factory import build_vcs_client
 from adapters.github.publisher import GitHubReviewPublisher
-from adapters.llm.config import LLMSettings
+from adapters.llm.config import CONTEXT_TOKEN_BUDGET_FRACTION, LLMSettings
 from adapters.llm.factory import build_gateway
+from adapters.memory.cached_contents import CachedRepositoryContents
 from adapters.observability.config import LoggingSettings, SentrySettings
 from adapters.observability.logging import configure_logging
 from adapters.observability.sentry import init_sentry
 from domain.ports import GitProvider
 from worker.config import WorkerSettings
 from worker.loop import run_worker
-from worker.process import DEBUG_LOG_DIFF_ENV, ReviewStage
+from worker.process import DEBUG_LOG_DIFF_ENV, ContextStage, ReviewStage
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +53,30 @@ def build_review_from_env() -> ReviewStage:
     )
 
 
+def build_context_stage_from_env() -> ContextStage:
+    """The enriched-context stage: repository rules from the base revision and
+    AST context from the head revision (review-context spec).
+
+    The contents port carries the in-process TTL cache; fetched rule text and
+    source live in this process only — never a store or a log."""
+    app_settings = GitHubAppSettings.from_env()
+    clock = SystemClock()
+    contents = CachedRepositoryContents(
+        GitHubRepositoryContents(app_settings, GitHubAppAuth(app_settings, clock)), clock
+    )
+    llm = LLMSettings.from_env()
+    return ContextStage(
+        contents=contents,
+        symbols=TreeSitterSymbolIndex(),
+        context_budget_tokens=int(llm.max_input_tokens * CONTEXT_TOKEN_BUDGET_FRACTION),
+    )
+
+
 async def _run_until_signalled(
-    settings: WorkerSettings, vcs: GitProvider, review: ReviewStage
+    settings: WorkerSettings,
+    vcs: GitProvider,
+    review: ReviewStage,
+    context_stage: ContextStage | None = None,
 ) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -62,7 +87,7 @@ async def _run_until_signalled(
         with suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
     try:
-        await run_worker(settings, vcs, stop=stop, review=review)
+        await run_worker(settings, vcs, stop=stop, review=review, context_stage=context_stage)
     finally:
         for sig in (signal.SIGTERM, signal.SIGINT):
             with suppress(NotImplementedError):
@@ -81,7 +106,8 @@ def main() -> None:
     settings = WorkerSettings.from_env()
     vcs = build_vcs_from_env()
     review = build_review_from_env()
-    asyncio.run(_run_until_signalled(settings, vcs, review))
+    context_stage = build_context_stage_from_env()
+    asyncio.run(_run_until_signalled(settings, vcs, review, context_stage))
 
 
 if __name__ == "__main__":

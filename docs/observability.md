@@ -173,6 +173,7 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `worker.reaper.recovered` | info | Reaper ticks work again | — |
 | `worker.debug_log_diff.ignored` | warning | `DEBUG_LOG_DIFF=1` outside `ENV=local` | — |
 | `job.files` | info | The PR's files after the filter | `job_id`, `repo`, `pr_number`, `reviewable_paths`, `skipped_paths` |
+| `job.context.built` | info | Rules and AST context were loaded for the review | `job_id`, `repo`, `pr_number`, `rules_loaded`, `context_files`, `context_fetches`, `tier1_symbols`, `tier2_symbols`, `fallback_files`, `parse_errors`, `context_tokens`, `context_cut` |
 | `job.diff.debug` | info | The fetched diff: only with `DEBUG_LOG_DIFF=1` in `ENV=local` | `job_id`, `repo`, `pr_number`, `diff_text` (a local-only field) |
 | `job.finished` | info for `COMPLETED`; error for `FAILED`, with the exception (one Sentry event) | The job reached a terminal status | `job_id`, `provider`, `repo`, `pr_number`, `outcome`, `duration_ms`; `files`, `reviewable`, `hunks`, `chunks` when completed; `error_kind`, `error_type` when failed |
 | `job.retrying` | info | A retryable failure; the job waits for its next attempt | `job_id`, `provider`, `repo`, `pr_number`, `error_kind`, `attempt`, `next_attempt_at`, `duration_ms` |

@@ -18,6 +18,10 @@ DEFAULT_TEMPERATURE = 0.0
 DEFAULT_MAX_TOKENS = 16384
 # Hard input budget, as recommended for qwen3-coder: a bigger prompt is refused before any
 # provider is called. Fitting context into the budget is the context builder's job.
+#: docs/CONTEXT_AND_VERIFICATION_SPEC.md §1.4 [C4]: context may use at most this
+#: fraction of the input token budget; the diff is never displaced by it.
+CONTEXT_TOKEN_BUDGET_FRACTION = 0.4
+
 DEFAULT_MAX_INPUT_TOKENS = 32000
 MAX_TEMPERATURE = 2.0
 DEFAULT_TYPESAFE_BASE_URL = "https://api.typesafe.ai"

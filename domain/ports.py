@@ -1,5 +1,5 @@
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -29,11 +29,104 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
+class SymbolSpan:
+    """One named symbol of a file, as the AST sees it (CONTEXT_AND_VERIFICATION_SPEC [C2]).
+
+    Lines are 1-based in the head revision; `start_line` includes the decorators
+    or doc comment the language counts into the symbol, and `signature_end_line`
+    ends the definition header and docstring, so a signature block is
+    `start_line`..`signature_end_line` and a full symbol `start_line`..`end_line`.
+    """
+
+    KINDS = ("function", "method", "class")
+
+    name: str
+    kind: str
+    start_line: int
+    end_line: int
+    signature_end_line: int
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise ValueError("symbol name must not be empty")
+        if self.kind not in self.KINDS:
+            raise ValueError(f"symbol kind must be one of {self.KINDS}, got {self.kind!r}")
+        if not 1 <= self.start_line <= self.signature_end_line <= self.end_line:
+            raise ValueError(
+                "symbol lines must satisfy 1 <= start_line <= signature_end_line <= end_line, "
+                f"got {self.start_line}, {self.signature_end_line}, {self.end_line}"
+            )
+
+
+class SymbolIndex(Protocol):
+    """The syntax-tree view of a file at its head revision.
+
+    Implemented in `adapters/context/` with tree-sitter; parsing is CPU-only and
+    does no I/O. `enclosing` and `called_from` raise `SymbolParseError` when the
+    tree has errors at the requested lines: the caller falls back to a window.
+    """
+
+    def supports(self, path: str) -> bool:
+        """True when the file's language has a grammar loaded."""
+        ...
+
+    def enclosing(self, path: str, source: str, lines: Sequence[int]) -> Sequence[SymbolSpan]:
+        """The innermost function/method/class symbols whose spans contain `lines`."""
+        ...
+
+    def called_from(self, path: str, source: str, lines: Sequence[int]) -> Sequence[SymbolSpan]:
+        """Same-file symbols called from `lines`, as signature spans."""
+        ...
+
+
+class ContextBlockKind(StrEnum):
+    ENCLOSING = "enclosing"
+    CALLED = "called"
+    WINDOW = "window"
+
+
+@dataclass(frozen=True, slots=True)
+class ContextBlock:
+    """One slice of head-revision source around a change ([C5] context block).
+
+    repr is suppressed on text so a traceback or a log line that formats this
+    object cannot leak source code (AGENTS.md hard rule 3).
+    """
+
+    kind: ContextBlockKind
+    name: str
+    start_line: int
+    end_line: int
+    text: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if self.kind is ContextBlockKind.WINDOW:
+            if self.name:
+                raise ValueError("a window block has no symbol name")
+        elif not self.name.strip():
+            raise ValueError(f"a {self.kind.value} block needs a symbol name")
+        if not 1 <= self.start_line <= self.end_line:
+            raise ValueError(
+                f"block lines must satisfy 1 <= start_line <= end_line, "
+                f"got {self.start_line}, {self.end_line}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class FileContext:
+    """The context blocks of one file, in diff order."""
+
+    path: str
+    blocks: tuple[ContextBlock, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewRequest:
     diff_text: str
     pr_title: str
     pr_description: str
     rules_markdown: str | None = None
+    context: tuple[FileContext, ...] = ()
 
 
 class LLMGateway(Protocol):
@@ -484,8 +577,10 @@ class StepRecorder(Protocol):
         *,
         worker_id: str,
         error_kind: str | None = None,
+        metrics: "Mapping[str, int | str] | None" = None,
     ) -> None:
-        """Record how the running step ended."""
+        """Record how the running step ended. `metrics` carries counters only
+        (domain.jobs.STEP_METRIC_KEYS); a step that has none passes None."""
         ...
 
 

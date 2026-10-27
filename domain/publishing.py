@@ -28,6 +28,7 @@ from enum import StrEnum
 
 from domain.diff import FileDiff
 from domain.models import RISK_ORDER, DiffSide, Finding, FindingPosition, RiskLevel, Severity
+from domain.repository_rules import RULES_PATH
 
 # Most severe first: Severity is declared in that order in domain/models.py.
 SEVERITY_ORDER: tuple[Severity, ...] = tuple(Severity)
@@ -213,6 +214,39 @@ class PublishStats:
 
 
 @dataclass(frozen=True, slots=True)
+class RulesAudit:
+    """What the review knows about `.review/rules.md` (RULES_FORMAT_SPEC §7 [R11]).
+
+    Counts and the revision only — never rule text (AGENTS.md hard rule 3).
+    `status` carries a `RulesStatus` value: the line renders for a file that was
+    found (applied or rejected); an absent or unreadable-due-to-permissions file
+    has no audit at all, and so no line.
+    """
+
+    ref: str
+    status: str
+    rules: int = 0
+    dropped_suspicious: int = 0
+    dropped_over_limit: int = 0
+
+
+def rules_audit_line(audit: RulesAudit) -> str:
+    """The one Check Run line about the rules, exactly as [R11] sketches it."""
+    at = f"{RULES_PATH} @ {audit.ref}"
+    if audit.status == "rejected:too_large":
+        return f"Rules: {at} ignored — too large (over 64 KB)."
+    if audit.status == "rejected:encoding":
+        return f"Rules: {at} ignored — not valid UTF-8."
+    dropped = []
+    if audit.dropped_suspicious:
+        dropped.append(f"{audit.dropped_suspicious} dropped as suspicious")
+    if audit.dropped_over_limit:
+        dropped.append(f"{audit.dropped_over_limit} dropped over the limit")
+    tail = f", {', '.join(dropped)}" if dropped else ""
+    return f"Rules: {at} — {audit.rules} rules{tail}."
+
+
+@dataclass(frozen=True, slots=True)
 class PublishPlan:
     comments: tuple[PlannedComment, ...]
     summary: str
@@ -221,6 +255,8 @@ class PublishPlan:
     conclusion: CheckConclusion
     stats: PublishStats
     risk: RiskLevel = RiskLevel.LOW
+    # What applied from `.review/rules.md` ([R11]); None — no line in the summary.
+    rules_audit: "RulesAudit | None" = None
 
     @property
     def needs_review(self) -> bool:
@@ -293,6 +329,7 @@ def build_plan(
     model_risk: RiskLevel | None = None,
     checklist: tuple[str, ...] = (),
     dismissed_by_verifier: int = 0,
+    rules_audit: RulesAudit | None = None,
 ) -> PublishPlan:
     received = tuple(findings)
     in_diff = [finding for finding in received if lines.contains(finding.position)]
@@ -353,6 +390,7 @@ def build_plan(
         model_risk=model_risk,
         checklist=checklist,
         dismissed=dismissed_by_verifier,
+        rules_audit=rules_audit,
     )
     return PublishPlan(
         comments=comments,
@@ -362,6 +400,7 @@ def build_plan(
         conclusion=conclusion,
         stats=stats,
         risk=risk,
+        rules_audit=rules_audit,
     )
 
 
@@ -513,6 +552,7 @@ def render_summary(
     model_risk: RiskLevel | None = None,
     checklist: tuple[str, ...] = (),
     dismissed: int = 0,
+    rules_audit: RulesAudit | None = None,
 ) -> str:
     """The overview: verdict, the model's summary, risk, checklist, risks by severity, files."""
     parts = [SUMMARY_MARKER, f"## {_VERDICT_LABEL[verdict]}", ""]
@@ -564,6 +604,8 @@ def render_summary(
                 f"{stats.over_limit} more were not posted inline because of the comment limit._",
             ]
         )
+    if rules_audit is not None:
+        parts.extend(["", rules_audit_line(rules_audit)])
     summary = "\n".join(parts)
     if len(summary) > SUMMARY_MAX_LENGTH:
         summary = summary[: SUMMARY_MAX_LENGTH - 1] + "…"
