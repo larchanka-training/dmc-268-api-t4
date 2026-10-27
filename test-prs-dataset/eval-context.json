@@ -1,0 +1,118 @@
+{
+  "con-blocking-call-in-async": {
+    "checkout": "con-blocking-call-in-async/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "con-lock-order-deadlock": {
+    "checkout": "con-lock-order-deadlock/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "con-lost-update-across-await": {
+    "checkout": "con-lost-update-across-await/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "cor-empty-average-division": {
+    "checkout": "cor-empty-average-division/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "cor-inverted-balance-check": {
+    "checkout": "cor-inverted-balance-check/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "cor-mutable-default-argument": {
+    "checkout": "cor-mutable-default-argument/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "cor-pagination-off-by-one": {
+    "checkout": "cor-pagination-off-by-one/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "cor-swallowed-capture-error": {
+    "checkout": "cor-swallowed-capture-error/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "fmt-wide-multi-file-change": {
+    "checkout": "fmt-wide-multi-file-change/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "hold-cor-integer-division-percent": {
+    "checkout": "hold-cor-integer-division-percent/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "hold-neg-bounded-cache-with-lock": {
+    "checkout": "hold-neg-bounded-cache-with-lock/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "hold-neg-safe-loaders-and-escaping": {
+    "checkout": "hold-neg-safe-loaders-and-escaping/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "hold-sec-ssrf-fetch-user-url": {
+    "checkout": "hold-sec-ssrf-fetch-user-url/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "inj-instructions-in-description": {
+    "checkout": "inj-instructions-in-description/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "mnt-error-rewrapped-without-cause": {
+    "checkout": "mnt-error-rewrapped-without-cause/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "mnt-flag-argument-explosion": {
+    "checkout": "mnt-flag-argument-explosion/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "mnt-getter-writes-to-database": {
+    "checkout": "mnt-getter-writes-to-database/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "neg-rename-and-docstrings": {
+    "checkout": "neg-rename-and-docstrings/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "neg-subprocess-argument-list": {
+    "checkout": "neg-subprocess-argument-list/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "neg-whitelisted-order-by": {
+    "checkout": "neg-whitelisted-order-by/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "perf-n-plus-one-query": {
+    "checkout": "perf-n-plus-one-query/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "perf-quadratic-dedupe": {
+    "checkout": "perf-quadratic-dedupe/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "perf-unbounded-response-cache": {
+    "checkout": "perf-unbounded-response-cache/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "sec-command-injection": {
+    "checkout": "sec-command-injection/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "sec-hardcoded-token": {
+    "checkout": "sec-hardcoded-token/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "sec-jwt-signature-skipped": {
+    "checkout": "sec-jwt-signature-skipped/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "sec-path-traversal": {
+    "checkout": "sec-path-traversal/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "sec-sql-sort-injection": {
+    "checkout": "sec-sql-sort-injection/checkout",
+    "rules": "../.review/rules.md"
+  },
+  "sec-unsafe-deserialization": {
+    "checkout": "sec-unsafe-deserialization/checkout",
+    "rules": "../.review/rules.md"
+  }
+}
