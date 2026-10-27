@@ -26,7 +26,10 @@ NO_STORE = "no-store"
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 _REQUESTED_WITH = "fetch"
-_WEBHOOK_PREFIX = "/webhooks/"
+#: Version prefix of every API route; the proxy adds /api in front (issue #43).
+API_PREFIX = "/v1"
+#: Both the versioned and the legacy root path, while the GitHub App moves over.
+_WEBHOOK_PREFIXES = (f"{API_PREFIX}/webhooks/", "/webhooks/")
 
 
 class ApiError(Exception):
@@ -158,9 +161,9 @@ def enforce_csrf(request: Request) -> JSONResponse | None:
     # delivery signature, verified in the route
     # (docs/WORKFLOW_DESIGN.md §2 Step 2).
     # Behind uvicorn --root-path /api the request path carries the prefix
-    # (/api/webhooks/github), so match on the path the router sees.
+    # (/api/v1/webhooks/github), so match on the path the router sees.
     route_path = request.scope["path"].removeprefix(request.scope.get("root_path", ""))
-    if route_path.startswith(_WEBHOOK_PREFIX):
+    if route_path.startswith(_WEBHOOK_PREFIXES):
         return None
     if request.method in _SAFE_METHODS:
         return None

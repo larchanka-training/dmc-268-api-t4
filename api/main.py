@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -35,6 +35,7 @@ from api.access_log import install_access_log
 from api.auth import router as auth_router
 from api.config import AppSettings
 from api.deps import (
+    API_PREFIX,
     ApiError,
     Services,
     api_error_response,
@@ -144,12 +145,30 @@ def create_app(
     def health_check() -> dict[str, str]:
         return {"status": "ok"}
 
-    app.include_router(auth_router)
-    app.include_router(repositories_router)
-    app.include_router(github_setup_router)
-    app.include_router(github_webhook_router)
-    app.include_router(jobs_router)
+    _include_routes(app)
     return app
+
+
+def _include_routes(app: FastAPI) -> None:
+    """Every route under /v1, the base the OpenAPI spec declares (/api/v1 behind
+    the proxy, which strips /api), and again from the root while clients move
+    over (issue #43).
+
+    The root copies are the paths GitHub (webhook URL, OAuth callback) and
+    older frontend builds still call. They stay out of the schema; the access
+    log records their route template without /v1, so their traffic is visible
+    and they can be dropped once it stops (docs/api-versioning.md)."""
+    routers: list[APIRouter] = [
+        auth_router,
+        repositories_router,
+        github_setup_router,
+        github_webhook_router,
+        jobs_router,
+    ]
+    for router in routers:
+        app.include_router(router, prefix=API_PREFIX)
+    for router in routers:
+        app.include_router(router, include_in_schema=False)
 
 
 def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:

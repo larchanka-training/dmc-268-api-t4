@@ -66,7 +66,7 @@ def test_it_redirects_to_sign_in_with_the_agreed_return_to(auth_clock: FixedCloc
 
     assert response.status_code == 302
     location = response.headers["location"]
-    assert location.startswith("/api/auth/github?")
+    assert location.startswith("/api/v1/auth/github?")
     assert unquote(str(httpx.URL(location).params["return_to"])) == EXPECTED_RETURN_TO
 
 

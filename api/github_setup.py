@@ -15,7 +15,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse, Response
 
-from api.deps import NO_STORE, optional_session, services
+from api.deps import API_PREFIX, NO_STORE, optional_session, services
 from domain.auth import Session
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ router = APIRouter()
 
 # The public path, with the /api prefix the proxy strips: this is a browser redirect.
 RETURN_TO = "/repositories?connected=1"
-SIGN_IN_PATH = "/api/auth/github"
+SIGN_IN_PATH = f"/api{API_PREFIX}/auth/github"
 
 
 @router.get("/github/setup")
