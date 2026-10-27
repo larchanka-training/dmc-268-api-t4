@@ -51,7 +51,7 @@ Other:
 
 - [x] **Run Bootstrap** — the Bootstrap workflow (root), so `/opt/dmc268/logs` exists and
       is owned by 10001 before the first deploy with `LOG_DIR`.
-- [ ] After the deploy: `api.jsonl` and `worker.jsonl` in `/opt/dmc268/logs`, rotated
+- [x] After the deploy: `api.jsonl` and `worker.jsonl` in `/opt/dmc268/logs`, rotated
       and gzipped after midnight UTC.
 
 ## Phase 2: Sentry
@@ -64,9 +64,6 @@ Other:
 
 ### A. Merge and finish phase 3
 
-- [ ] Commit phases 3 and 4 with `tasks/commit-message.txt` (`git add -A && git reset
-      tasks/commit-message.txt`, then `git commit -F tasks/commit-message.txt` and delete
-      the file); open the PR; CI is green, the new `alert-rules` job included.
 - [x] **Postgres exporter role** — `dmc268_exporter` with `pg_monitor`, created by hand
       with the password from the secret (2026-10-27).
 - [ ] Merge in a quiet period: the first deploy restarts Postgres with the new `command`
@@ -83,18 +80,11 @@ Other:
 
 ### B. Telegram bot
 
-- [ ] In Telegram, @BotFather → `/newbot`: a name, and a username ending in `bot`. It
-      replies with the token.
-- [ ] A team group with the bot in it; send `/start@<botname>` in the group.
-- [ ] The group's chat id (a negative number), the token kept out of shell history:
-      `read -rs TOKEN`, then
-      `curl -s "https://api.telegram.org/bot$TOKEN/getUpdates" | python3 -m json.tool | grep -A3 '"chat"'`,
-      then `unset TOKEN`.
-- [ ] Secrets `ALERTS_TELEGRAM_BOT_TOKEN` and `ALERTS_TELEGRAM_CHAT_ID`.
+- [x] Secrets `ALERTS_TELEGRAM_BOT_TOKEN` and `ALERTS_TELEGRAM_CHAT_ID`.
 
 ### C. Sentry
 
-- [ ] Sentry internal integration `telegram-relay` — Settings → Developer Settings →
+- [x] Sentry internal integration `telegram-relay` — Settings → Developer Settings →
       Custom Integrations → Create New Integration → Internal Integration; webhook
       `https://<site>/api/internal/alerts/sentry`, Alert Rule Action on, no permissions.
       Its **Client Secret** (it signs each delivery; not the integration's token) →
@@ -105,9 +95,11 @@ Other:
 - [ ] Sentry alert rules — Monitors → Alerts → Create Alert, project `dmc268-backend`,
       environment `production`; each with "Notify on preferred channel" (the admin,
       email) and "Send a notification via an integration" → `telegram-relay`:
-      New issue ("A new issue is created"); Regression ("A resolved issue regresses");
-      Error burst ("An event or issue activity is captured" + Number of events more than
-      10 in 10 minutes); Critical (same trigger + Event level equals `fatal`). If
+      - [ ] New issue ("A new issue is created");
+      - [ ] Regression ("A resolved issue regresses");
+      - [ ] Error burst ("An event or issue activity is captured" + Number of events more than
+      10 in 10 minutes); 
+      - [ ] Critical (same trigger + Event level equals `fatal`). If
       `telegram-relay` is not offered, check that Alert Rule Action is on. The Grafana
       rules are not created by hand: the `observability-sync` workflow pushes them.
 - [ ] "Send Test Notification" on one of the rules: a message arrives in the Telegram
@@ -120,7 +112,7 @@ Other:
 
 ### D. Grafana
 
-- [ ] Variables `GRAFANA_URL` (`https://<stack>.grafana.net`) and `GRAFANA_SM_URL`
+- [x] Variables `GRAFANA_URL` (`https://<stack>.grafana.net`) and `GRAFANA_SM_URL`
       (Synthetic Monitoring's API URL for the stack's region), secret `GRAFANA_SM_TOKEN`
       (Testing & synthetics → Synthetics → Config → access token). Optional: variables
       `SENTRY_ORG_URL` (for the dashboard's traces link) and
