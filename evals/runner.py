@@ -9,14 +9,20 @@ from dataclasses import dataclass
 
 import httpx
 
-from adapters.llm.config import LLMSettings
+from adapters.context import TreeSitterSymbolIndex
+from adapters.llm.config import CONTEXT_TOKEN_BUDGET_FRACTION, LLMSettings
 from adapters.llm.factory import build_gateway
 from adapters.llm.gateway import ChatProvider
-from adapters.llm.prompt import ChatMessage, estimate_tokens
+from adapters.llm.prompt import ChatMessage, estimate_text_tokens, estimate_tokens
 from adapters.llm.schema import InvalidReviewJSONError, parse_review
+from domain.context import MAX_SOURCE_BYTES, build_context, select_context_files
+from domain.diff import parse_diff
+from domain.diff_filter import filter_files
 from domain.errors import AllProvidersFailedError, LLMGatewayError, LLMOutputError
 from domain.models import Finding
-from domain.ports import ReviewRequest
+from domain.ports import FileContext, ReviewRequest
+from domain.repository_rules import RULES_MAX_BYTES, RulesStatus, decode_rules_file
+from evals.context import CaseContextSource
 from evals.diffinfo import changed_lines
 from evals.models import Case, PredictedFinding
 from evals.scoring import CaseScore, ReviewOutcome, RunStatus, score_case
@@ -106,8 +112,14 @@ def classify_failure(error: LLMGatewayError) -> RunStatus:
 
 class LiveRunner:
     def __init__(
-        self, settings: LLMSettings, *, transport: httpx.AsyncBaseTransport | None = None
+        self,
+        settings: LLMSettings,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        context_sources: dict[str, CaseContextSource] | None = None,
     ) -> None:
+        self._settings = settings
+        self._context_sources = context_sources or {}
         self._recorder = _Recorder()
         self._gateway = build_gateway(
             settings,
@@ -118,8 +130,51 @@ class LiveRunner:
     async def run(self, case: Case) -> RunRecord:
         diff_text = case.read_diff()
         changed = changed_lines(diff_text)
+        request_context: tuple[FileContext, ...] = ()
+        rules_markdown = None
+        source = self._context_sources.get(case.id)
+        if source is not None:
+            if source.rules is not None:
+                try:
+                    with source.rules.open("rb") as rules_file:
+                        raw_rules = rules_file.read(RULES_MAX_BYTES + 1)
+                except OSError:
+                    raw_rules = b""
+                decoded_rules = decode_rules_file(raw_rules)
+                if not isinstance(decoded_rules, RulesStatus):
+                    rules_markdown = decoded_rules
+            if source.checkout is not None:
+                checkout = source.checkout.resolve()
+                selected = select_context_files(filter_files(parse_diff(diff_text)).kept)
+                sources: dict[str, str] = {}
+                for file_diff in selected:
+                    try:
+                        source_path = (checkout / file_diff.new_path).resolve()
+                    except (OSError, RuntimeError):
+                        continue
+                    if not source_path.is_relative_to(checkout):
+                        continue
+                    if not source_path.is_file() or source_path.stat().st_size > MAX_SOURCE_BYTES:
+                        continue
+                    try:
+                        sources[file_diff.new_path] = source_path.read_text(encoding="utf-8")
+                    except UnicodeDecodeError:
+                        continue
+                request_context, _ = build_context(
+                    selected,
+                    sources,
+                    TreeSitterSymbolIndex(),
+                    token_budget=int(
+                        self._settings.max_input_tokens * CONTEXT_TOKEN_BUDGET_FRACTION
+                    ),
+                    estimate=estimate_text_tokens,
+                )
         request = ReviewRequest(
-            diff_text=diff_text, pr_title=case.title, pr_description=case.description
+            diff_text=diff_text,
+            pr_title=case.title,
+            pr_description=case.description,
+            rules_markdown=rules_markdown,
+            context=request_context,
         )
         self._recorder.reset()
         try:

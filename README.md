@@ -24,6 +24,34 @@ uv export --no-dev --no-hashes --no-emit-project -o requirements.txt
 
 ## Local development
 
+### Context-aware LLM evaluations
+
+`uv run python -m evals run` remains diff-only by default. To provide local head-revision
+source trees and/or repository rules for selected cases, pass a JSON manifest:
+
+```json
+{
+  "sec-sql-sort-injection": {
+    "checkout": "./checkouts/sql-case-head",
+    "rules": "./rules/review-rules.md"
+  },
+  "another-case": {
+    "checkout": "/path/to/another/head-checkout"
+  }
+}
+```
+
+Paths are resolved relative to the manifest file; checkout paths must be directories and
+rules paths must be files. Cases omitted from the manifest receive no extra context. Run
+with `uv run python -m evals run --context-manifest eval-context.json`; context mode is
+recorded in the summary configuration. This option cannot be combined with `--bundle`.
+The evaluator reads only selected, bounded source files, applies the normal AST context
+builder/token budget, and never stores or logs source or rules content.
+
+**Warning:** `run` sends case diffs, PR metadata, and any supplied source/rules content to
+the configured live LLM provider. Only use trusted data and a provider approved to receive
+it. Tests use mocked HTTP transports and never call a live model.
+
 API and PostgreSQL, with throwaway GitHub settings:
 
 ```bash
