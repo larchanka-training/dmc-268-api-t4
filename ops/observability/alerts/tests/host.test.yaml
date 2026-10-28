@@ -1,0 +1,71 @@
+# promtool test rules: fire, not fire, absent series. Host rules have no root.
+rule_files:
+  - ../host.rules.yaml
+evaluation_interval: 1m
+
+tests:
+  - name: HostResources fires after 10 minutes of RAM over 90% or disk over 85%
+    interval: 1m
+    input_series:
+      - {series: 'node_memory_MemAvailable_bytes{job="host", instance="h"}', values: '5x15'}
+      - {series: 'node_memory_MemTotal_bytes{job="host", instance="h"}', values: '100x15'}
+      - {series: 'node_filesystem_avail_bytes{job="host", instance="h", mountpoint="/", device="/dev/sda1", fstype="ext4"}', values: '10x15'}
+      - {series: 'node_filesystem_size_bytes{job="host", instance="h", mountpoint="/", device="/dev/sda1", fstype="ext4"}', values: '100x15'}
+    alert_rule_test:
+      - {eval_time: 5m, alertname: HostResources, exp_alerts: []}
+      - eval_time: 11m
+        alertname: HostResources
+        exp_alerts:
+          - exp_labels: {job: host, instance: h, domain: host, severity: warning, owner: unassigned}
+            exp_annotations: &host_resources
+              summary: The host's RAM is over 90% or its disk over 85% used, for 10 minutes.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#host-resources
+          - exp_labels: {job: host, instance: h, mountpoint: /, device: /dev/sda1, fstype: ext4, domain: host, severity: warning, owner: unassigned}
+            exp_annotations: *host_resources
+
+  - name: HostResources stays quiet at half use
+    interval: 1m
+    input_series:
+      - {series: 'node_memory_MemAvailable_bytes{job="host", instance="h"}', values: '50x15'}
+      - {series: 'node_memory_MemTotal_bytes{job="host", instance="h"}', values: '100x15'}
+      - {series: 'node_filesystem_avail_bytes{job="host", instance="h", mountpoint="/", device="/dev/sda1", fstype="ext4"}', values: '50x15'}
+      - {series: 'node_filesystem_size_bytes{job="host", instance="h", mountpoint="/", device="/dev/sda1", fstype="ext4"}', values: '100x15'}
+    alert_rule_test:
+      - {eval_time: 11m, alertname: HostResources, exp_alerts: []}
+
+  - name: No series, no alert
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - {eval_time: 15m, alertname: HostResources, exp_alerts: []}
+      - {eval_time: 15m, alertname: ContainerRestarts, exp_alerts: []}
+      - {eval_time: 15m, alertname: OomKill, exp_alerts: []}
+
+  - name: ContainerRestarts fires on a third restart in 15 minutes, and ignores the cgroup root
+    interval: 1m
+    input_series:
+      - {series: 'container_start_time_seconds{job="cadvisor", instance="c", id="/docker/abc", image="api", name="dmc268-worker-1"}', values: '100 160 220 280 280 280'}
+      - {series: 'container_start_time_seconds{job="cadvisor", instance="c", id="/docker/def", image="api", name="dmc268-api-1"}', values: '100 160 220 220 220 220'}
+      - {series: 'container_start_time_seconds{job="cadvisor", instance="c", id="/"}', values: '1 2 3 4 5 6'}
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ContainerRestarts
+        exp_alerts:
+          - exp_labels: {job: cadvisor, instance: c, id: /docker/abc, image: api, name: dmc268-worker-1, domain: host, severity: warning, owner: unassigned}
+            exp_annotations:
+              summary: A container restarted more than twice in 15 minutes.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#container-restarts
+
+  - name: OomKill fires when the kernel's counter rises, not while it is flat
+    interval: 1m
+    input_series:
+      - {series: 'node_vmstat_oom_kill{job="host", instance="h"}', values: '11 11 12 12'}
+    alert_rule_test:
+      - {eval_time: 1m, alertname: OomKill, exp_alerts: []}
+      - eval_time: 3m
+        alertname: OomKill
+        exp_alerts:
+          - exp_labels: {job: host, instance: h, domain: host, severity: warning, owner: unassigned}
+            exp_annotations:
+              summary: The kernel killed a process for lack of memory.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#oom-kill

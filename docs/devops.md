@@ -45,6 +45,8 @@ VPS у Contabo (Debian 13), /opt/dmc268, docker compose project "dmc268"
 | `.github/workflows/deploy.yml` | на push в main и вручную: сборка → GHCR → деплой → smoke → проверка портов |
 | `ops/bootstrap.sh`, `.github/workflows/bootstrap.yml` | однократная подготовка сервера root-ом: Docker, `rsync` (для деплоя фронтенда), пользователь `deploy`, `/opt/dmc268`, LLMNR/mDNS выключены. Запускается вручную (`workflow_dispatch`) или push в ветку `devops/bootstrap`, но не push в `main` |
 | `ops/deploy_key.pub` | публичный ключ CI для пользователя `deploy` |
+| `ops/observability/`, `.github/workflows/observability-sync.yml` | дашборды, правила алертов (с тестами `promtool` в CI), внешняя проверка и `sync.py`, который всё это отправляет в Grafana; workflow запускается вручную (docs/observability.md) |
+| `deploy/lab/` | лаборатория наблюдаемости на ноутбуке: Alloy и конфиги как в продакшене, локальные Prometheus, Loki и Grafana; `lab.py test` проверяет весь путь, `lab.py drill` репетирует сбои (deploy/lab/README.md) |
 
 ## Секреты и переменные
 
@@ -61,13 +63,26 @@ VPS у Contabo (Debian 13), /opt/dmc268, docker compose project "dmc268"
 | `LLM_PRIMARY_MODEL` | repo variable | api | id модели Eurouter, сейчас `qwen3-coder-30b-a3b` (см. «Открытые вопросы»). Если переменную удалить, строка в `.env` не пишется, deploy выдаёт warning |
 | `LLM_PRIMARY_PROVIDER_ORDER` | repo variable | api, llm-smoke | провайдеры Eurouter по порядку, например `scaleway,ovhcloud`. Пусто = маршрутизация Eurouter по умолчанию. Подробности в `docs/llm-gateway.md` |
 | `SENTRY_DSN` | repo secret | api | DSN проекта Sentry → `SENTRY_DSN` в `.env` для api и worker. Без него деплой не стартует (docs/observability.md) |
+| `GRAFANA_CLOUD_PROM_URL`, `GRAFANA_CLOUD_PROM_USER` | repo variable | api | Prometheus стека Grafana Cloud: URL (базовый, query или push: деплой пишет push) и id пользователя → `.env` для Alloy (решение 22) |
+| `GRAFANA_CLOUD_LOKI_URL`, `GRAFANA_CLOUD_LOKI_USER` | repo variable | api | то же для Loki |
+| `GRAFANA_CLOUD_TOKEN` | repo secret | api | токен access policy Grafana Cloud (metrics write, logs write). В контейнер его получает только Alloy, через интерполяцию compose |
+| `POSTGRES_EXPORTER_PASSWORD` | repo secret | api | пароль read-only роли `dmc268_exporter` (`pg_monitor`) для экспортера Postgres в Alloy; сгенерирован `openssl rand -hex 32`. Роль создаётся один раз вручную (tasks/observability-checklist.md, фаза 3) |
+| `SENTRY_WEBHOOK_SECRET` | repo secret | api | client secret внутренней интеграции Sentry `telegram-relay`: им подписана каждая доставка реле → `.env`. Без него `/api/internal/alerts/sentry` отвечает 404 |
+| `ALERTS_TELEGRAM_BOT_TOKEN`, `ALERTS_TELEGRAM_CHAT_ID` | repo secret | api | бот и чат команды для реле Sentry → `.env`. Без них реле пишет в лог `alert.dropped` вместо отправки. Те же значения один раз вводятся вручную в contact point `telegram` в Grafana |
+| `GRAFANA_URL` | repo variable | api | адрес стека Grafana Cloud (`https://<стек>.grafana.net`): аннотация деплоя в `deploy.yml` и `observability-sync.yml` |
+| `GRAFANA_SA_TOKEN` | repo secret | api | токен service account Grafana (дашборды, аннотации, alerting): аннотация деплоя и `ops/observability/sync.py`. Только CI |
+| `SENTRY_AUTH_TOKEN` | repo secret | api | Organization Token Sentry (`org:ci`): релиз, коммиты и деплой `production` в `deploy.yml`. Только CI |
+| `GRAFANA_SM_URL`, `GRAFANA_SM_TOKEN` | repo variable, repo secret | api | API Synthetic Monitoring и его токен: внешняя проверка `/api/health`, которую создаёт `sync.py`. Без них проверка пропускается с warning |
+| `GRAFANA_PROM_DATASOURCE_UID`, `SENTRY_ORG_URL` | repo variable, необязательные | api | uid источника Prometheus для правил алертов (по умолчанию `grafanacloud-prom`) и адрес организации Sentry для ссылки на трейсы с дашборда API |
 | `VPS_DMC268_U`, `VPS_DMC268_P` | org secret | — | root-вход по паролю, используется только в `bootstrap.yml` |
 | `GITHUB_TOKEN` | автоматически | api | push образа в GHCR; на сервере `docker login` → pull → `docker logout` |
 
 `/opt/dmc268/.env` на сервере создаётся из этих значений при каждом деплое: владелец `deploy`,
 права `600`. В образ и в репозиторий секреты не попадают. Ещё деплой пишет константы:
 `LLM_TIMEOUT_SECONDS=300` (решение 17), `ENV=production` и `LOG_DIR=/logs` (JSON-логи в
-ротируемые файлы `/opt/dmc268/logs`, см. docs/observability.md § Local fallback).
+ротируемые файлы `/opt/dmc268/logs`, см. docs/observability.md § Local fallback). Если
+заданы все шесть настроек Grafana Cloud и экспортера, ещё `COMPOSE_PROFILES=monitoring`,
+и compose запускает Alloy; если хоть одной нет, деплой выдаёт warning и идёт без Alloy.
 
 ## Как задеплоить вручную
 
@@ -183,6 +198,15 @@ gh workflow run deploy.yml -R larchanka-training/dmc-268-api-t4 --ref main -f im
     `/api/openapi.json`, а не `/openapi.json`, который отдал бы фронтенд.
 21. **Хостер: Contabo**, а не Hetzner из карточки спринта 1: сервер выдан вручную,
     это видно в приветствии SSH.
+22. **Метрики и логи уходят в Grafana Cloud через Alloy.** Сервис `alloy` в compose
+    (профиль `monitoring`, docs/observability.md § Metrics) скрейпит `api:9100`,
+    `worker:9101` и `caddy:2020`, запускает экспортеры хоста, контейнеров и Postgres,
+    читает `./logs` и отправляет всё в Grafana Cloud. Портов он не публикует, и эти три
+    порта доступны только в сети compose, так что проверка портов (решение 10) не
+    меняется; smoke проверяет, что `/api/metrics` отвечает 404. Сокеты Docker и
+    containerd смонтированы read-only: это эквивалент root, та же осознанная цена, что в
+    решении 14. Postgres запускается с `shared_preload_libraries=pg_stat_statements`,
+    поэтому первый деплой с этой командой перезапускает Postgres (несколько секунд).
 
 ## Открытые вопросы
 

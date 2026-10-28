@@ -31,10 +31,12 @@ from domain.jobs import (
     backoff_delay,
 )
 from domain.ports import (
+    QUEUE_STATUSES,
     ClaimedJob,
     Clock,
     JobStats,
     NewReviewJob,
+    QueueSnapshot,
     ReviewJob,
     ReviewJobStatus,
 )
@@ -153,6 +155,9 @@ class MemoryJobStore:
                 payload=oldest.job.payload,
                 attempt=oldest.job.retry_count,
                 worker_id=worker_id,
+                enqueued_at=oldest.job.created_at,
+                claimable_at=oldest.job.next_attempt_at,
+                claimed_at=now,
             )
 
     async def complete(self, job_id: str, stats: JobStats, *, worker_id: str) -> bool:
@@ -221,6 +226,27 @@ class MemoryJobStore:
                 locked_until=self._clock.now() + timedelta(seconds=LEASE_SECONDS),
             )
             return True
+
+    async def queue_snapshot(self) -> QueueSnapshot:
+        """Same counts and age as the Postgres store's: the DB sampler's twin."""
+        async with self._lock:
+            now = self._clock.now()
+            jobs = [record.job for record in self._records.values()]
+        claimable = [
+            job.next_attempt_at
+            for job in jobs
+            if job.status in _CLAIMABLE_STATUSES
+            and job.next_attempt_at is not None
+            and job.next_attempt_at <= now
+        ]
+        return QueueSnapshot(
+            jobs=tuple(
+                (status, sum(job.status is status for job in jobs)) for status in QUEUE_STATUSES
+            ),
+            oldest_claimable_age_seconds=(
+                (now - min(claimable)).total_seconds() if claimable else 0.0
+            ),
+        )
 
     async def get(self, job_id: str) -> ReviewJob | None:
         async with self._lock:

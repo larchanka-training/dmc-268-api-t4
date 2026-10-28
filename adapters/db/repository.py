@@ -31,10 +31,12 @@ from domain.jobs import (
     backoff_delay,
 )
 from domain.ports import (
+    QUEUE_STATUSES,
     ClaimedJob,
     Clock,
     JobStats,
     NewReviewJob,
+    QueueSnapshot,
     ReviewJob,
     ReviewJobStatus,
 )
@@ -169,7 +171,10 @@ class PostgresJobStore:
                     " FOR UPDATE SKIP LOCKED LIMIT 1)"
                     " RETURNING id, provider, delivery_id, installation_id, repo_id,"
                     " repo_full_name, pr_number, head_sha, base_sha, event_action,"
-                    " pr_title, author_login, head_ref, base_ref, retry_count"
+                    " pr_title, author_login, head_ref, base_ref, retry_count,"
+                    # RETURNING sees the updated row: next_attempt_at is still the
+                    # value that made the job claimable, started_at is now().
+                    " created_at, next_attempt_at, started_at"
                 ),
                 {
                     "worker": worker_id,
@@ -185,6 +190,9 @@ class PostgresJobStore:
             payload=_payload_from_row(row),
             attempt=int(row.retry_count),
             worker_id=worker_id,
+            enqueued_at=row.created_at,
+            claimable_at=row.next_attempt_at,
+            claimed_at=row.started_at,
         )
 
     async def complete(self, job_id: str, stats: JobStats, *, worker_id: str) -> bool:
@@ -318,6 +326,31 @@ class PostgresJobStore:
                 )
             )
             return len(result.all())
+
+    async def queue_snapshot(self) -> QueueSnapshot:
+        """Queue depth for the API's DB sampler, every 15 s. Each filter is the
+        predicate of a partial index (``ix_pr_review_jobs_active_pr`` for the counts,
+        ``ix_pr_review_jobs_claim`` for the age), so neither reads the job history."""
+        async with self._engine.connect() as conn:
+            counts = await conn.execute(
+                text(
+                    "SELECT status, count(*) AS jobs FROM pr_review_jobs"
+                    " WHERE status IN ('QUEUED','RETRYING','PROCESSING')"
+                    " GROUP BY status"
+                )
+            )
+            by_status = {ReviewJobStatus(row.status): int(row.jobs) for row in counts}
+            age = await conn.scalar(
+                text(
+                    "SELECT EXTRACT(EPOCH FROM now() - min(next_attempt_at))"
+                    " FROM pr_review_jobs"
+                    " WHERE status IN ('QUEUED','RETRYING') AND next_attempt_at <= now()"
+                )
+            )
+        return QueueSnapshot(
+            jobs=tuple((status, by_status.get(status, 0)) for status in QUEUE_STATUSES),
+            oldest_claimable_age_seconds=0.0 if age is None else float(age),
+        )
 
     async def get(self, job_id: str) -> ReviewJob | None:
         row_id = _as_uuid(job_id)

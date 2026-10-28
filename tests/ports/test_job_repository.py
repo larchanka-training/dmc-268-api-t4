@@ -33,6 +33,7 @@ from domain.ports import (
     JobRepository,
     JobStats,
     NewReviewJob,
+    QueueStats,
     ReviewJobStatus,
 )
 from tests.db.support import (
@@ -75,6 +76,9 @@ class StoreEnv:
     store: JobRepository
     clock: StepClock
     make_retry_due: Callable[[str], Awaitable[None]]
+    #: Make the job claimable since ``seconds`` ago: the memory env advances its
+    #: clock, the postgres env back-dates next_attempt_at (see the module docstring).
+    backdate: Callable[[str, float], Awaitable[None]]
     pg_dsn: str | None = None
 
 
@@ -128,10 +132,14 @@ def memory_env() -> StoreEnv:
         # Past every backoff this suite produces (at most 4 min * 1.2 jitter).
         clock.advance(1200)
 
+    async def backdate(job_id: str, seconds: float) -> None:
+        clock.advance(seconds)
+
     return StoreEnv(
         store=MemoryJobStore(clock=clock, rng=random.Random(0)),
         clock=clock,
         make_retry_due=make_retry_due,
+        backdate=backdate,
     )
 
 
@@ -176,12 +184,24 @@ def postgres_env(pg_engine: AsyncEngine) -> StoreEnv:
                 {"id": uuid.UUID(job_id)},
             )
 
+    async def backdate(job_id: str, seconds: float) -> None:
+        async with pg_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE pr_review_jobs"
+                    " SET next_attempt_at = now() - make_interval(secs => :seconds)"
+                    " WHERE id = :id"
+                ),
+                {"id": uuid.UUID(job_id), "seconds": seconds},
+            )
+
     base = make_url(os.environ.get("DATABASE_URL") or COMPOSE_URL)
     clock = StepClock()
     return StoreEnv(
         store=PostgresJobStore(pg_engine, clock=clock, rng=random.Random(0)),
         clock=clock,
         make_retry_due=make_retry_due,
+        backdate=backdate,
         pg_dsn=asyncpg_dsn(base.set(database=PORTS_DB_NAME)),
     )
 
@@ -324,6 +344,37 @@ async def test_claim_skips_a_future_attempt_until_it_is_due(env: StoreEnv) -> No
     reclaimed = await claim(env.store, "w-2")
     assert reclaimed.job_id == job_id
     assert reclaimed.attempt == 1
+
+
+async def test_claim_reports_when_the_job_was_enqueued_became_claimable_and_was_claimed(
+    env: StoreEnv,
+) -> None:
+    job_id = await enqueue(env.store, make_job())
+
+    claimed = await claim(env.store)
+
+    stored = await env.store.get(job_id)
+    assert stored is not None
+    assert claimed.enqueued_at == stored.created_at
+    assert claimed.claimable_at == stored.next_attempt_at
+    assert claimed.claimed_at == stored.started_at
+    assert claimed.claimed_at is not None and claimed.enqueued_at <= claimed.claimed_at
+
+
+async def test_a_retry_is_claimable_from_its_next_attempt_not_its_enqueue(
+    env: StoreEnv,
+) -> None:
+    job_id = await enqueue(env.store, make_job())
+    first = await claim(env.store)
+    await env.store.fail(job_id, "forge_unavailable", retryable=True, worker_id=first.worker_id)
+    await env.make_retry_due(job_id)
+    due = await env.store.get(job_id)
+
+    retried = await claim(env.store, "w-2")
+
+    assert due is not None
+    assert retried.claimable_at == due.next_attempt_at
+    assert retried.enqueued_at == due.created_at
 
 
 async def test_claim_is_fair_per_installation(env: StoreEnv) -> None:
@@ -572,3 +623,65 @@ async def test_enqueue_notifies_the_review_jobs_channel(postgres_env: StoreEnv) 
         assert payload == ""
     finally:
         await listener.close()
+
+
+# --- queue snapshot (the API's DB sampler) -----------------------------------
+
+
+def stats(env: StoreEnv) -> QueueStats:
+    assert isinstance(env.store, MemoryJobStore | PostgresJobStore)
+    return env.store
+
+
+async def test_an_empty_queue_has_zero_jobs_and_no_age(env: StoreEnv) -> None:
+    snapshot = await stats(env).queue_snapshot()
+
+    assert snapshot.jobs == (
+        (ReviewJobStatus.QUEUED, 0),
+        (ReviewJobStatus.RETRYING, 0),
+        (ReviewJobStatus.PROCESSING, 0),
+    )
+    assert snapshot.oldest_claimable_age_seconds == 0.0
+
+
+async def test_the_snapshot_counts_open_jobs_only(env: StoreEnv) -> None:
+    # Claims go oldest first and at most three per installation, so the fourth job
+    # enqueued is the one left QUEUED.
+    running = await enqueue(env.store, make_job(delivery_id="d-1", pr_number=1))
+    retried = await enqueue(env.store, make_job(delivery_id="d-2", pr_number=2))
+    done = await enqueue(env.store, make_job(delivery_id="d-3", pr_number=3))
+    await enqueue(env.store, make_job(delivery_id="d-4", pr_number=4))
+    claimed = {job.job_id: job for job in [await claim(env.store, f"w-{i}") for i in range(3)]}
+    assert set(claimed) == {running, retried, done}
+    await env.store.fail(
+        retried, "forge_unavailable", retryable=True, worker_id=claimed[retried].worker_id
+    )
+    await env.store.complete(done, make_stats(), worker_id=claimed[done].worker_id)
+
+    snapshot = await stats(env).queue_snapshot()
+
+    assert dict(snapshot.jobs) == {
+        ReviewJobStatus.QUEUED: 1,
+        ReviewJobStatus.RETRYING: 1,
+        ReviewJobStatus.PROCESSING: 1,
+    }
+
+
+async def test_the_age_counts_from_when_the_oldest_job_became_claimable(env: StoreEnv) -> None:
+    job_id = await enqueue(env.store, make_job())
+    await env.backdate(job_id, 300)
+
+    snapshot = await stats(env).queue_snapshot()
+
+    assert 300 <= snapshot.oldest_claimable_age_seconds < 330
+
+
+async def test_a_job_in_its_retry_backoff_is_not_backlog(env: StoreEnv) -> None:
+    job_id = await enqueue(env.store, make_job())
+    claimed = await claim(env.store)
+    await env.store.fail(job_id, "forge_unavailable", retryable=True, worker_id=claimed.worker_id)
+
+    snapshot = await stats(env).queue_snapshot()
+
+    assert dict(snapshot.jobs)[ReviewJobStatus.RETRYING] == 1
+    assert snapshot.oldest_claimable_age_seconds == 0.0

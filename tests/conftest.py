@@ -447,6 +447,9 @@ def build_test_app(
     job_events: Any = None,
     findings: Any = None,
     job_rules: Any = None,
+    metrics_port: int | None = None,
+    queue_stats: Any = None,
+    alert_relay: Any = None,
 ) -> Any:
     service = repositories or RepositoriesService(
         gateway=FakeInstallationGateway(),
@@ -468,6 +471,9 @@ def build_test_app(
         job_events=job_events,
         findings=findings,
         job_rules=job_rules,
+        metrics_port=metrics_port,
+        queue_stats=queue_stats,
+        alert_relay=alert_relay,
     )
 
 

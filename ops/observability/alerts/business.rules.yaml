@@ -1,0 +1,45 @@
+# Alert rules, domain business (docs/observability.md § Alerts). NoThroughput and
+# CanaryReviewStale are notified only in working hours: mute timings in Europe/Berlin,
+# set by ops/observability/sync.py, not here.
+groups:
+  - name: business
+    interval: 1m
+    rules:
+      # The counter starts at 0 on every start, so a restart with no traffic fires too.
+      - alert: NoThroughput
+        expr: |
+          sum(increase(webhook_deliveries_total{outcome="enqueued"}[4h])) == 0
+          unless on() (up{job="api"} == 0)
+        labels: {domain: business, severity: critical, owner: unassigned}
+        annotations:
+          summary: No review was enqueued in 4 hours.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#no-throughput
+
+      # Two missed canary runs plus review time. Quiet until phase 6 adds the gauge.
+      - alert: CanaryReviewStale
+        expr: |
+          time() - canary_review_last_success_timestamp > 15300
+          unless on() (up{job=~"api|worker"} == 0)
+        labels: {domain: business, severity: critical, owner: unassigned}
+        annotations:
+          summary: The canary PR has had no completed review for 4 h 15 min.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#canary-review-stale
+
+      # Quiet until billing adds the gauges.
+      - alert: StripeSilence
+        expr: |
+          time() - stripe_last_event_timestamp > 86400
+          and on() subscriptions_active > 0
+          unless on() (up{job="api"} == 0)
+        labels: {domain: business, severity: warning, owner: unassigned}
+        annotations:
+          summary: No Stripe event in 24 hours while subscriptions are active.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#stripe-silence
+
+      # Quiet until phase 5 adds the metrics (llm_prices, llm_daily_budget_usd).
+      - alert: LlmSpend
+        expr: sum(increase(llm_cost_usd_total[1d])) > scalar(llm_daily_budget_usd)
+        labels: {domain: business, severity: warning, owner: unassigned}
+        annotations:
+          summary: LLM spend in the last day is over the daily budget.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#llm-spend
