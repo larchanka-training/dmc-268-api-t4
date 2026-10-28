@@ -136,11 +136,11 @@ Migration **`incremental_review`** adds to `pr_review_jobs`:
 
 | Column | Type | Meaning |
 | :--- | :--- | :--- |
-| `reviewed_head_sha` | `CHAR(40) NULL` | The SHA the review actually ran on (`context.head_sha`), set on `COMPLETED`. Differs from `head_sha` when a push landed between enqueue and fetch |
+| `reviewed_head_sha` | `CHAR(40) NULL` | The SHA the review actually ran on (`context.head_sha`), set on `COMPLETED` and on the two "head counts as reviewed" skips (§2.2). Differs from `head_sha` when a push landed between enqueue and fetch |
 | `reviewed_base_sha` | `CHAR(40) NULL` | The PR base SHA at that moment |
 | `review_mode` | `VARCHAR(16) NULL` | `full` or `incremental` |
 | `delta_from_sha` | `CHAR(40) NULL` | For `incremental`: the `last_reviewed_sha` the delta started from |
-| `full_reason` | `VARCHAR(32) NULL` | For `full`: why (§3, step 3) |
+| `full_reason` | `VARCHAR(32) NULL` | For `full`: why (§3, steps 3 and 6) |
 | `rules_digest` | `CHAR(64) NULL` | sha256 of the `.review/rules.md` bytes the review used; NULL without a file |
 | `input_tokens`, `output_tokens` | `INTEGER NOT NULL DEFAULT 0` | Provider-reported usage of every call of the job, retries and the summary agent included (§6.3) |
 
@@ -148,7 +148,7 @@ Derived values:
 
 | Name | Definition |
 | :--- | :--- |
-| `last_reviewed` | The newest job of the PR with `status = 'COMPLETED'` and `reviewed_head_sha IS NOT NULL` |
+| `last_reviewed` | The newest job of the PR with `reviewed_head_sha IS NOT NULL`: `COMPLETED`, or `SKIPPED` as `skip_already_reviewed` / `skip_no_reviewable_files` (§2.2) |
 | `last_reviewed_sha` | `last_reviewed.reviewed_head_sha` |
 | `pr_tokens_used` | `SUM(input_tokens + output_tokens)` over all jobs of the PR (§6, [L4]) |
 
@@ -164,27 +164,49 @@ Migration **`llm_usage_daily`** adds the installation budget table (§6.3).
 | `BLOCKED` | The last job was skipped by a limit (§6); no review for this head |
 | `CLOSED` | The PR is closed or merged; nothing runs |
 
-The state is not a column: it is read from the jobs. The table below is the contract.
+The state is not a column. `NEW`, `REVIEWED`, `STALE` and `BLOCKED` are read from the jobs;
+`CLOSED` is read from the PR itself (`pull_request.state` of the webhook payload, or of
+`GET /repos/{r}/pulls/{n}` where no payload carries it, [I4]), because the `closed` event
+inserts no job ([I2]). The table below is the contract.
+
+How a job that ends without a review sets the state:
+
+| `error_kind` | Job status | PR state | `reviewed_head_sha` |
+| :--- | :--- | :--- | :--- |
+| `skip_already_reviewed` | `SKIPPED` | `REVIEWED` | set to `H`: the head counts as reviewed |
+| `skip_no_reviewable_files` | `SKIPPED` | `REVIEWED` | set to `H`: the head counts as reviewed |
+| `skip_diff_too_large` | `SKIPPED` | `BLOCKED` | NULL |
+| `skip_pr_budget` | `SKIPPED` | `BLOCKED` | NULL |
+| `quota_exhausted` | `SKIPPED` | `BLOCKED` | NULL |
+
+So `last_reviewed` (§2.1) is the newest job with `reviewed_head_sha IS NOT NULL` and status
+`COMPLETED`, or `SKIPPED` with one of the first two kinds. "Skipped by a limit" below means
+one of the last three.
 
 ### 2.3 Transitions
 
-| From | Event | Condition | To | Job enqueued |
-| :--- | :--- | :--- | :--- | :--- |
-| `NEW` | `opened`, `ready_for_review` | — | `STALE` | full (`first_review`) |
-| `NEW` | `synchronize`, `reopened` | — | `STALE` | full (`first_review`) |
-| `REVIEWED`, `BLOCKED` | `synchronize` | `last_reviewed_sha` is an ancestor of the new head | `STALE` | incremental |
-| `REVIEWED`, `BLOCKED` | `synchronize` (force-push) | `last_reviewed_sha` is not an ancestor | `STALE` | full (`force_push`) |
-| `REVIEWED` | `edited` with `changes.base` | base branch changed | `STALE` | full (`base_changed`) |
-| `REVIEWED` | `reopened`, `ready_for_review` | head equals `last_reviewed_sha` | `REVIEWED` | none: `skip_already_reviewed` |
-| `REVIEWED` | `reopened`, `ready_for_review` | head moved | `STALE` | as `synchronize` |
-| `NEW`, `REVIEWED`, `BLOCKED` | Re-run on the AI review Check Run ([I4]) | — | `STALE` | full (`manual_rerun`), even when the head equals `last_reviewed_sha` |
-| `STALE` | Re-run ([I4]) | — | `STALE` | the queued one is superseded; the new one is full (`manual_rerun`) |
-| `STALE` | `synchronize` | — | `STALE` | the queued one is superseded (§1.2); new one as above |
-| `STALE` | job `COMPLETED` | — | `REVIEWED` | — |
-| `STALE` | job skipped by a limit | — | `BLOCKED` | — |
-| `STALE` | job `FAILED` | retries exhausted | `REVIEWED` if a review exists, else `NEW` | — |
-| any | `closed` | — | `CLOSED` | none; active jobs → `SUPERSEDED` |
-| `CLOSED` | `reopened` | — | `REVIEWED` or `NEW` by history | then as the rows above |
+| # | From | Event | Condition | To | Job enqueued |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| T1 | `NEW` | `opened`, `ready_for_review` | — | `STALE` | full (`first_review`) |
+| T2 | `NEW` | `synchronize`, `reopened`, `edited` with `changes.base` | — | `STALE` | full (`first_review`) |
+| T3 | `REVIEWED`, `BLOCKED` | `synchronize` | `last_reviewed_sha` is an ancestor of the new head | `STALE` | incremental |
+| T4 | `REVIEWED`, `BLOCKED` | `synchronize` (force-push) | `last_reviewed_sha` is not an ancestor | `STALE` | full (`force_push`) |
+| T5 | `REVIEWED`, `BLOCKED` | `edited` with `changes.base` | base branch changed | `STALE` | full (`base_changed`) |
+| T6 | `REVIEWED` | `reopened`, `ready_for_review` | head equals `last_reviewed_sha` | `REVIEWED` | none: `skip_already_reviewed` |
+| T7 | `REVIEWED` | `reopened`, `ready_for_review` | head moved | `STALE` | as `synchronize` (T3, T4) |
+| T8 | `BLOCKED` | `reopened`, `ready_for_review` | — | `STALE` | as `synchronize` (T3, T4); the gate (§6.4) runs again and blocks again while the limit holds |
+| T9 | `NEW`, `REVIEWED`, `BLOCKED` | Re-run on the AI review Check Run ([I4]) | PR open | `STALE` | full (`manual_rerun`), even when the head equals `last_reviewed_sha` |
+| T10 | `STALE` | Re-run ([I4]) | PR open | `STALE` | the queued one is superseded; the new one is full (`manual_rerun`) |
+| T11 | `STALE` | `synchronize` | — | `STALE` | the queued one is superseded (§1.2); new one as above |
+| T12 | `STALE` | job `COMPLETED`, or `SKIPPED` as `skip_already_reviewed` / `skip_no_reviewable_files` | — | `REVIEWED` | — |
+| T13 | `STALE` | job skipped by a limit (§2.2) | — | `BLOCKED` | — |
+| T14 | `STALE` | job `FAILED` | retries exhausted, an earlier review exists | `REVIEWED` | — |
+| T15 | `STALE` | job `FAILED` | retries exhausted, no earlier review | `NEW` | — |
+| T16 | `NEW`, `REVIEWED`, `STALE`, `BLOCKED` | `closed` | — | `CLOSED` | none; active jobs → `SUPERSEDED` |
+| T17 | `CLOSED` | Re-run ([I4]) | `pull_request.state != open` | `CLOSED` | none: 204 |
+| T18 | `CLOSED` | `reopened` | jobs give `REVIEWED` | `REVIEWED` | then T6 / T7 |
+| T19 | `CLOSED` | `reopened` | jobs give `NEW` | `NEW` | then T2 |
+| T20 | `CLOSED` | `reopened` | jobs give `BLOCKED` | `BLOCKED` | then T8 |
 
 Close and reopen no longer re-runs a reviewed head: today every `reopened` enqueues a full
 review (`adapters/github/payload.py:20-28`), after this change a reopen on the same head is
@@ -193,30 +215,43 @@ button ([I4]). From `BLOCKED` a re-run still passes the gate (§6.4) and is bloc
 the limit holds.
 
 The mode (full or incremental) is **decided by the worker at run time**, not at ingest
-(§3, step 3): the payload cannot tell a force-push from a fast-forward, and a queued job may
-run against a newer head than its payload names.
+(§3, steps 3 and 6): the payload cannot tell a force-push from a fast-forward, and a
+queued job may run against a newer head than its payload names.
+
+The diagram draws the table row by row; each arrow carries its row number. The table is
+the source: a change goes there first.
 
 ```mermaid
 stateDiagram-v2
     [*] --> NEW
-    NEW --> STALE: opened / synchronize / reopened / ready_for_review (full)
-    REVIEWED --> STALE: synchronize, ancestor (incremental)
-    REVIEWED --> STALE: force-push / base changed (full)
-    BLOCKED --> STALE: synchronize
-    STALE --> STALE: synchronize (supersede, debounce)
-    STALE --> REVIEWED: job COMPLETED
-    STALE --> BLOCKED: limit reached (skipped Check Run)
-    STALE --> NEW: job FAILED, no earlier review
-    STALE --> REVIEWED: job FAILED, earlier review exists
-    REVIEWED --> REVIEWED: reopened, same head (no job)
-    REVIEWED --> STALE: Re-run on the check run (full, manual_rerun)
-    BLOCKED --> STALE: Re-run on the check run (full, manual_rerun)
-    NEW --> CLOSED: closed
-    REVIEWED --> CLOSED: closed
-    STALE --> CLOSED: closed (active jobs SUPERSEDED)
-    BLOCKED --> CLOSED: closed
-    CLOSED --> REVIEWED: reopened, reviewed before
-    CLOSED --> NEW: reopened, never reviewed
+    NEW --> STALE: T1 opened / ready_for_review (full)
+    NEW --> STALE: T2 synchronize / reopened / edited base (full)
+    REVIEWED --> STALE: T3 synchronize, ancestor (incremental)
+    BLOCKED --> STALE: T3 synchronize, ancestor (incremental)
+    REVIEWED --> STALE: T4 synchronize, force-push (full)
+    BLOCKED --> STALE: T4 synchronize, force-push (full)
+    REVIEWED --> STALE: T5 edited base (full)
+    BLOCKED --> STALE: T5 edited base (full)
+    REVIEWED --> REVIEWED: T6 reopened / ready_for_review, same head (no job)
+    REVIEWED --> STALE: T7 reopened / ready_for_review, head moved
+    BLOCKED --> STALE: T8 reopened / ready_for_review (gate again)
+    NEW --> STALE: T9 Re-run (full, manual_rerun)
+    REVIEWED --> STALE: T9 Re-run (full, manual_rerun)
+    BLOCKED --> STALE: T9 Re-run (full, manual_rerun)
+    STALE --> STALE: T10 Re-run (supersede, full)
+    STALE --> STALE: T11 synchronize (supersede, debounce)
+    STALE --> REVIEWED: T12 COMPLETED / skip_already_reviewed / skip_no_reviewable_files
+    STALE --> BLOCKED: T13 skipped by a limit
+    STALE --> REVIEWED: T14 FAILED, earlier review exists
+    STALE --> NEW: T15 FAILED, no earlier review
+    NEW --> CLOSED: T16 closed
+    REVIEWED --> CLOSED: T16 closed
+    STALE --> CLOSED: T16 closed (active jobs SUPERSEDED)
+    BLOCKED --> CLOSED: T16 closed
+    CLOSED --> CLOSED: T17 Re-run (204, no job)
+    CLOSED --> REVIEWED: T18 reopened, jobs give REVIEWED
+    CLOSED --> NEW: T19 reopened, jobs give NEW
+    CLOSED --> BLOCKED: T20 reopened, jobs give BLOCKED
 ```
 
 ### 2.4 Ingest changes
@@ -241,6 +276,11 @@ stateDiagram-v2
    - take the PR from `check_run.pull_requests[0]` (number, head and base SHA and ref). The
      list is empty for a PR from a fork: answer 204 and log `webhook.ignored`, the re-run
      is not available there;
+   - the `check_run` payload does not say whether the PR is open, and a Check Run of a
+     closed PR keeps its Re-run button: fetch `GET /repos/{r}/pulls/{n}` and answer 204,
+     log `webhook.ignored`, unless `state == "open"` (T17). A forge error on this fetch
+     answers 503 and enqueues nothing; GitHub does not redeliver on its own, the user
+     presses Re-run again;
    - enqueue a job with `event_action = 'rerun'` through the usual insert: delivery dedup
      and supersede apply (§1.2), no debounce. The worker reviews the current head and sets
      `full_reason = manual_rerun` (§3, step 3);
@@ -252,27 +292,24 @@ stateDiagram-v2
 
 ## 3. Incremental algorithm
 
-Runs in the worker after the fetch, before the LLM call. Steps are numbered for tests.
+Runs in the worker after the fetch, before the LLM call. Steps are numbered for tests. The
+mode is chosen in two parts: 3a needs only the PR and its jobs, 3b needs the delta. A full
+review chosen in 3a skips steps 4-6.
 
 1. **Fetch the PR** as today (`adapters/github/client.py:50-95`): detail, commits, full diff
    `base...head`. Call this the **PR diff**; `H` is `context.head_sha`.
-2. **Find `last_reviewed`** (§2.1). None → full, reason `first_review`.
-3. **Choose the mode.** Full review, with the first reason that applies:
+2. **Find `last_reviewed`** (§2.1).
+3. **Choose the mode, part 3a**, before the compare call, with the first row that applies:
 
-   | Condition | `full_reason` |
+   | Condition | Result |
    | :--- | :--- |
-   | `event_action = 'rerun'` (manual re-run, [I4]) | `manual_rerun` |
-   | No `last_reviewed` | `first_review` |
-   | `last_reviewed_sha == H` | none: terminate `SKIPPED`, `skip_already_reviewed`, post nothing |
-   | Compare `last_reviewed_sha...H` returns `status` other than `ahead` (`diverged`, `behind`) or 404 (the SHA is gone) | `force_push` |
-   | The job's `base_ref` differs from `last_reviewed`'s `base_ref`, or `event_action = 'edited'` | `base_changed` |
-   | The delta touches `.review/rules.md`, or the rules digest at `H` differs from `last_reviewed.rules_digest` | `rules_changed` |
-   | The delta has no reviewable file after step 5 and the rules did not change | none: terminate `SKIPPED`, `skip_no_reviewable_files`, Check Run per §8.3 |
-   | The delta is larger than `REVIEW_INCREMENTAL_MAX_RATIO` (0.8) of the PR diff, by reviewable lines | `delta_too_large` (one review of everything costs about the same) |
-   | `REVIEW_INCREMENTAL=false` | `incremental_disabled` |
+   | `event_action = 'rerun'` (manual re-run, [I4]) | full, `manual_rerun` |
+   | No `last_reviewed` | full, `first_review` |
+   | `last_reviewed_sha == H` | terminate `SKIPPED`, `skip_already_reviewed`, post nothing, `reviewed_head_sha = H` (§2.2) |
+   | The job's `base_ref` differs from `last_reviewed`'s `base_ref`, or `event_action = 'edited'` | full, `base_changed` |
 
-   Otherwise: incremental.
-4. **Fetch the delta** (incremental only):
+   Otherwise go on to step 4.
+4. **Fetch the delta**:
 
    ```
    GET /repos/{owner}/{repo}/compare/{last_reviewed_sha}...{H}
@@ -281,24 +318,42 @@ Runs in the worker after the fetch, before the LLM call. Steps are numbered for 
    Accept: application/vnd.github.diff        (the delta diff, same 5 MiB cap)
    ```
 
-   The JSON `status` drives step 3 (`ahead` = fast-forward). The diff text is parsed with
+   The JSON `status` drives 3b (`ahead` = fast-forward); a 404 (the SHA is gone) goes to
+   3b as a force-push without step 5. The diff text is parsed with
    `domain.diff.parse_diff` (`domain/diff.py:194`).
 5. **Restrict the delta to the PR.** A delta can contain changes that are not the PR's: a
    merge of the base branch into the PR branch brings in other people's commits. Keep from
-   the delta only:
-   - files present in the PR diff and kept by the filters (§6.2);
-   - within them, hunks with at least one added line that is also an added line of the PR
-     diff at the same new-file line number.
+   the delta only files present in the PR diff and kept by the filters (§6.2), and within
+   them:
+   - hunks with at least one added line that is also an added line of the PR diff at the
+     same new-file line number;
+   - hunks that only delete lines (no added line). A deletion can remove a security check,
+     and such a hunk has no added line to match. It is sent with its context lines like
+     any other hunk.
 
    New-side line numbers of the delta and of the PR diff both count lines of the file at
    `H`, so they are comparable without mapping. Old-side numbers are not (the delta's old
    side is `last_reviewed_sha`, the PR diff's is the base), so removed lines of the delta are
-   context for the model only.
-6. **Build the LLM input** from the restricted delta, split per file with
-   `domain.diff.split_by_file` (`domain/diff.py:375`) and joined back, and the same title,
-   description and rules as a full review. The Check Run says the review is incremental
-   (§8.3).
-7. **Publish against the PR diff.** `CommentableLines` is built from the **PR diff** kept
+   context for the model only: a finding on them is dropped in step 9. A deletion-only hunk
+   that a base merge brought into a PR file reaches the model too; its findings can post
+   only on new-side lines of the PR diff (step 9), so nothing lands outside the PR.
+6. **Choose the mode, part 3b**, after the restriction, with the first row that applies:
+
+   | Condition | Result |
+   | :--- | :--- |
+   | Compare returned `status` other than `ahead` (`diverged`, `behind`) or 404 | full, `force_push` |
+   | The delta before step 5 touches `.review/rules.md`, or the rules digest at `H` differs from `last_reviewed.rules_digest` (catches a change the restriction dropped, e.g. one a base merge brought in) | full, `rules_changed` |
+   | The restricted delta is empty (no kept file, no kept hunk) and the rules did not change | terminate `SKIPPED`, `skip_no_reviewable_files`, Check Run per §8.3, `reviewed_head_sha = H` (§2.2) |
+   | The restricted delta is larger than `REVIEW_INCREMENTAL_MAX_RATIO` (0.8) of the PR diff, by reviewable added plus removed lines | full, `delta_too_large` (one review of everything costs about the same) |
+   | `REVIEW_INCREMENTAL=false` | full, `incremental_disabled` |
+
+   Otherwise: incremental.
+7. **Build the LLM input**: for incremental, from the restricted delta, split per file with
+   `domain.diff.split_by_file` (`domain/diff.py:375`) and joined back; for full, from the
+   kept files of the PR diff ([L-F1]). The same title, description and rules either way.
+   The Check Run says which mode ran and why (§8.3).
+8. **Gate** (§6.4).
+9. **Publish against the PR diff.** `CommentableLines` is built from the **PR diff** kept
    files, as today (`worker/process.py:313`), never from the delta. So:
    - a finding on a new-side line of the PR diff posts as usual (`commit_id = H`,
      `adapters/github/publisher.py:196`);
@@ -306,14 +361,21 @@ Runs in the worker after the fetch, before the LLM call. Steps are numbered for 
      dropped as `outside_diff` (`domain/publishing.py:11-12`);
    - a finding with `side = old` from an incremental review is dropped and counted as
      `delta_old_side`: its line number refers to `last_reviewed_sha`, not the base.
-8. **Dedup** (§4) against every fingerprint posted on the PR.
-9. **Record** `reviewed_head_sha = H`, `reviewed_base_sha`, `review_mode`, `delta_from_sha`,
-   `full_reason`, `rules_digest`, `input_tokens`, `output_tokens` on `COMPLETED`.
+10. **Dedup** (§4) against every fingerprint and defect key posted on the PR.
+11. **Record** `reviewed_head_sha = H`, `reviewed_base_sha`, `review_mode`, `delta_from_sha`,
+    `full_reason`, `rules_digest`, `input_tokens`, `output_tokens` on `COMPLETED`.
 
 **The Check Run of an incremental review** covers the delta: summary, risk and checklist
-of the new commits. The risk floor uses the findings published by this job plus the
-still-open findings of earlier jobs (§5.2), so a High from an earlier push does not
-disappear when the next push touches only a README.
+of the new commits. **[I5]** The risk floor uses the findings published by this job plus
+earlier posted findings whose anchored line still exists at `H`: a `pr_review_comments`
+row of the PR with `side = 'new'` counts when the PR diff at `H` has a new-side line in its
+`file_path` whose normalised text hashes to the row's `anchor_digest` (new column
+`anchor_digest CHAR(64) NULL` = sha256 of the normalised anchored code, the same
+normalisation as the fingerprint, migration `incremental_review`). Any other earlier
+finding is ignored: its line was edited or deleted, so GitHub shows it Outdated. Rows from
+before the migration (`anchor_digest IS NULL`) and `side = 'old'` rows are ignored. So a
+High from an earlier push still counts when the next push touches only a README, and stops
+counting once its line is changed.
 
 ---
 
@@ -352,7 +414,7 @@ human look, and repeated comments are the complaint this issue exists for.
 
 ### 4.3 Order and rules
 
-1. **[D3]** Load fingerprints and defect keys of every posted comment of the PR, any job
+1. **[D3]** Load fingerprints, defect keys and anchor digests ([I5]) of every posted comment of the PR, any job
    (extends `adapters/db/review_comments.py:32-37`).
 2. **[D4]** Only posted comments count. Findings dropped by `min_severity`, `max_comments`
    or the verifier are not recorded, so lowering a threshold later can post them
@@ -381,10 +443,11 @@ human look, and repeated comments are the complaint this issue exists for.
 
 1. **[O1]** Never repost a finding already posted on the PR (§4).
 2. **[O2]** Rely on GitHub's Outdated marking. No auto-resolve, no minimise.
-3. **[O3]** A finding counts as **open** for the risk floor and the Check Run "earlier
-   findings" line while its comment is not Outdated. Outdated is not tracked in our
-   database this sprint; the Check Run counts earlier posted comments only, worded
-   "posted on earlier commits", never "open".
+3. **[O3]** Outdated is not tracked in our database this sprint. Its stand-in is the
+   anchor check of [I5] (§3): an earlier finding counts for the risk floor only while its
+   anchored line still exists on the new side of the PR diff at `H`; otherwise it is
+   ignored. The Check Run "earlier findings" line counts suppressed duplicates only
+   ([D7]), worded "posted on earlier commits", never "open".
 4. **[O4]** The console shows earlier findings per job as today; it does not claim they
    are fixed.
 
@@ -495,7 +558,10 @@ Check Run listing the skipped counts (no paths of more than 30 files).
 4. **[L-T4]** Reset: the day is the UTC date of the charge; the budget resets at 00:00 UTC.
    `reset_at` = next 00:00 UTC.
 5. **[L-T5]** Installation = organisation or personal account the App is installed on
-   (`installation_id`). Per-author budgets (`max_reviews_per_author_per_day`,
+   (`installation_id`). The budget is per installation, not per user, because a review is
+   billed to the account that connected the repository; the contributor who opened the
+   PR has no billing relationship with us (`docs/configuration.md:168-170`). Per-author
+   budgets (`max_reviews_per_author_per_day`,
    `docs/configuration.md:125`) come later.
 
 ### 6.4 The gate
@@ -505,7 +571,9 @@ mode choice, before the LLM call:
 
 1. Still the newest job of the PR: `extend_lease` succeeds (today's check, made explicit).
 2. `estimate = estimated input tokens of the review input + REVIEW_OUTPUT_RESERVE` (4 096).
-3. L10: reviews of this PR (completed and skipped by L9-L11 excluded) < limit.
+3. L10: reviews of this PR < limit. A review is a job of the PR that is `COMPLETED`, or
+   `FAILED` after an LLM call (it spent tokens, [L-T3]). `SKIPPED` jobs of any kind,
+   `SUPERSEDED` jobs and jobs that failed before the LLM call do not count.
 4. L9: `pr_tokens_used + estimate <= REVIEW_PR_TOKEN_CAP`.
 5. L11: `today.input + today.output + estimate <= budget × (1 + buffer)`.
 6. Any failure → skipped Check Run (§8.3), job `SKIPPED` with the `error_kind` of §6.1,
@@ -533,6 +601,7 @@ absorbs it. A reservation scheme is listed in §9.
 | Prompt injection in commit messages | Not sent to the model (`domain/ports.py:32-36`) | Unchanged. If commit messages are ever added, they go inside an `UNTRUSTED_*` block through `escape_markers` |
 | Draft PRs spending budget | Reviewed (`adapters/github/payload.py:116` unused) | Out of scope; `skip_draft` stays in `docs/PIPELINE_SPEC.md:252` for the config work |
 | Bot reviewing itself | The App does not push commits | Unchanged |
+| GitHub API exhaustion | 403 on rate limit is read as `installation_removed` (`adapters/github/client.py:231`) | Two compare calls more per incremental job; budget and retry rule in §9 Q15 |
 
 ---
 
@@ -541,22 +610,26 @@ absorbs it. A reservation scheme is listed in §9.
 ### 8.1 #54: backend implementation
 
 1. Migration `incremental_review`: the `pr_review_jobs` columns of §2.1 and
-   `pr_review_comments.defect_key`. Revision number: the next free one after the
+   `pr_review_comments.defect_key` ([D2]) and `pr_review_comments.anchor_digest` ([I5]). Revision number: the next free one after the
    migrations of PR #64 (§2.1); rebase on whatever is merged.
 2. Migration `llm_usage_daily` (§6.3), the revision after it.
 3. Ingest: [I1] `edited` with `changes.base`, [I2] `closed` cancel path, [I3] debounce; the
    memory twin (`adapters/jobs/memory.py`) in the same order.
 4. GitHub client: `compare(base_sha, head_sha)` returning `status` and the diff text
    under L2; a diff over L2 raises a permanent error mapped to `skip_diff_too_large`, not
-   `ForgeUnavailableError`.
-5. Worker: `last_reviewed` lookup, mode choice (§3 step 3), delta restriction (step 5),
-   old-side drop with the `delta_old_side` count, recording of step 9.
+   `ForgeUnavailableError`. A compare 404 means the old SHA is gone and goes to
+   `force_push` (§3 step 4), not `pr_not_found`. Rate-limit answers per Q15.
+5. Worker: `last_reviewed` lookup, mode choice in two parts (§3 steps 3 and 6), delta restriction with deletion-only hunks (step 5),
+   old-side drop with the `delta_old_side` count, recording of step 11, the risk floor of [I5].
 6. Filters: `generated`, `too_large` reasons; LLM input from kept files only ([L-F1]);
    `skip_no_reviewable_files` ([L-F2]).
 7. Gateway: `ReviewResult.usage` ([L-T1], [L-T2]).
 8. Gate step with L9, L10, L11 and the skipped Check Runs of §8.3; `llm_usage_daily`
    charging ([L-T3]); the `SKIPPED` status for every `skip_*` and `quota_exhausted` kind
-   (today `skip_diff_too_large` ends `FAILED`, §1.5).
+   (today `skip_diff_too_large` ends `FAILED`, §1.5). The closed `error_kind` list of
+   `docs/PIPELINE_SPEC.md` §5 gets `skip_pr_budget` and `skip_already_reviewed`, both
+   `SKIPPED`; `skip_no_reviewable_files` is there already (`docs/PIPELINE_SPEC.md:257`) and
+   stays. The same PR adds the PR-state mapping of §2.2 to PIPELINE_SPEC.
 9. Dedup by fingerprint or defect key ([D2], [D3]).
 10. Check Run texts of §8.3, including the incremental header and "earlier commits" line.
 11. Env vars of §6.1 in a settings class with the validation style of
@@ -567,7 +640,8 @@ absorbs it. A reservation scheme is listed in §9.
 13. API of §8.3 and `docs/openapi.yaml` in the same PR (`docs/PIPELINE_SPEC.md:465-477`).
 14. Fix the stale docstring `domain/publishing.py:17`.
 15. Manual re-run [I4]: the `check_run` `rerequested` route in `api/webhooks/github.py`,
-    `event_action = 'rerun'`, `full_reason = manual_rerun` in the mode choice; the App
+    `event_action = 'rerun'`, `full_reason = manual_rerun` in the mode choice, the PR
+    fetch with 204 for a PR that is not open (T17); the App
     subscription to Check run events goes into the deploy notes.
 
 ### 8.2 #50: acceptance scenarios
@@ -616,10 +690,42 @@ PostgreSQL as `tests/test_e2e_*.py`).
 26. Re-run on the AI review Check Run of an already reviewed head → one full review,
     `full_reason = manual_rerun`, LLM called; the same event for another App's check run,
     another check name or an empty `pull_requests` (fork) → 204, no job.
+27. L3: reviewable diff after filters over `REVIEW_MAX_DIFF_BYTES` (1 MiB), fetched diff under
+    5 MiB → `SKIPPED`, `skip_diff_too_large`, Check Run names L3, no LLM call.
+28. L4: 101 reviewable files after filters → `SKIPPED`, `skip_diff_too_large`, Check Run
+    "too many files", no LLM call.
+29. L5: one file's diff over `REVIEW_MAX_FILE_BYTES` → that file skipped as `too_large` and
+    listed in the Check Run; the other files are reviewed.
+30. L10: a PR with 20 counted reviews (`COMPLETED` plus `FAILED` after an LLM call) → the
+    next job `SKIPPED`, `skip_pr_budget`, no LLM call. A PR with 19 counted reviews and any
+    number of `SKIPPED` or `SUPERSEDED` jobs → reviews.
+31. Fast-forward push whose restricted delta is over 0.8 of the PR diff lines → full,
+    `delta_too_large`.
+32. `REVIEW_INCREMENTAL=false`, fast-forward push → full, `incremental_disabled`.
+33. A base merge changes `.review/rules.md`, the file is not in the PR diff (step 5 drops
+    it), the digest at `H` differs from `last_reviewed.rules_digest` → full, `rules_changed`.
+34. Risk floor ([I5]): push 1 posts a High on line X; push 2 touches only a README → the
+    Check Run risk is at least High; push 3 edits line X → the earlier High is ignored, the
+    risk comes from push 3 findings and earlier findings whose lines still exist.
+35. `BLOCKED` → incremental: head A reviewed, head B blocked by `quota_exhausted`; after the
+    reset a fast-forward push C → incremental, `delta_from_sha = A` (delta `A...C`, B's
+    changes included).
+36. TypeSafe tokens not counted ([L-T2]): a review with rule screen and verifier calls →
+    `input_tokens`, `output_tokens` and `llm_usage_daily` hold the gateway's calls only;
+    TypeSafe usage is reported in `typesafe_input_tokens`, `typesafe_output_tokens`.
+37. Incremental push that only deletes lines in a PR file → the hunk is in the LLM input with
+    its context; no `skip_no_reviewable_files`.
+38. Re-run on the Check Run of a closed PR → the PR fetch says `closed` → 204, no job (T17).
+39. Push whose delta holds only lockfiles → `SKIPPED`, `skip_no_reviewable_files`,
+    `reviewed_head_sha = H`; the next push is incremental from `H`, not from the older head.
 
 ### 8.3 #52: console API and Check Run texts
 
-`GET /usage` (installation of the session, the same scoping as `/jobs`):
+`GET /usage` covers every installation of the session, the same visibility as `/jobs`
+(`api/jobs.py:116`): a session can hold several installations (personal account and
+organisations, PR #71). The response is `{"installations": [...]}`, one entry per
+installation, sorted by `installation_id`, an empty list when the session has none. Each
+entry:
 
 | Field | Type | Meaning |
 | :--- | :--- | :--- |
@@ -643,7 +749,7 @@ Check Run texts (counts only, no paths beyond the existing file list):
 | Case | Title | Body |
 | :--- | :--- | :--- |
 | Incremental | (verdict as today) | First line: `Incremental review of {n} commit(s) since {short_sha}.` |
-| Full after force-push / base / rules change / manual re-run | (verdict as today) | First line: `Full review: {reason text}.` |
+| Full review, every `full_reason` | (verdict as today) | First line: `Full review: {reason text}.`, text from the table below |
 | Earlier findings | — | `{n} finding(s) were already posted on earlier commits.` |
 | `skip_diff_too_large` (L2-L4, L7) | `⏭️ Review skipped: pull request too large` | existing text (`domain/publishing.py:368-387`), plus which limit |
 | `skip_no_reviewable_files` | `⏭️ Review skipped: no reviewable files` | `All {n} changed files are lockfiles, generated, vendored, minified or binary.` |
@@ -651,6 +757,21 @@ Check Run texts (counts only, no paths beyond the existing file list):
 | `quota_exhausted` | `⏸️ Review paused: daily budget used` | `The installation used {used:,} of {limit:,} tokens today. Reviews resume at {reset_at} UTC.` |
 
 Conclusion of every skipped run: `skipped`, as PR #63 (`domain/publishing.py:393`).
+
+`{reason text}` per `full_reason`, exact:
+
+| `full_reason` | `{reason text}` |
+| :--- | :--- |
+| `first_review` | `first review of this pull request` |
+| `manual_rerun` | `re-run requested on the check run` |
+| `force_push` | `the branch history changed since {short_sha}, so all of it was reviewed again` |
+| `base_changed` | `the base branch changed` |
+| `rules_changed` | `.review/rules.md changed since the last review` |
+| `delta_too_large` | `the new commits change most of the pull request, so all of it was reviewed again` |
+| `incremental_disabled` | `incremental review is turned off` |
+
+`{short_sha}` is the first 7 characters of `last_reviewed_sha`. Example:
+`Full review: the base branch changed.`
 
 ---
 
@@ -663,7 +784,7 @@ Conclusion of every skipped run: `skipped`, as PR #63 (`domain/publishing.py:393
 | Q3 | Gate race | Bounded overshoot (§6.4) instead of reservations | Budgets become money (billing): then reserve with `UPDATE … RETURNING` and settle at completion |
 | Q4 | Incremental Check Run: delta or whole PR? | Delta summary; earlier findings as a count | Feedback from the console |
 | Q5 | Same-line, same-category defects collapse ([D2]) | Accepted | Precision of the defect key measured on real PRs |
-| Q6 | Rules source | PR head, decision of 20 October (`docs/RULES_FORMAT_SPEC.md:55-75`) | — |
+| Q6 | Rules source | PR head, decision of 20 October (`docs/RULES_FORMAT_SPEC.md:55-75`). No `.review/rules.md` at the head → the built-in default rules apply: levels 1 and 2 of `docs/RULES_FORMAT_SPEC.md` §3 (base safety and base review criteria, in the versioned system prompt), `rules_status = absent` (`docs/RULES_FORMAT_SPEC.md:196`), `rules_digest` NULL | — |
 | Q7 | Rules from the default branch (Victor, PR #47) | Later, as a per-repository setting `rules_source = head \| default_branch`, default `head`. Gains: a PR cannot weaken its own review. Costs: a PR that adds a rule does not see it until merged; a fork PR runs on rules it cannot see; needs the default branch name from the repository API | A team asks for it, or abuse is seen |
 | Q8 | TypeSafe tokens in the budget | Not counted ([L-T2]) | TypeSafe becomes a paid cost line |
 | Q9 | Full review when the delta is most of the PR | Ratio 0.8 (`REVIEW_INCREMENTAL_MAX_RATIO`) | Eval of incremental vs full recall |
@@ -672,3 +793,4 @@ Conclusion of every skipped run: `skipped`, as PR #63 (`domain/publishing.py:393
 | Q12 | `skip_diff_too_large` ends `FAILED` today | Becomes `SKIPPED` in #54 (§8.1 item 8), matching `docs/PIPELINE_SPEC.md:256` | — |
 | Q13 | Rules are not passed to the review today | #54 does not wire them; that is issue #37 (Igor). The `rules_changed` reason works from the delta and the digest, so it is ready when #37 lands | #37 lands |
 | Q14 | Drafts are reviewed | Unchanged here | Config work (`review_drafts`) |
+| Q15 | GitHub API budget | An incremental job adds two compare calls (JSON and diff, §3 step 4) to today's PR detail, diff, 1-5 commit pages and the posting calls, about 10 per job, against 5 000 requests/hour per installation token: about 500 jobs/hour, far above what L11 lets through (1 000 000 tokens/day is about 100 reviews of the eval size). No new limit. A rate-limit answer (429, or 403 with `x-ratelimit-remaining: 0`) is retryable `forge_unavailable` with `next_attempt_at` no earlier than `x-ratelimit-reset`; today every 403 is read as `installation_removed` (`adapters/github/client.py:231`), #54 fixes that for the new compare calls and the existing ones | Installations hit the limit, or polling for Outdated threads is added |
