@@ -73,7 +73,7 @@ Claim fairness: at most 3 `PROCESSING` jobs per installation
 | Reviewed SHA | The head SHA of the fetched PR, not the payload's: comments and the Check Run go to `context.head_sha` | `worker/process.py:284` |
 | Filters | `binary`, `lockfile` (17 basenames), `minified` (`.min.js`, `.min.mjs`, `.min.css`, `.map`), `vendored` (`vendor`, `node_modules`, `third_party`, `third-party`) | `domain/diff_filter.py:16-20`, `:40-91` |
 | LLM input | `context.diff_text`, the **unfiltered** diff: skipped files still reach the model and count against its budget | `worker/process.py:286-292` |
-| Rules | The worker passes no `rules_markdown`; `.review/rules.md` is read only for the console preview | `worker/process.py:287-291`; `domain/repository_rules.py:1-10`, `:24-26` |
+| Rules | The worker passes no `rules_markdown`; `.review/rules.md` is read only for the console preview. Wiring the file into the review is issue #37 (Igor) | `worker/process.py:287-291`; `domain/repository_rules.py:1-10`, `:24-26` |
 | Commit messages | Fetched, never sent to the model: `ReviewRequest` has no such field | `domain/ports.py:32-36` |
 
 ### 1.4 Budgets that exist
@@ -126,7 +126,13 @@ The module docstring still says the worker passes an empty `posted_fingerprints`
 
 No new per-PR table: the state is derived from the PR's jobs, read through the existing
 `ix_pr_review_jobs_pr_history` index (`alembic/versions/0001_review_jobs.py:156-159`).
-Migration **`0003_incremental_review`** adds to `pr_review_jobs`:
+Migration numbers are not fixed here. PR #64 (open) already adds
+`alembic/versions/0003_pg_stat_statements.py`, so the two migrations of this document take
+the next free revisions after the migrations of PR #64: `0004_incremental_review` and
+`0005_llm_usage_daily` if #64 lands first. #54 rebases on whatever is merged by then and
+numbers them after the last merged revision. Below they are named by suffix only.
+
+Migration **`incremental_review`** adds to `pr_review_jobs`:
 
 | Column | Type | Meaning |
 | :--- | :--- | :--- |
@@ -146,7 +152,7 @@ Derived values:
 | `last_reviewed_sha` | `last_reviewed.reviewed_head_sha` |
 | `pr_tokens_used` | `SUM(input_tokens + output_tokens)` over all jobs of the PR (§6, [L4]) |
 
-Migration **`0004_llm_usage_daily`** adds the installation budget table (§6.3).
+Migration **`llm_usage_daily`** adds the installation budget table (§6.3).
 
 ### 2.2 States
 
@@ -171,12 +177,20 @@ The state is not a column: it is read from the jobs. The table below is the cont
 | `REVIEWED` | `edited` with `changes.base` | base branch changed | `STALE` | full (`base_changed`) |
 | `REVIEWED` | `reopened`, `ready_for_review` | head equals `last_reviewed_sha` | `REVIEWED` | none: `skip_already_reviewed` |
 | `REVIEWED` | `reopened`, `ready_for_review` | head moved | `STALE` | as `synchronize` |
+| `NEW`, `REVIEWED`, `BLOCKED` | Re-run on the AI review Check Run ([I4]) | — | `STALE` | full (`manual_rerun`), even when the head equals `last_reviewed_sha` |
+| `STALE` | Re-run ([I4]) | — | `STALE` | the queued one is superseded; the new one is full (`manual_rerun`) |
 | `STALE` | `synchronize` | — | `STALE` | the queued one is superseded (§1.2); new one as above |
 | `STALE` | job `COMPLETED` | — | `REVIEWED` | — |
 | `STALE` | job skipped by a limit | — | `BLOCKED` | — |
 | `STALE` | job `FAILED` | retries exhausted | `REVIEWED` if a review exists, else `NEW` | — |
 | any | `closed` | — | `CLOSED` | none; active jobs → `SUPERSEDED` |
 | `CLOSED` | `reopened` | — | `REVIEWED` or `NEW` by history | then as the rows above |
+
+Close and reopen no longer re-runs a reviewed head: today every `reopened` enqueues a full
+review (`adapters/github/payload.py:20-28`), after this change a reopen on the same head is
+`skip_already_reviewed`. The way to force a review of an unchanged head is the Re-run
+button ([I4]). From `BLOCKED` a re-run still passes the gate (§6.4) and is blocked again while
+the limit holds.
 
 The mode (full or incremental) is **decided by the worker at run time**, not at ingest
 (§3, step 3): the payload cannot tell a force-push from a fast-forward, and a queued job may
@@ -195,6 +209,8 @@ stateDiagram-v2
     STALE --> NEW: job FAILED, no earlier review
     STALE --> REVIEWED: job FAILED, earlier review exists
     REVIEWED --> REVIEWED: reopened, same head (no job)
+    REVIEWED --> STALE: Re-run on the check run (full, manual_rerun)
+    BLOCKED --> STALE: Re-run on the check run (full, manual_rerun)
     NEW --> CLOSED: closed
     REVIEWED --> CLOSED: closed
     STALE --> CLOSED: closed (active jobs SUPERSEDED)
@@ -214,7 +230,23 @@ stateDiagram-v2
    `next_attempt_at = now() + REVIEW_DEBOUNCE_SECONDS`. The claim already waits for
    `next_attempt_at <= now()` (`adapters/db/repository.py:164`), so pushes inside the window
    supersede the waiting job and one review runs. `opened`, `reopened`,
-   `ready_for_review` and `edited` are not delayed.
+   `ready_for_review`, `edited` and a manual re-run are not delayed.
+4. **[I4]** Manual re-run: the "Re-run" button on the AI review Check Run. GitHub sends a
+   `check_run` event with action `rerequested` to the App that created the run; the App
+   must be subscribed to Check run events (App settings, not code). Today every event other
+   than `pull_request` is answered 204 (`api/webhooks/github.py:158-164`). The new route:
+   - accept only `check_run.name == "AI review"` (`adapters/github/publisher.py:45`) and
+     `check_run.app.id` equal to our App id; anything else, and other `check_run` or
+     `check_suite` actions, stay 204;
+   - take the PR from `check_run.pull_requests[0]` (number, head and base SHA and ref). The
+     list is empty for a PR from a fork: answer 204 and log `webhook.ignored`, the re-run
+     is not available there;
+   - enqueue a job with `event_action = 'rerun'` through the usual insert: delivery dedup
+     and supersede apply (§1.2), no debounce. The worker reviews the current head and sets
+     `full_reason = manual_rerun` (§3, step 3);
+   - only users with write access to the repository can press the button, so it is not an
+     outside abuse path; every re-run counts against L10 and the token limits like any
+     other review.
 
 ---
 
@@ -229,8 +261,9 @@ Runs in the worker after the fetch, before the LLM call. Steps are numbered for 
 
    | Condition | `full_reason` |
    | :--- | :--- |
+   | `event_action = 'rerun'` (manual re-run, [I4]) | `manual_rerun` |
    | No `last_reviewed` | `first_review` |
-   | `last_reviewed_sha == H` and the job is not a manual re-run | none: terminate `SKIPPED`, `skip_already_reviewed`, post nothing |
+   | `last_reviewed_sha == H` | none: terminate `SKIPPED`, `skip_already_reviewed`, post nothing |
    | Compare `last_reviewed_sha...H` returns `status` other than `ahead` (`diverged`, `behind`) or 404 (the SHA is gone) | `force_push` |
    | The job's `base_ref` differs from `last_reviewed`'s `base_ref`, or `event_action = 'edited'` | `base_changed` |
    | The delta touches `.review/rules.md`, or the rules digest at `H` differs from `last_reviewed.rules_digest` | `rules_changed` |
@@ -306,7 +339,7 @@ anchored code. Changing it re-posts every finding ever made, and a golden test g
 
 The last-but-one row is the real source of duplicates on re-review: the message is model
 text and varies between runs. **[D2]** A second key, computed alongside and stored on
-`pr_review_comments` (new column `defect_key CHAR(64) NULL`, migration `0003`):
+`pr_review_comments` (new column `defect_key CHAR(64) NULL`, migration `incremental_review`):
 
 ```
 defect_key = sha256(path \0 category \0 side \0 normalised anchored code \0 rule_id or "")
@@ -438,7 +471,7 @@ Check Run listing the skipped counts (no paths of more than 30 files).
    installation's day in one transaction with the status change:
 
    ```sql
-   -- migration 0004_llm_usage_daily
+   -- migration llm_usage_daily
    CREATE TABLE llm_usage_daily (
      installation_id BIGINT NOT NULL,
      usage_date      DATE   NOT NULL,          -- UTC
@@ -507,9 +540,10 @@ absorbs it. A reservation scheme is listed in §9.
 
 ### 8.1 #54: backend implementation
 
-1. Migration `0003_incremental_review`: the `pr_review_jobs` columns of §2.1 and
-   `pr_review_comments.defect_key`.
-2. Migration `0004_llm_usage_daily` (§6.3).
+1. Migration `incremental_review`: the `pr_review_jobs` columns of §2.1 and
+   `pr_review_comments.defect_key`. Revision number: the next free one after the
+   migrations of PR #64 (§2.1); rebase on whatever is merged.
+2. Migration `llm_usage_daily` (§6.3), the revision after it.
 3. Ingest: [I1] `edited` with `changes.base`, [I2] `closed` cancel path, [I3] debounce; the
    memory twin (`adapters/jobs/memory.py`) in the same order.
 4. GitHub client: `compare(base_sha, head_sha)` returning `status` and the diff text
@@ -532,6 +566,9 @@ absorbs it. A reservation scheme is listed in §9.
     `used`, `estimate`, `limit_value`), `llm.usage.missing`; fields counts only.
 13. API of §8.3 and `docs/openapi.yaml` in the same PR (`docs/PIPELINE_SPEC.md:465-477`).
 14. Fix the stale docstring `domain/publishing.py:17`.
+15. Manual re-run [I4]: the `check_run` `rerequested` route in `api/webhooks/github.py`,
+    `event_action = 'rerun'`, `full_reason = manual_rerun` in the mode choice; the App
+    subscription to Check run events goes into the deploy notes.
 
 ### 8.2 #50: acceptance scenarios
 
@@ -576,6 +613,9 @@ PostgreSQL as `tests/test_e2e_*.py`).
     (`docs/PIPELINE_SPEC.md:396-420`).
 25. Chaos: two jobs of one installation pass the gate together at the edge of the budget →
     overshoot is at most the bound of §6.4.
+26. Re-run on the AI review Check Run of an already reviewed head → one full review,
+    `full_reason = manual_rerun`, LLM called; the same event for another App's check run,
+    another check name or an empty `pull_requests` (fork) → 204, no job.
 
 ### 8.3 #52: console API and Check Run texts
 
@@ -603,7 +643,7 @@ Check Run texts (counts only, no paths beyond the existing file list):
 | Case | Title | Body |
 | :--- | :--- | :--- |
 | Incremental | (verdict as today) | First line: `Incremental review of {n} commit(s) since {short_sha}.` |
-| Full after force-push / base / rules change | (verdict as today) | First line: `Full review: {reason text}.` |
+| Full after force-push / base / rules change / manual re-run | (verdict as today) | First line: `Full review: {reason text}.` |
 | Earlier findings | — | `{n} finding(s) were already posted on earlier commits.` |
 | `skip_diff_too_large` (L2-L4, L7) | `⏭️ Review skipped: pull request too large` | existing text (`domain/publishing.py:368-387`), plus which limit |
 | `skip_no_reviewable_files` | `⏭️ Review skipped: no reviewable files` | `All {n} changed files are lockfiles, generated, vendored, minified or binary.` |
@@ -630,5 +670,5 @@ Conclusion of every skipped run: `skipped`, as PR #63 (`domain/publishing.py:393
 | Q10 | Incremental recall | The model sees less context than a full review; findings that need unchanged code may be missed. Mitigated by CONTEXT_AND_VERIFICATION_SPEC context when it lands | Eval run with a two-commit dataset case |
 | Q11 | Auto-resolve | Not this sprint (§5.3) | Outdated tracking exists |
 | Q12 | `skip_diff_too_large` ends `FAILED` today | Becomes `SKIPPED` in #54 (§8.1 item 8), matching `docs/PIPELINE_SPEC.md:256` | — |
-| Q13 | Rules are not passed to the review today | #54 does not wire them; the `rules_changed` reason works from the delta and the digest, so it is ready when they are | Rules wiring task |
+| Q13 | Rules are not passed to the review today | #54 does not wire them; that is issue #37 (Igor). The `rules_changed` reason works from the delta and the digest, so it is ready when #37 lands | #37 lands |
 | Q14 | Drafts are reviewed | Unchanged here | Config work (`review_drafts`) |
