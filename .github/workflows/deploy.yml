@@ -168,9 +168,14 @@ jobs:
       - name: Upload compose files
         run: |
           set -euo pipefail
-          scp -q deploy/compose.yml deploy/Caddyfile "deploy-target:$APP_DIR/"
+          scp -q deploy/compose.yml deploy/Caddyfile deploy/gatus.yml "deploy-target:$APP_DIR/"
           ssh deploy-target "mkdir -p $APP_DIR/alloy"
           scp -q deploy/alloy/config.alloy "deploy-target:$APP_DIR/alloy/"
+          # Mounted read-only into the backup, postgres and postgres-replica services
+          # (deploy/compose.yml).
+          ssh deploy-target "install -d -m 755 $APP_DIR/ops/backup $APP_DIR/ops/replica"
+          scp -q ops/backup/pg-backup.sh "deploy-target:$APP_DIR/ops/backup/pg-backup.sh"
+          scp -q ops/replica/standby.sh ops/replica/pg_hba.conf "deploy-target:$APP_DIR/ops/replica/"
 
       - name: Write runtime .env
         env:
@@ -195,8 +200,14 @@ jobs:
           SENTRY_WEBHOOK_SECRET: ${{ secrets.SENTRY_WEBHOOK_SECRET }}
           ALERTS_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERTS_TELEGRAM_BOT_TOKEN }}
           ALERTS_TELEGRAM_CHAT_ID: ${{ secrets.ALERTS_TELEGRAM_CHAT_ID }}
+          # Worker scaling (deploy/compose.yml): containers × claim slots per container.
+          WORKER_REPLICAS: ${{ vars.WORKER_REPLICAS || '1' }}
+          WORKER_CONCURRENCY: ${{ vars.WORKER_CONCURRENCY || '5' }}
         run: |
           set -euo pipefail
+          for value in "$WORKER_REPLICAS" "$WORKER_CONCURRENCY"; do
+            [[ "$value" =~ ^[1-9][0-9]?$ ]] || { echo "::error::WORKER_REPLICAS and WORKER_CONCURRENCY must be 1-99"; exit 1; }
+          done
           env_line() { printf '%s=%s\n' "$1" "$(printf '%s' "$2" | tr -d '\r\n')"; }
           # Grafana Cloud shows a stack's base URL, its query URL or its push URL;
           # Alloy needs the push one, whichever the variable holds.
@@ -250,6 +261,8 @@ jobs:
               env_line GRAFANA_CLOUD_TOKEN        "$GRAFANA_CLOUD_TOKEN"
               env_line POSTGRES_EXPORTER_PASSWORD "$POSTGRES_EXPORTER_PASSWORD"
             fi
+            env_line WORKER_REPLICAS             "$WORKER_REPLICAS"
+            env_line WORKER_CONCURRENCY          "$WORKER_CONCURRENCY"
           } | ssh deploy-target "umask 077 && cat > $APP_DIR/.env.new && mv $APP_DIR/.env.new $APP_DIR/.env"
 
       - name: Write the App private key
@@ -282,7 +295,10 @@ jobs:
             docker compose config --quiet
             docker compose pull --quiet
             docker compose up --detach --remove-orphans
-            docker image prune --force >/dev/null
+            # Every deploy pulls a new sha-tagged image; old ones are not dangling, so a plain
+            # prune never removed them and they filled the disk. Keep a week for rollbacks
+            # (older ones are pulled back from GHCR on demand).
+            docker image prune --all --force --filter until=168h >/dev/null
             docker compose ps --format 'table {{.Service}}\t{{.Status}}'"
 
       - name: Smoke test through Caddy

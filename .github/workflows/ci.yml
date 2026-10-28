@@ -40,6 +40,11 @@ jobs:
           .venv/bin/ruff check .
           .venv/bin/ruff format --check .
 
+      - name: Shellcheck
+        # Preinstalled on ubuntu-latest. The server scripts run as root or from cron, where a
+        # shell bug fails silently.
+        run: shellcheck --severity=warning ops/*.sh ops/backup/*.sh ops/replica/*.sh
+
       - name: Mypy
         run: .venv/bin/mypy domain adapters
 
@@ -128,6 +133,12 @@ jobs:
             caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
           docker run --rm -v "$PWD/alloy/config.alloy:/etc/alloy/config.alloy:ro" "$alloy_image" \
             validate /etc/alloy/config.alloy
+
+      - name: Validate production Caddyfile
+        run: |
+          docker run --rm -e SITE_ADDRESS=localhost -e SERVER_IP=127.0.0.1 \
+            -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
       - name: Validate local compose file
         run: |

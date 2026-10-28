@@ -1,0 +1,36 @@
+# Shows the Eurouter balance of the AI_DMC268_T4 key: docs/devops.md «Бюджет LLM».
+# Manual run only. Prints two numbers (EUR); the key never reaches the log.
+name: LLM balance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  balance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Query Eurouter credits
+        env:
+          LLM_PRIMARY_API_KEYS: ${{ secrets.AI_DMC268_T4 }}
+          LLM_PRIMARY_BASE_URL: ${{ vars.AI_DMC268_URL }}
+        run: |
+          set -euo pipefail
+          # The secret may hold several comma-separated keys; they share one account balance.
+          key=${LLM_PRIMARY_API_KEYS%%,*}
+          key=$(printf '%s' "$key" | tr -d '[:space:]')
+          [ -n "$key" ] || { echo "::error::secrets.AI_DMC268_T4 is empty"; exit 1; }
+          base=${LLM_PRIMARY_BASE_URL:-https://api.eurouter.ai/api/v1}
+          body=$(curl -sS --fail-with-body -H "Authorization: Bearer $key" "${base%/}/credits")
+          total=$(jq -r '.data.total_credits' <<<"$body")
+          used=$(jq -r '.data.total_usage' <<<"$body")
+          left=$(jq -rn --arg t "$total" --arg u "$used" '($t|tonumber) - ($u|tonumber)')
+          {
+            echo "### Eurouter balance"
+            echo "- credits: €$total"
+            echo "- usage: €$used"
+            echo "- left (credits − usage): €$left"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

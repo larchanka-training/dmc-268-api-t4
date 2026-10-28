@@ -1,0 +1,63 @@
+# Status page (Gatus) at https://status.<SITE_ADDRESS>, docs/devops.md «Страница статуса».
+# Gatus expands ${SITE_ADDRESS} from its environment (deploy/compose.yml). Results are kept
+# in SQLite in the gatus_data volume, so the history survives deploys.
+#
+# ЗАГЛУШКА(С4): страница на том же VPS, что и сервис (решение 27.10: пока так, потом второй
+# сервер). Если упадёт весь сервер, упадёт и страница. ЖДЁМ второй сервер: тогда Gatus
+# переезжает туда, проверки «Сервер» меняют адреса на внешние.
+#
+# Уведомлений отсюда нет: алерты в Telegram идут из Grafana и Sentry (docs/observability.md,
+# ops/observability/alerts/); блок alerting здесь не добавляем, чтобы не было дублей.
+
+storage:
+  type: sqlite
+  path: /data/data.db
+
+ui:
+  title: DMC-268 Team 4 — статус
+  header: DMC-268 Team 4
+
+endpoints:
+  # Как сервис видит пользователь: через интернет, Caddy и HTTPS.
+  - name: Сайт
+    group: Снаружи
+    url: "https://${SITE_ADDRESS}/"
+    interval: 1m
+    conditions:
+      - "[STATUS] == 200"
+      # Caddy продлевает сертификат заранее; меньше 14 дней значит, что продление сломалось.
+      - "[CERTIFICATE_EXPIRATION] > 336h"
+
+  - name: API
+    group: Снаружи
+    url: "https://${SITE_ADDRESS}/api/health"
+    interval: 1m
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY].status == ok"
+      - "[RESPONSE_TIME] < 2000"
+
+  # Изнутри сервера: отделяет «упал сервис» от «упал Caddy или сеть».
+  - name: API (внутри)
+    group: Сервер
+    url: "http://api:8000/health"
+    interval: 1m
+    conditions:
+      - "[STATUS] == 200"
+
+  - name: PostgreSQL
+    group: Сервер
+    url: "tcp://postgres:5432"
+    interval: 1m
+    conditions:
+      - "[CONNECTED] == true"
+
+  - name: Реплика PostgreSQL
+    group: Сервер
+    url: "tcp://postgres-replica:5432"
+    interval: 1m
+    conditions:
+      - "[CONNECTED] == true"
+
+  # ЗАГЛУШКА(С4): воркера здесь нет, у него нет healthcheck. ЖДЁМ heartbeat воркера от
+  # бэкенда (инженер 5), см. сервис worker в deploy/compose.yml.
