@@ -49,9 +49,9 @@ Other:
 
 ## Phase 1: VPS
 
-- [ ] **Run Bootstrap** — the Bootstrap workflow (root), so `/opt/dmc268/logs` exists and
+- [x] **Run Bootstrap** — the Bootstrap workflow (root), so `/opt/dmc268/logs` exists and
       is owned by 10001 before the first deploy with `LOG_DIR`.
-- [ ] After the deploy: `api.jsonl` and `worker.jsonl` in `/opt/dmc268/logs`, rotated
+- [x] After the deploy: `api.jsonl` and `worker.jsonl` in `/opt/dmc268/logs`, rotated
       and gzipped after midnight UTC.
 
 ## Phase 2: Sentry
@@ -62,38 +62,90 @@ Other:
 
 ## Phase 3: VPS and Grafana
 
-- [ ] **Postgres exporter role** — once, in a quiet period: restart Postgres with the
-      new `command`, run the migration by hand (`docker compose exec api alembic upgrade
-      head`), then create the role in `psql` with the password from the secret:
-      `CREATE ROLE dmc268_exporter LOGIN PASSWORD '…'; GRANT pg_monitor TO dmc268_exporter;`.
-- [ ] Grafana shows host, container, Postgres and API metrics; Loki finds a line by
-      `trace_id`.
+### A. Merge and finish phase 3
+
+- [x] **Postgres exporter role** — `dmc268_exporter` with `pg_monitor`, created by hand
+      with the password from the secret (2026-10-27).
+- [ ] Merge in a quiet period: the first deploy restarts Postgres with the new `command`
+      (a few seconds). Then, once, migration 0003:
+      `docker compose exec api alembic upgrade head`.
+- [ ] The deploy has no "Alloy not started" warning, and `docker compose ps` lists
+      `alloy` as running.
+- [ ] Grafana → Explore: `up` is 1 for all 7 targets (alloy, api, cadvisor, caddy, host,
+      postgres, worker); host, container, Postgres and API metrics show; Loki finds a
+      line by `trace_id`.
 - [ ] Active series below 50% of the free limit (usage dashboard).
 
 ## Phase 4: Telegram, Sentry relay, Grafana alerting
 
-- [ ] Telegram — bot from @BotFather, a team group with the bot in it, its chat id →
-      secrets `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
-- [ ] Grafana contact point `telegram` with the same token and chat id (placeholders
-      until the bot exists).
-- [ ] **Rule routing check** — how Prometheus-format rules reach the `telegram` contact
-      point (Mimir ruler and its Alertmanager vs Grafana-managed import); decide before
-      the rules are uploaded.
-- [ ] Notification policy — group by `domain`, 30 s / 5 min / 4 h; a child policy with
-      Europe/Berlin mute timings for "No throughput" and "Canary review stale", unless
-      `sync.py` provisions them.
-- [ ] Sentry internal integration `telegram-relay` — webhook
-      `https://<site>/api/internal/alerts/sentry`, Alert Rule Action on; its client
-      secret → secret `SENTRY_WEBHOOK_SECRET`.
-- [ ] Sentry alert rules — New issue, Regression, Error burst (> 10 in 10 min), Critical
-      (`fatal`); each with the email and `telegram-relay` actions.
-- [ ] From the first real relay delivery: which payload field is the event timestamp
-      (⚠️ in § Alerts).
-- [ ] Run the `observability-sync` workflow; dashboards and the synthetic check exist.
+### B. Telegram bot
+
+- [x] Secrets `ALERTS_TELEGRAM_BOT_TOKEN` and `ALERTS_TELEGRAM_CHAT_ID`.
+
+### C. Sentry
+
+- [x] Sentry internal integration `telegram-relay` — Settings → Developer Settings →
+      Custom Integrations → Create New Integration → Internal Integration; webhook
+      `https://<site>/api/internal/alerts/sentry`, Alert Rule Action on, no permissions.
+      Its **Client Secret** (it signs each delivery; not the integration's token) →
+      secret `SENTRY_WEBHOOK_SECRET`.
+- [ ] Redeploy (Actions → Deploy → Run workflow, or the next merge) once
+      `SENTRY_WEBHOOK_SECRET` and the two Telegram secrets exist: the VPS `.env` gets them
+      only on a deploy. Until then the relay route answers 404.
+- [ ] Sentry alert rules — Monitors → Alerts → Create Alert, project `dmc268-backend`,
+      environment `production`; each with "Notify on preferred channel" (the admin,
+      email) and "Send a notification via an integration" → `telegram-relay`:
+      - [ ] New issue ("A new issue is created");
+      - [ ] Regression ("A resolved issue regresses");
+      - [ ] Error burst ("An event or issue activity is captured" + Number of events more than
+      10 in 10 minutes); 
+      - [ ] Critical (same trigger + Event level equals `fatal`). If
+      `telegram-relay` is not offered, check that Alert Rule Action is on. The Grafana
+      rules are not created by hand: the `observability-sync` workflow pushes them.
+- [ ] "Send Test Notification" on one of the rules: a message arrives in the Telegram
+      group, and Loki shows `alert.relay_forwarded`
+      (`{service="api"} | json | event=~"alert.*"`).
+- [ ] From the first real relay delivery: it carries `data.event.timestamp` or
+      `datetime`, as the relay reads them (⚠️ in § Alerts). A fresh alert that logs
+      `alert.relay_dropped` with `reason=stale` means neither field means what Sentry
+      documents.
+
+### D. Grafana
+
+- [x] Variables `GRAFANA_URL` (`https://<stack>.grafana.net`) and `GRAFANA_SM_URL`
+      (Synthetic Monitoring's API URL for the stack's region), secret `GRAFANA_SM_TOKEN`
+      (Testing & synthetics → Synthetics → Config → access token). Optional: variables
+      `SENTRY_ORG_URL` (for the dashboard's traces link) and
+      `GRAFANA_PROM_DATASOURCE_UID` (only if the stack's Prometheus is not
+      `grafanacloud-prom`: Connections → Data sources).
+- [ ] Actions → Observability sync → Run workflow: with `dry_run` first, then for real.
+      A 403 from an `/api/v1/provisioning` call means the service account behind
+      `GRAFANA_SA_TOKEN` needs the Admin role.
+- [ ] **Rule routing check** — the code uses Grafana's import of Prometheus-format rules
+      (Grafana-managed rules, routed by the notification policy); verified on Grafana
+      13.2 in the lab. In Grafana Cloud, after the sync: Alerting → Alert rules lists 24
+      rules in the folder "DMC-268 alerts", and a rule's notification preview shows the
+      `telegram` contact point.
+- [ ] Notification policy — `sync.py` provisions it (group by `domain`, 30 s / 5 min / 4 h,
+      child routes muting "No throughput" and "Canary review stale" outside working
+      hours, Europe/Berlin); check it in Alerting → Notification policies.
+- [ ] Grafana contact point `telegram` — `sync.py` creates it with placeholders and never
+      overwrites it: Alerting → Contact points → telegram → Edit, type in the bot token
+      and chat id, then Test; the message arrives in the group.
+- [ ] Dashboards → DMC-268 has the four dashboards; Synthetics has the check
+      `dmc268-site`. After a few runs of the check,
+      `probe_ssl_earliest_cert_expiry{job="dmc268-site"}` has data (the check sends basic
+      metrics only; if it is missing, turn `basicMetricsOnly` off in
+      `ops/observability/synthetics/uptime.json`).
+
+### E. Drills and owners
+
 - [ ] Drills, in a quiet period: a test error → email + relay; stop api → one "Target
       down"; stop Alloy → "Telemetry missing"; stop Caddy → "Site unreachable". After the
       api and Caddy stops, redeliver GitHub's failed deliveries as the runbook says.
 - [ ] A deploy shows as a Grafana annotation and a Sentry release with commits.
+- [ ] Owners — once decided (Team decisions), replace `owner: unassigned` in
+      `ops/observability/alerts/*.rules.yaml` and run the sync again.
 
 ## Phase 5: pipeline
 

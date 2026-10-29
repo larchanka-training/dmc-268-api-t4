@@ -1,0 +1,198 @@
+// Grafana Alloy on the VPS (docs/observability.md § Metrics, § System, § Logs).
+//
+// Scrapes the API, the worker and Caddy; runs the host, container and Postgres
+// exporters; tails the JSON log files; ships metrics and logs to Grafana Cloud. Every
+// target is scraped every 60 s: the free tier counts series at one data point a minute,
+// so a 15 s interval would count four times over (§ Series budget).
+//
+// The Grafana Cloud URLs, users and token and the exporter role's password come from
+// the environment compose gives this container alone (deploy/compose.yml).
+
+// --- application and edge ------------------------------------------------------------
+
+prometheus.scrape "app" {
+	targets = [
+		{"__address__" = "api:9100", "job" = "api"},
+		{"__address__" = "worker:9101", "job" = "worker"},
+		{"__address__" = "caddy:2020", "job" = "caddy"},
+	]
+	scrape_interval = "60s"
+	forward_to      = [prometheus.remote_write.cloud.receiver]
+}
+
+// --- host ----------------------------------------------------------------------------
+
+// CPU, memory, load, disk usage and I/O, and the kernel's OOM kill count. No netdev:
+// inside this container it reads Alloy's own network namespace, never the host's.
+// diskstats logs once that /run/udev/data is missing: it only loses device labels.
+prometheus.exporter.unix "host" {
+	set_collectors = ["cpu", "meminfo", "loadavg", "filesystem", "diskstats", "vmstat"]
+	// The host's /proc, so the filesystem collector reads the host's mount table.
+	procfs_path = "/host/proc"
+
+	filesystem {
+		// The root filesystem only: the host's other mount points do not exist in this
+		// container, and its "/" reports the disk under Docker's data root.
+		mount_points_exclude = "^/.+"
+	}
+
+	// The "OOM kill" alert's signal. cadvisor's container_oom_events_total cannot carry
+	// it: compose restarts a killed container, and its series starts again at 0 before
+	// any scrape; the kernel's own counter survives the restart.
+	vmstat {
+		fields = "^oom_kill$"
+	}
+}
+
+discovery.relabel "host" {
+	targets = prometheus.exporter.unix.host.targets
+
+	rule {
+		target_label = "job"
+		replacement  = "host"
+	}
+}
+
+prometheus.scrape "host" {
+	targets         = discovery.relabel.host.output
+	scrape_interval = "60s"
+	forward_to      = [prometheus.remote_write.cloud.receiver]
+}
+
+// --- containers ----------------------------------------------------------------------
+
+// Left at its defaults cadvisor emits thousands of series, one set per cgroup.
+prometheus.exporter.cadvisor "containers" {
+	docker_only            = true
+	store_container_labels = false
+	enabled_metrics        = ["cpu", "memory"]
+}
+
+discovery.relabel "containers" {
+	targets = prometheus.exporter.cadvisor.containers.targets
+
+	rule {
+		target_label = "job"
+		replacement  = "cadvisor"
+	}
+}
+
+prometheus.scrape "containers" {
+	targets         = discovery.relabel.containers.output
+	scrape_interval = "60s"
+	forward_to      = [prometheus.relabel.containers.receiver]
+}
+
+// Only what the dashboards and the restart alert read (a restart is a new start time),
+// and the scrape's own `up`, so a broken cadvisor shows as a target down.
+prometheus.relabel "containers" {
+	forward_to = [prometheus.remote_write.cloud.receiver]
+
+	rule {
+		source_labels = ["__name__"]
+		regex         = "up|container_(cpu_usage_seconds_total|memory_working_set_bytes|spec_memory_limit_bytes|start_time_seconds)"
+		action        = "keep"
+	}
+}
+
+// --- Postgres ------------------------------------------------------------------------
+
+// The read-only dmc268_exporter role (pg_monitor), created once by hand
+// (tasks/observability-checklist.md, phase 3).
+prometheus.exporter.postgres "db" {
+	data_source_names  = ["postgresql://dmc268_exporter:" + encoding.url_encode(sys.env("POSTGRES_EXPORTER_PASSWORD")) + "@postgres:5432/dmc268?sslmode=disable"]
+	enabled_collectors = ["database", "locks", "stat_database", "stat_user_tables", "stat_statements"]
+
+	// Top 20 statements by total time; their text stays in Postgres (queryid only).
+	stat_statements {
+		limit = 20
+	}
+}
+
+discovery.relabel "db" {
+	targets = prometheus.exporter.postgres.db.targets
+
+	rule {
+		target_label = "job"
+		replacement  = "postgres"
+	}
+}
+
+prometheus.scrape "db" {
+	targets         = discovery.relabel.db.output
+	scrape_interval = "60s"
+	forward_to      = [prometheus.remote_write.cloud.receiver]
+}
+
+// --- Alloy itself --------------------------------------------------------------------
+
+// WAL size and failed remote writes: the monitoring of the monitoring.
+prometheus.exporter.self "alloy" { }
+
+discovery.relabel "alloy" {
+	targets = prometheus.exporter.self.alloy.targets
+
+	rule {
+		target_label = "job"
+		replacement  = "alloy"
+	}
+}
+
+prometheus.scrape "alloy" {
+	targets         = discovery.relabel.alloy.output
+	scrape_interval = "60s"
+	forward_to      = [prometheus.remote_write.cloud.receiver]
+}
+
+prometheus.remote_write "cloud" {
+	endpoint {
+		url = sys.env("GRAFANA_CLOUD_PROM_URL")
+
+		basic_auth {
+			username = sys.env("GRAFANA_CLOUD_PROM_USER")
+			password = sys.env("GRAFANA_CLOUD_TOKEN")
+		}
+	}
+}
+
+// --- logs ----------------------------------------------------------------------------
+
+// The live files only: rotated ones are renamed and gzipped (api.jsonl.2026-10-25.gz).
+local.file_match "logs" {
+	path_targets = [{"__path__" = "/logs/*.jsonl"}]
+}
+
+loki.source.file "logs" {
+	targets    = local.file_match.logs.targets
+	forward_to = [loki.process.logs.receiver]
+}
+
+loki.process "logs" {
+	forward_to = [loki.write.cloud.receiver]
+
+	stage.json {
+		expressions = {service = "", level = "", ts = ""}
+	}
+
+	// Index labels stay low-cardinality: service and level. Every other field, trace_id
+	// included, is parsed at query time: {service="api"} | json | trace_id="…".
+	stage.labels {
+		values = {service = "", level = ""}
+	}
+
+	stage.timestamp {
+		source = "ts"
+		format = "RFC3339Nano"
+	}
+}
+
+loki.write "cloud" {
+	endpoint {
+		url = sys.env("GRAFANA_CLOUD_LOKI_URL")
+
+		basic_auth {
+			username = sys.env("GRAFANA_CLOUD_LOKI_USER")
+			password = sys.env("GRAFANA_CLOUD_TOKEN")
+		}
+	}
+}

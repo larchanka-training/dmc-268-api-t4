@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 #: Bumped whenever a rule is added, removed or changed.
-RULESET_VERSION = "1"
+RULESET_VERSION = "2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +72,12 @@ RULES: tuple[RedactionRule, ...] = (
     RedactionRule(
         "jwt",
         re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+    ),
+    # A Telegram bot token, <bot id>:<35 characters>. The Bot API puts it in the URL path
+    # (/bot<token>/sendMessage), which httpx logs, so there is no word boundary before it.
+    RedactionRule(
+        "telegram_bot_token",
+        re.compile(r"(?<!\d)\d{6,12}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])"),
     ),
 )
 

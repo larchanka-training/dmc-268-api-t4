@@ -1,0 +1,117 @@
+# promtool test rules: fire, not fire, absent series, suppressed by the root.
+rule_files:
+  - ../business.rules.yaml
+evaluation_interval: 1m
+
+tests:
+  - name: NoThroughput fires on 4 hours without an enqueued review
+    interval: 30m
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1x12'}
+      - {series: 'webhook_deliveries_total{job="api", instance="api:9100", provider="github", outcome="enqueued"}', values: '0x12'}
+    alert_rule_test:
+      - eval_time: 5h
+        alertname: NoThroughput
+        exp_alerts:
+          - exp_labels: {domain: business, severity: critical, owner: unassigned}
+            exp_annotations:
+              summary: No review was enqueued in 4 hours.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#no-throughput
+
+  - name: NoThroughput stays quiet while reviews arrive
+    interval: 30m
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1x12'}
+      - {series: 'webhook_deliveries_total{job="api", instance="api:9100", provider="github", outcome="enqueued"}', values: '0+1x12'}
+    alert_rule_test:
+      - {eval_time: 5h, alertname: NoThroughput, exp_alerts: []}
+
+  - name: NoThroughput is suppressed while the API is down
+    interval: 30m
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1x8 0x4'}
+      - {series: 'webhook_deliveries_total{job="api", instance="api:9100", provider="github", outcome="enqueued"}', values: '0x12'}
+    alert_rule_test:
+      - {eval_time: 5h, alertname: NoThroughput, exp_alerts: []}
+
+  - name: No series, no alert (why the counter starts at 0)
+    interval: 30m
+    input_series: []
+    alert_rule_test:
+      - {eval_time: 26h, alertname: NoThroughput, exp_alerts: []}
+      - {eval_time: 26h, alertname: CanaryReviewStale, exp_alerts: []}
+      - {eval_time: 26h, alertname: StripeSilence, exp_alerts: []}
+      - {eval_time: 26h, alertname: LlmSpend, exp_alerts: []}
+
+  - name: CanaryReviewStale fires after 4 h 15 min without a completed canary review
+    interval: 30m
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1x10'}
+      - {series: 'up{job="worker", instance="worker:9101"}', values: '1x10'}
+      - {series: 'canary_review_last_success_timestamp{job="api", instance="api:9100"}', values: '0x10'}
+    alert_rule_test:
+      - {eval_time: 4h, alertname: CanaryReviewStale, exp_alerts: []}
+      - eval_time: 4h30m
+        alertname: CanaryReviewStale
+        exp_alerts:
+          - exp_labels: {job: api, instance: "api:9100", domain: business, severity: critical, owner: unassigned}
+            exp_annotations:
+              summary: The canary PR has had no completed review for 4 h 15 min.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#canary-review-stale
+
+  - name: CanaryReviewStale is suppressed while the worker is down
+    interval: 30m
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1x10'}
+      - {series: 'up{job="worker", instance="worker:9101"}', values: '1x6 0x4'}
+      - {series: 'canary_review_last_success_timestamp{job="api", instance="api:9100"}', values: '0x10'}
+    alert_rule_test:
+      - {eval_time: 4h30m, alertname: CanaryReviewStale, exp_alerts: []}
+
+  - name: StripeSilence fires after 24 h without an event while subscriptions are active
+    interval: 1h
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1x30'}
+      - {series: 'stripe_last_event_timestamp{job="api", instance="api:9100"}', values: '0x30'}
+      - {series: 'subscriptions_active{job="api", instance="api:9100"}', values: '3x30'}
+    alert_rule_test:
+      - {eval_time: 20h, alertname: StripeSilence, exp_alerts: []}
+      - eval_time: 25h
+        alertname: StripeSilence
+        exp_alerts:
+          - exp_labels: {job: api, instance: "api:9100", domain: business, severity: warning, owner: unassigned}
+            exp_annotations:
+              summary: No Stripe event in 24 hours while subscriptions are active.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#stripe-silence
+
+  - name: StripeSilence stays quiet without active subscriptions, and while the API is down
+    interval: 1h
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1x20 0x10'}
+      - {series: 'stripe_last_event_timestamp{job="api", instance="api:9100"}', values: '0x30'}
+      - {series: 'subscriptions_active{job="api", instance="api:9100"}', values: '0x20 3x10'}
+    alert_rule_test:
+      - {eval_time: 19h, alertname: StripeSilence, exp_alerts: []}
+      - {eval_time: 25h, alertname: StripeSilence, exp_alerts: []}
+
+  - name: LlmSpend fires over the daily budget, not under it
+    interval: 1h
+    input_series:
+      - {series: 'llm_cost_usd_total{model="glm"}', values: '0+1x30'}
+      - {series: 'llm_daily_budget_usd', values: '10x30'}
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: LlmSpend
+        exp_alerts:
+          - exp_labels: {domain: business, severity: warning, owner: unassigned}
+            exp_annotations:
+              summary: LLM spend in the last day is over the daily budget.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#llm-spend
+
+  - name: LlmSpend stays quiet under the budget
+    interval: 1h
+    input_series:
+      - {series: 'llm_cost_usd_total{model="glm"}', values: '0+1x30'}
+      - {series: 'llm_daily_budget_usd', values: '100x30'}
+    alert_rule_test:
+      - {eval_time: 25h, alertname: LlmSpend, exp_alerts: []}

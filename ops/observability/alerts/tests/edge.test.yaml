@@ -1,0 +1,99 @@
+# promtool test rules: fire, not fire, absent series, suppressed by the root. Synthetic
+# Monitoring runs the check every 2 minutes, hence the 2m interval.
+rule_files:
+  - ../edge.rules.yaml
+evaluation_interval: 1m
+
+tests:
+  - name: SiteUnreachable fires when two locations failed both runs of 4 minutes
+    interval: 2m
+    input_series:
+      - {series: 'probe_success{job="dmc268-site", instance="https://site/api/health", probe="Frankfurt"}', values: '1 0 0 0'}
+      - {series: 'probe_success{job="dmc268-site", instance="https://site/api/health", probe="London"}', values: '1 0 0 0'}
+      - {series: 'probe_success{job="dmc268-site", instance="https://site/api/health", probe="Paris"}', values: '1 1 1 1'}
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SiteUnreachable
+        exp_alerts:
+          - exp_labels: {domain: edge, severity: critical, owner: unassigned}
+            exp_annotations:
+              summary: The site's /api/health fails from 2 of 3 probe locations.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#site-unreachable
+
+  - name: SiteUnreachable stays quiet for one location, or for a single failed run
+    interval: 2m
+    input_series:
+      - {series: 'probe_success{job="dmc268-site", instance="https://site/api/health", probe="Frankfurt"}', values: '1 0 0 0'}
+      - {series: 'probe_success{job="dmc268-site", instance="https://site/api/health", probe="London"}', values: '1 1 1 0'}
+      - {series: 'probe_success{job="dmc268-site", instance="https://site/api/health", probe="Paris"}', values: '1 1 1 0'}
+    alert_rule_test:
+      - {eval_time: 6m, alertname: SiteUnreachable, exp_alerts: []}
+
+  - name: No series, no alert
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - {eval_time: 15m, alertname: SiteUnreachable, exp_alerts: []}
+      - {eval_time: 15m, alertname: Edge5xx, exp_alerts: []}
+      - {eval_time: 15m, alertname: TlsCertificateExpiry, exp_alerts: []}
+
+  - name: Edge5xx fires at 10% 5xx at Caddy
+    interval: 1m
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1x15'}
+      - {series: 'caddy_http_request_duration_seconds_count{server="srv0", handler="reverse_proxy", method="GET", code="200"}', values: '0+90x15'}
+      - {series: 'caddy_http_request_duration_seconds_count{server="srv0", handler="reverse_proxy", method="GET", code="502"}', values: '0+10x15'}
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: Edge5xx
+        exp_alerts:
+          - exp_labels: {domain: edge, severity: critical, owner: unassigned}
+            exp_annotations:
+              summary: Over 5% of requests at Caddy answered 5xx in 10 minutes.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#edge-5xx
+
+  - name: Edge5xx stays quiet at 1%
+    interval: 1m
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1x15'}
+      - {series: 'caddy_http_request_duration_seconds_count{server="srv0", handler="reverse_proxy", method="GET", code="200"}', values: '0+99x15'}
+      - {series: 'caddy_http_request_duration_seconds_count{server="srv0", handler="reverse_proxy", method="GET", code="502"}', values: '0+1x15'}
+    alert_rule_test:
+      - {eval_time: 12m, alertname: Edge5xx, exp_alerts: []}
+
+  - name: Edge5xx needs 20 requests
+    interval: 1m
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1x15'}
+      - {series: 'caddy_http_request_duration_seconds_count{server="srv0", handler="reverse_proxy", method="GET", code="502"}', values: '0+1x15'}
+    alert_rule_test:
+      - {eval_time: 12m, alertname: Edge5xx, exp_alerts: []}
+
+  - name: Edge5xx is suppressed while the API is down
+    interval: 1m
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1x5 0x10'}
+      - {series: 'caddy_http_request_duration_seconds_count{server="srv0", handler="reverse_proxy", method="GET", code="502"}', values: '0+10x15'}
+    alert_rule_test:
+      - {eval_time: 12m, alertname: Edge5xx, exp_alerts: []}
+
+  - name: TlsCertificateExpiry fires under 14 days left, not at 60
+    interval: 1m
+    input_series:
+      # Seconds since the test's epoch: 10 days and 60 days.
+      - {series: 'probe_ssl_earliest_cert_expiry{job="dmc268-site", instance="https://site/api/health", probe="Frankfurt"}', values: '864000x5'}
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: TlsCertificateExpiry
+        exp_alerts:
+          - exp_labels: {domain: edge, severity: warning, owner: unassigned}
+            exp_annotations:
+              summary: The site's TLS certificate expires in under 14 days.
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#tls-certificate-expiry
+
+  - name: TlsCertificateExpiry stays quiet with 60 days left
+    interval: 1m
+    input_series:
+      - {series: 'probe_ssl_earliest_cert_expiry{job="dmc268-site", instance="https://site/api/health", probe="Frankfurt"}', values: '5184000x5'}
+    alert_rule_test:
+      - {eval_time: 2m, alertname: TlsCertificateExpiry, exp_alerts: []}

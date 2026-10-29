@@ -1,0 +1,59 @@
+name: Observability sync
+
+# Pushes the dashboards, alert rules, alert routing and the synthetic check of
+# ops/observability/ to Grafana Cloud (docs/observability.md § Dashboards, § Alerts).
+# Manual: run it after changing those files. Idempotent, so running it twice is harmless.
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Comma-separated parts: dashboards, rules, alerting, synthetics (empty = all)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Print the writes, make none"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: observability-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet -e ".[dev]"
+
+      - name: Sync
+        env:
+          GRAFANA_URL: ${{ vars.GRAFANA_URL }}
+          GRAFANA_SA_TOKEN: ${{ secrets.GRAFANA_SA_TOKEN }}
+          GRAFANA_PROM_DATASOURCE_UID: ${{ vars.GRAFANA_PROM_DATASOURCE_UID }}
+          SENTRY_ORG_URL: ${{ vars.SENTRY_ORG_URL }}
+          GRAFANA_SM_URL: ${{ vars.GRAFANA_SM_URL }}
+          GRAFANA_SM_TOKEN: ${{ secrets.GRAFANA_SM_TOKEN }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          ONLY: ${{ inputs.only }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          [ -n "$GRAFANA_URL" ] || { echo "::error::vars.GRAFANA_URL is not set"; exit 1; }
+          [ -n "$GRAFANA_SA_TOKEN" ] || { echo "::error::secrets.GRAFANA_SA_TOKEN is not set"; exit 1; }
+          # The site the probe checks, named as deploy.yml names it; the IP stays masked.
+          if [ -n "$DEPLOY_HOST" ]; then
+            echo "::add-mask::${DEPLOY_HOST//./-}"
+            export SITE_ADDRESS="${DEPLOY_HOST//./-}.sslip.io"
+          fi
+          args=(--only "$ONLY")
+          if [ "$DRY_RUN" = true ]; then args+=(--dry-run); fi
+          .venv/bin/python -m ops.observability.sync "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"

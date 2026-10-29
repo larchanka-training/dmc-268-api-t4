@@ -157,6 +157,15 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `repositories.list.failed` | warning | Listing repositories on GitHub failed; the API answers 502 | `reason` |
 | `rules.read.failed` | warning | Reading `.review/rules.md` for the rules preview failed; the API answers 502 | `job_id`, `reason` |
 | `finding_context.read.failed` | warning | Reading a finding's diff or file lines from the forge failed; the API answers 502 | `job_id`, `reason` |
+| `metrics.serving` | info | A process started its Prometheus endpoint: the API on 9100, the worker on 9101 | `port` |
+| `metrics.unavailable` | warning | The metrics port could not be bound; the process runs without it, and its scrape target is down | `port`, `error_type` |
+| `alert.relay_forwarded` | info | The relay sent a Sentry alert on to Telegram | `issue_id`, `alert_level`, `duration_ms` |
+| `alert.relay_failed` | warning, never error (§ Alerts, "No loop") | Sending failed; counted in `alert_relay_failures_total` | `issue_id`, `alert_level`, `error_type`, `duration_ms` |
+| `alert.relay_dropped` | warning | The relay did not forward an alert: stale, duplicate or over the rate limit; counted in `alert_relay_dropped_total` | `issue_id`, `reason` |
+| `alert.relay_ignored` | info | A signed delivery that is not an issue alert, such as the integration's installation event | `resource` |
+| `alert.dropped` | info | No Telegram bot configured: the message is dropped (the placeholder) | `issue_id`, `alert_level` |
+| `metrics.sampler.failed` | warning | The DB sampler's first failed sample in a run of failures; the queue gauges are removed until one succeeds | `error_type` |
+| `metrics.sampler.recovered` | info | Samples work again | — |
 | `queue.in_memory` | info | The API started without `DATABASE_URL`: dev mode, no worker | — |
 | `webhook.ignored` | info | A verified delivery that is not reviewed: another event, or a non-reviewable action | `delivery_id`, `provider`, `gh_event`, `action` |
 | `webhook.rejected` | warning | A verified `pull_request` payload the parser refused (400) | `delivery_id`, `provider`, `reason` |
@@ -222,8 +231,7 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `sentry.enabled` | info | Sentry is initialised | — |
 | `sentry.disabled` | info | No `SENTRY_DSN`: Sentry is off | — |
 
-Planned, with the phase that adds them: `step.finished` (phase 5, the `Observer`);
-`alert.relay_dropped`, `alert.relay_failed` and `alert.dropped` (phase 4, the relay).
+Planned, with the phase that adds them: `step.finished` (phase 5, the `Observer`).
 
 ### What is never logged
 
@@ -388,7 +396,7 @@ DB sampler and `llm_daily_budget_usd` in one process only.
 | `job_claim_latency_seconds` | histogram | — | Claimable → claim (from `next_attempt_at`, so a retry's backoff does not count); a wedged worker |
 | `review_step_duration_seconds` | histogram | `step`, `outcome` | Where review time goes |
 | `review_duration_seconds` | histogram | `status` | **Enqueue → terminal status** per job, so queue wait counts. Buckets include 60, 120, 300, 600 and 900 s, so the latency SLO threshold sits on a bucket edge |
-| `jobs_finished_total` | counter | `status`, `error_kind` | Forge outage vs bug |
+| `jobs_finished_total` | counter | `status` (`COMPLETED`, `FAILED`, `RETRYING`: one per attempt), `error_kind` (empty when completed) | Forge outage vs bug |
 | `lease_expiries_total` | counter | — | Counted from the reaper's result. A worker died, or a review outlived its 600 s lease: the lease is renewed only before `LLM_CALL` and `POST_FEEDBACK`, and `LLM_CALL` can take 2 × 300 s plus the rule screen and verifier. BACKEND_ARCHITECTURE.md reads non-zero as "workers are dying" only |
 | `llm_requests_total` | counter | `provider`, `model`, `purpose`, `outcome` | Provider failures, fallbacks. `purpose` is `review`, `correction`, `rule_screen` or `verify`: one review makes several calls |
 | `llm_tokens_total` | counter | `provider`, `model`, `purpose`, `direction` | The bill, before it arrives |
@@ -430,19 +438,23 @@ being down is reported by "Target down" (`pg_up == 0`).
 
 | Source | Gives |
 | :--- | :--- |
-| `prometheus.exporter.unix` | Host CPU, RAM, load, disk usage and I/O, network |
-| `prometheus.exporter.cadvisor` | CPU, RAM, restarts and OOM kills per container (`api`, `worker`, `postgres`, `caddy`); the box has no swap, so an OOM kill is the likely way a container dies |
+| `prometheus.exporter.unix` | Host CPU, RAM, load, disk usage and I/O, and the kernel's count of OOM kills (`node_vmstat_oom_kill`). No network: inside Alloy's container `netdev` reads Alloy's own network namespace, not the host's interfaces, and no dashboard shows host traffic |
+| `prometheus.exporter.cadvisor` | CPU, RAM and restarts per container (`api`, `worker`, `postgres`, `caddy`). Not OOM kills: compose restarts a killed container and cadvisor starts its series again at 0, so `container_oom_events_total` never shows the kill (checked with Docker 29 and a container OOM-killed in a restart loop); the kernel's counter above does. The box has no swap, so an OOM kill is the likely way a container dies |
 | `prometheus.exporter.postgres` | Connections vs `max_connections`, locks, database and table size (`pr_review_jobs` growth), dead tuples and last autovacuum on `pr_review_jobs` (a `SKIP LOCKED` queue churns rows and bloats), top statements from `pg_stat_statements` |
-| Caddy | Requests and 5xx at the edge, including the `502`s Caddy returns while the API is down, which the app never sees. Served by a `metrics` site block on an internal port (`:2020`), never by Caddy's admin API, which can rewrite the config |
+| Caddy | Requests and 5xx at the edge, including the `502`s Caddy returns while the API is down, which the app never sees. Served by a `metrics` site block on an internal port (`:2020`), never by Caddy's admin API, which can rewrite the config; turned on by the global `metrics` option (Caddy 2.11 deprecates `servers { metrics }`) |
 | Alloy self-metrics | WAL size, failed remote writes: the monitoring of the monitoring |
 
 `pg_stat_statements` needs `shared_preload_libraries` in the Postgres container command
 and `CREATE EXTENSION` in a migration. The exporter connects as a dedicated role with
 `pg_monitor`, whose password is `POSTGRES_EXPORTER_PASSWORD` below.
 
-cadvisor needs `/var/run/docker.sock` read-only, `/sys` and `/proc`. Read access to the
-Docker socket is root-equivalent; Alloy publishes no port and runs the pinned official
-image. Noted as a deliberate cost, like decision 14 in [devops.md](./devops.md).
+cadvisor needs the Docker and containerd sockets read-only (without containerd's, its
+Docker factory does not register and it sees no container) and the host's `/sys`; the
+host exporter reads the host's `/proc` for the mount table. Read access to either socket
+is root-equivalent; Alloy publishes no port, runs the pinned official image, and is not
+privileged: cadvisor's documentation asks for privileged mode, but CPU, memory and
+restarts work without it. Noted as a deliberate cost, like decision 14 in
+[devops.md](./devops.md).
 
 ### Series budget
 
@@ -453,7 +465,7 @@ metrics, not logs or traces. Rough budget:
 | Source | Series | Note |
 | :--- | :--- | :--- |
 | Application | low thousands | `http_request_duration_seconds` ~540, `review_step_duration_seconds` ~10 steps × outcomes × buckets ≈ 300–400 |
-| `unix` exporter | 500–1,000 | Collectors limited to cpu, meminfo, filesystem, diskstats, netdev, loadavg |
+| `unix` exporter | 500–1,000 | Collectors limited to cpu, meminfo, loadavg, filesystem (`/` only), diskstats and vmstat's `oom_kill` |
 | `cadvisor` | thousands if left at defaults | Emits per cgroup, including every systemd slice, not only containers |
 | `postgres` exporter | a few hundred | More with per-table stats; table size only for the tables named above |
 | Alloy self-metrics | a few hundred | |
@@ -465,11 +477,14 @@ Rules that keep it inside the budget:
   and can be counted as four times the series. The DB sampler still runs every 15 s in
   the API; Prometheus reads the latest value once a minute.
 - **cadvisor:** `docker_only = true`, `store_container_labels = false`, and a
-  `prometheus.relabel` allowlist keeping only the CPU, memory, restart and OOM metrics the
-  dashboards use.
+  `prometheus.relabel` allowlist keeping only the CPU, memory and restart metrics the
+  dashboards use (four series per container) and cadvisor's own `up`.
 - **`pg_stat_statements`:** top 20 statements by total time only.
 - **Phase 3 exit check:** active series below 50% of the free limit, read from Grafana
-  Cloud's usage dashboard, so the pipeline metrics still fit when phase 5 adds them.
+  Cloud's usage dashboard, so the pipeline metrics still fit when phase 5 adds them. A
+  local run of the phase 3 config (Docker Desktop, 10 CPUs, 4 containers) measured
+  `unix` 474, `postgres` 587, Alloy 655 and cadvisor 16 series; the VPS has fewer CPUs
+  and disks.
 
 ---
 
@@ -578,14 +593,17 @@ written down once.
 
 Kept as JSON in `ops/observability/dashboards/` and pushed with
 `ops/observability/sync.py` (Grafana HTTP API, service-account token), so they are
-reviewed like code and recoverable if the stack is lost.
+reviewed like code and recoverable if the stack is lost. The JSON is generated from the
+compact panel list in `dashboards/build.py`, and a test fails when it is stale. Every
+panel queries a `prometheus` dashboard variable, so the same JSON works in Grafana Cloud
+and in the lab; panels on metrics a later phase adds show "No data" until then.
 
 | Dashboard | Panels |
 | :--- | :--- |
-| **Overview** | RPS, error rate, p95 latency, queue depth, oldest claimable age, jobs finished by status, LLM cost/day, SLO error budget remaining, external probe status, firing alerts |
+| **Overview** | RPS, error rate, p95 latency, queue depth, oldest claimable age, jobs finished by status, LLM cost/day, SLO error budget remaining (phase 6), external probe status, firing alerts |
 | **API** | RPS and latency per route, status classes, webhook outcomes per provider, Caddy 5xx at the edge, security events by kind |
 | **Pipeline** | Review duration p50/p95, step duration stacked by `step`, claim latency, `error_kind` breakdown, LLM outcome per provider, LLM tokens and cost per model, forge rate-limit headroom, findings posted, secrets redacted, last canary review |
-| **Infrastructure** | Host CPU/RAM/disk, container CPU/RAM/restarts/OOM kills, Postgres connections, table sizes, dead tuples and top statements, TLS certificate expiry, Alloy WAL health |
+| **Infrastructure** | Host CPU/RAM/disk and OOM kills, container CPU/RAM/restarts, Postgres connections, table sizes, dead tuples and top statements, TLS certificate expiry, Alloy WAL health |
 
 Every dashboard shows **deploy annotations**: `deploy.yml` posts one to the Grafana
 annotations API (tag `deploy`, text = `IMAGE_TAG`) after the smoke test passes, so a
@@ -645,19 +663,29 @@ with "Alert Rule Action" enabled posts a signed webhook to
   `alert_relay_dropped_total{reason}` (`stale`, `duplicate`, `rate_limited`), so a
   legitimate alert is never lost silently. A replay that gets through only costs a
   duplicate Telegram message, so this is noise control, not a security boundary; the
-  relay is also rate-limited to 30 messages a minute. (⚠️ Which payload field carries the
-  event timestamp is confirmed against a real delivery in phase 4.)
+  relay is also rate-limited to 30 messages a minute. The event time is
+  `data.event.timestamp` (epoch seconds), else `data.event.datetime` (ISO 8601): Sentry
+  documents both for the `event_alert` payload, and a body with neither is never stale.
+  (⚠️ Still to confirm against a real delivery: checklist, phase 4.)
 - **No loop.** If the relay fails, it logs `alert.relay_failed` at `warning`, never
   `error`, and increments `alert_relay_failures_total`; `before_send` drops any event
   raised inside the relay route. A relay failure therefore never becomes a Sentry issue
   that triggers the relay again. Grafana alerts on the counter instead ("Relay failing",
   below), through its own path.
-- Forwards a short message: level, issue title, environment, release, event count and the
-  issue link. In production the issue title is the exception type and `error_kind`, never
-  the exception message (`before_send` above); the relay still redacts it and truncates
-  it to 200 characters.
+- Forwards a short message, plain text: level, the alert rule that fired, environment,
+  release, issue title and the issue link (`web_url`, `https` only). Sentry's issue-alert
+  payload carries no event count, so the rule name ("Error burst") says why it fired. In
+  production the issue title is the exception type and `error_kind`, never the exception
+  message (`before_send` above); the relay still redacts it and truncates it to 200
+  characters. It answers 202 at once and forwards after the response: Sentry gives a
+  delivery one second. A signed delivery of another resource (the integration's
+  installation event) gets 204 and `alert.relay_ignored`.
+- **The bot token never leaves.** The Bot API puts it in the URL path, which httpx logs
+  at `info`; `domain/redaction.py`'s `telegram_bot_token` rule takes it out of every log
+  line and Sentry event, and the relay route is not traced (`traces_sampler`), so no span
+  carries the URL either.
 - `adapters/alerting/telegram.py`: `TelegramNotifier` calls the Bot API `sendMessage`;
-  `NullNotifier` is used while `TELEGRAM_BOT_TOKEN` is unset and logs `alert.dropped`.
+  `NullNotifier` is used while `ALERTS_TELEGRAM_BOT_TOKEN` is unset and logs `alert.dropped`.
   **This is the placeholder:** the full path works end to end before the bot exists.
 - Tests: a valid signature forwards; a bad or missing signature is `401`; an old or
   repeated event is dropped; a failing notifier logs a warning and produces no Sentry
@@ -687,14 +715,16 @@ no-data state. Three consequences:
 `monitoring`, `business`). The notification policy groups by `domain` (group wait 30 s,
 group interval 5 min, repeat 4 h), so alerts that do fire together arrive as one message.
 
-If phase 4 ends with Grafana-managed rules instead of Prometheus-format ones (⚠️ below),
-the same semantics are: no-data state *OK* on every rule except the three roots, which
-use *Alerting*.
+The files are Prometheus-format, and `sync.py` imports them through Grafana's import API
+(`/api/convert/prometheus/config/v1/rules`), which turns them into Grafana-managed rules
+that keep Prometheus semantics: no data is *OK* (shown as "Normal (NoData)") on every
+rule. The roots need no *Alerting* no-data state, because the silence they cover has an
+explicit rule of its own: "Telemetry missing" is itself an absent-series rule.
 
 **Every rule carries `runbook_url` and `owner`.** `runbook_url` points to a section of
-`docs/runbooks.md` (⚠️ does not exist yet; written in phase 4, one section per alert:
-what it means, first three checks, how to silence it); `owner` names the person on duty
-for that area. Both appear in the Telegram message, so it says what to do, not only what
+[runbooks.md](./runbooks.md) (one section per alert: what it means, first three checks,
+how to silence it); `owner` names the person on duty for that area (`unassigned` until
+the checklist's "Owners" item is decided). Both appear in the Telegram message, so it says what to do, not only what
 broke.
 
 | Alert | Condition | Suppressed while | Severity |
@@ -702,13 +732,13 @@ broke.
 | **Target down** (root) | `up == 0` for api or worker, `pg_up == 0` for postgres, for 2 min | — | critical |
 | **Telemetry missing** (root) | `absent_over_time(up{job="api"}[5m])`: Alloy or the VPS stopped sending | — | critical |
 | **Site unreachable** (root) | External probe of `/api/health` fails from 2 of 3 locations on two consecutive runs (4 min) | — | critical: the only alert evaluated entirely outside the VPS |
-| API error rate | 5xx / all > 5% over 10 min, min 20 requests | api down | critical; removed once the API availability fast burn becomes critical (§ SLOs), since both fire on the same 5xx spike |
-| API latency | p95 > 2 s over 10 min, SSE stream excluded (GitHub fails a webhook not answered within 10 s) | api down | warning |
-| Edge 5xx | Caddy 5xx / all > 5% over 10 min, min 20 requests | api down | critical |
+| API error rate | 5xx / all > 5% over 10 min, min 20 requests, `/health` excluded (the healthcheck alone would hide a spike) | api down | critical; removed once the API availability fast burn becomes critical (§ SLOs), since both fire on the same 5xx spike |
+| API latency | p95 > 2 s over 10 min, SSE stream and `/health` excluded (GitHub fails a webhook not answered within 10 s) | api down | warning |
+| Edge 5xx | Caddy 5xx / all > 5% over 10 min, min 20 requests, counted from `caddy_http_request_duration_seconds_count` by `code`: Caddy 2.11's `caddy_http_requests_total` has no status code label | api down | critical |
 | Relay failing | `increase(alert_relay_failures_total[15m]) > 0` | api down | warning: Sentry alerts are not reaching Telegram (the admin's email still works) |
 | Host resources | RAM > 90% or disk > 85% for 10 min | — | warning |
 | Container restarts | > 2 in 15 min | — | warning |
-| OOM kill | any container OOM kill | — | warning |
+| OOM kill | `increase(node_vmstat_oom_kill[15m]) > 0`: the kernel killed a process; "Container restarts" names the container | — | warning |
 | Monitoring broken | Alloy remote-write failures > 0 for 15 min | — | warning |
 | TLS certificate expiry | Probe sees < 14 days left | — | warning: Caddy renews at 30 days, so this means renewal is failing |
 | Queue backlog | `queue_oldest_claimable_age_seconds > 600 and on() sum(increase(jobs_finished_total[10m])) == 0`: work is waiting **and** nothing is draining. A wait alone is normal: at most 3 jobs per installation run at once (`domain/jobs.py:27`), so one repository opening ten PRs queues the rest for well over 10 min | api down (sampler), worker down | critical |
@@ -734,9 +764,14 @@ looking at the night and fire every morning.
 `ops/observability/alerts/tests/` run by `promtool test rules` in `ci.yml`: for each rule,
 a series that must fire, one that must not, the absent-series case, and the suppression
 by its root. Every condition is a metric (there are no Loki-based rules), so every rule is
-testable. ⚠️ How Prometheus-format rules route to the Grafana `telegram` contact point
-(Grafana-managed import vs the Mimir ruler and its own Alertmanager receiver) is checked
-in phase 4 before the format is fixed.
+testable. A pytest test (`tests/ops/test_observability_rules.py`) holds the files to this
+table: one rule per row, each with `domain`, `severity`, `owner` and a `runbook_url`
+whose section exists. "Target down" is three rules sharing the name, one per process and
+domain. The SLO burn alerts come with the SLOs (phase 6). Routing: the import makes the
+rules Grafana-managed, so the notification policy sends them to `telegram`. That path
+was verified against Grafana 13.2 in the lab (`deploy/lab/`, where a stopped worker
+fires "Target down"); ⚠️ the checklist's "Rule routing check" confirms it in Grafana
+Cloud.
 
 ### Synthetic checks
 
@@ -747,9 +782,12 @@ Two checks from outside the VPS, because everything above is measured from insid
   certificate expiry. Every minute would not fit the free tier: it includes 100k API test
   executions a month, and one run from one location is one execution, so every minute
   from three locations is 129,600 and every 2 minutes is 64,800 (Grafana pricing and
-  billing docs, 2026-10-12). Defined in `ops/observability/synthetics/` and pushed by
-  `sync.py`. Results land in Grafana Cloud as metrics and count against the series budget
-  (a few dozen series).
+  billing docs, 2026-10-12). Defined in `ops/observability/synthetics/uptime.json` (job
+  `dmc268-site`, Frankfurt, London and Paris, basic metrics only) and pushed by `sync.py`,
+  which resolves the location names to probe ids. Results land in Grafana Cloud as
+  metrics (`probe_success`, `probe_ssl_earliest_cert_expiry`, which "Site unreachable" and
+  "TLS certificate expiry" read) and count against the series budget (a few dozen
+  series). (⚠️ That basic metrics include the certificate expiry: checklist, phase 4.)
 - **Canary review.** A scheduled workflow in a scratch repository (`dmc268-canary`, a
   separate repo with the App installed) pushes a commit with a known defect to an open PR
   at 09:00, 11:00, 13:00, 15:00, 17:00 and 19:00 Europe/Berlin, Mon–Fri. The DB sampler
@@ -822,18 +860,26 @@ them are added to the secrets table in devops.md.
 | :--- | :--- | :--- |
 | `SENTRY_DSN` | repo secret | api, worker. Unset = Sentry off |
 | `SENTRY_WEBHOOK_SECRET` | repo secret | api: the relay's signature check. Unset = relay returns `404` |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | repo secrets | api: the relay. Unset = `NullNotifier`. The same values are entered once in Grafana's contact point |
+| `ALERTS_TELEGRAM_BOT_TOKEN`, `ALERTS_TELEGRAM_CHAT_ID` | repo secrets | api: the relay. Unset = `NullNotifier`. The same values are entered once in Grafana's contact point |
 | `ENV` | written by deploy | `production`; `local` by default |
 | `LOG_LEVEL`, `LOG_DIR` | default `info`; `LOG_DIR` unset by default (stdout only), `/logs` written by deploy | api, worker |
 | `GRAFANA_CLOUD_PROM_URL`, `GRAFANA_CLOUD_PROM_USER` | repo variables | alloy |
 | `GRAFANA_CLOUD_LOKI_URL`, `GRAFANA_CLOUD_LOKI_USER` | repo variables | alloy |
 | `GRAFANA_CLOUD_TOKEN` | repo secret | alloy only, passed by compose interpolation, not the whole `.env` (devops decision 11) |
+| `GRAFANA_URL` | repo variable | The stack's URL (`https://<stack>.grafana.net`): `sync.py` and the deploy annotation |
 | `GRAFANA_SA_TOKEN` | repo secret | `ops/observability/sync.py` and the deploy annotation in `deploy.yml`, CI only |
+| `GRAFANA_SM_URL`, `GRAFANA_SM_TOKEN` | repo variable, repo secret | `sync.py`: Synthetic Monitoring's API and its access token. Unset = the uptime check is skipped with a warning |
+| `GRAFANA_PROM_DATASOURCE_UID`, `SENTRY_ORG_URL` | repo variables, optional | `sync.py`: the Prometheus data source the rules query (default `grafanacloud-prom`), and the Sentry organisation URL for the API dashboard's traces link |
 | `SENTRY_AUTH_TOKEN` | repo secret | `deploy.yml`: Sentry release, commits and deploy. CI only. An Organization Token (fixed scope `org:ci`), not tied to the one seat; `releases new`, `set-commits --auto` and `deploys new` checked with it on 2026-10-24 |
 | `POSTGRES_EXPORTER_PASSWORD` | repo secret | alloy only, by compose interpolation: the password of the read-only `dmc268_exporter` role (`pg_monitor`). The role is created once by hand (checklist, phase 3): the postgres image runs init scripts only on an empty data directory. Generate it as hex (`openssl rand -hex 32`) so it needs no escaping in the connection string |
 | `CANARY_REPO_ID` | repo variable | api (DB sampler). Unset = canary gauge never set and the canary alert stays off |
 | `DEBUG_LOG_DIFF` | exists; never written by deploy | worker: `1` logs the fetched diff, honoured only when `ENV` is `local` (§ What is never logged) |
 | `llm_prices`, `llm_daily_budget_usd` | config ([configuration.md](./configuration.md)) | `llm_prices`: api, worker (cost metric); `llm_daily_budget_usd`: api only (exported gauge). ⚠️ not in configuration.md yet |
+
+`deploy.yml` starts Alloy only when all six of its settings exist (the compose profile
+`monitoring`, turned on by `COMPOSE_PROFILES` in `.env`), and warns otherwise: the app
+works without it. `GRAFANA_CLOUD_PROM_URL` and `GRAFANA_CLOUD_LOKI_URL` may hold a stack's
+base, query or push URL; the deploy writes the push URL.
 
 New runtime dependencies: `structlog`, `sentry-sdk[fastapi,httpx,sqlalchemy]`,
 `prometheus-client`. Then re-export `requirements.txt` as in [AGENTS.md](../AGENTS.md).
@@ -906,22 +952,26 @@ route, status and outgoing httpx spans.
 
 ### Phase 3: metrics and Alloy
 
-- `adapters/observability/metrics.py`: the metric definitions above (one module, so names
-  are greppable); HTTP middleware for `http_*`, which skips the SSE stream in the latency
-  histogram; metrics servers on `:9100` in the API lifespan and `:9101` in the worker.
+- `adapters/observability/metrics.py`: the definitions (one module, so names are
+  greppable) of the metrics this phase records; every later one lands with its
+  instrumentation, since a counter exported at 0 before anything increments it reads as
+  "nothing happened" rather than "not measured". HTTP metrics from the access log, which
+  skip the SSE stream in the latency histogram; metrics servers on `:9100` in the API
+  lifespan and `:9101` in the worker.
 - DB sampler in the API with the queue gauges (`queue_jobs`,
   `queue_oldest_claimable_age_seconds`): the queue exists, and DoD 1's queue depth needs
   them by phase 4.
 - `deploy/compose.yml`: `alloy` service, pinned image, no ports, read-only mounts, WAL on
-  a named volume; `deploy/alloy/config.alloy` scraping `api:9100`, `worker:9101` and
+  a named volume, usage reporting to Grafana off (`--disable-reporting`); `deploy/alloy/config.alloy` scraping `api:9100`, `worker:9101` and
   Caddy, with the exporters, Loki file tail, remote write, 60 s scrape interval and the
   cadvisor limits from § Series budget.
 - `deploy.yml`: copy the Alloy config; the smoke test asserts `https://<site>/api/metrics`
   is 404 and the port check still sees only 22/80/443.
-- Edge and database: Caddy's global `servers { metrics }` option (per-server HTTP
-  metrics are off by default) and a `metrics` site block on internal `:2020`; Postgres
-  `shared_preload_libraries=pg_stat_statements`, the extension migration and the
-  `pg_monitor` exporter role; cadvisor OOM metrics in the relabel allowlist.
+- Edge and database: Caddy's global `metrics` option (HTTP metrics are off by default;
+  `servers { metrics }` is deprecated since Caddy 2.11) and a `metrics` site block on
+  internal `:2020`; Postgres `shared_preload_libraries=pg_stat_statements`, the extension
+  migration and the `pg_monitor` exporter role; OOM kills from the host exporter's
+  `vmstat`, since cadvisor's counter restarts with the container.
 - Tests: metrics endpoint exposes the expected names; route label uses the template; the
   API's main port has no `/metrics`.
 

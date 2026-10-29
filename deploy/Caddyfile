@@ -1,3 +1,10 @@
+# HTTP metrics of every site, served by the :2020 block below (docs/observability.md
+# § System). Off by default; the global option replaced `servers { metrics }`, which
+# Caddy 2.11 deprecates.
+{
+	metrics
+}
+
 # SITE_ADDRESS comes from /opt/dmc268/.env: the server IP with dashes plus .sslip.io.
 # Caddy obtains a Let's Encrypt certificate for it (HTTP-01 on port 80), keeps it in the
 # caddy_data volume and redirects http to https.
@@ -19,4 +26,10 @@
 # instead of Caddy's default redirect to https://<IP>, which fails in the browser.
 http://{$SERVER_IP} {
 	redir https://{$SITE_ADDRESS}{uri} permanent
+}
+
+# Prometheus metrics for Alloy on the compose network. compose does not publish 2020, and
+# this is not the admin API (:2019, localhost only), which could rewrite the config.
+:2020 {
+	metrics
 }

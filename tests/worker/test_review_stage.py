@@ -177,6 +177,8 @@ async def test_each_step_is_recorded_as_it_starts_and_ends() -> None:
         ("FETCH_DIFF", "OK", None),
         ("LLM_CALL", "RUNNING", None),
         ("LLM_CALL", "OK", None),
+        ("POSTPROCESS", "RUNNING", None),
+        ("POSTPROCESS", "OK", None),
         ("POST_FEEDBACK", "RUNNING", None),
         ("POST_FEEDBACK", "OK", None),
     ]
@@ -243,6 +245,7 @@ async def test_a_failed_step_write_logs_the_step_and_the_error_class_only(
         "CLAIMED",
         "FETCH_DIFF",
         "LLM_CALL",
+        "POSTPROCESS",
         "POST_FEEDBACK",
     ]
     assert {record.error_type for record in records} == {"ConnectionError"}

@@ -1,0 +1,32 @@
+# Alert rules, domain host (docs/observability.md § Alerts).
+groups:
+  - name: host
+    interval: 1m
+    rules:
+      - alert: HostResources
+        expr: |
+          1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes > 0.9
+          or 1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} > 0.85
+        for: 10m
+        labels: {domain: host, severity: warning, owner: unassigned}
+        annotations:
+          summary: The host's RAM is over 90% or its disk over 85% used, for 10 minutes.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#host-resources
+
+      # A restart keeps the container, so its start time changes. The cgroup root has
+      # no name.
+      - alert: ContainerRestarts
+        expr: changes(container_start_time_seconds{name!=""}[15m]) > 2
+        labels: {domain: host, severity: warning, owner: unassigned}
+        annotations:
+          summary: A container restarted more than twice in 15 minutes.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#container-restarts
+
+      # The kernel's counter survives the restart of the killed container; "Container
+      # restarts" names the container.
+      - alert: OomKill
+        expr: increase(node_vmstat_oom_kill[15m]) > 0
+        labels: {domain: host, severity: warning, owner: unassigned}
+        annotations:
+          summary: The kernel killed a process for lack of memory.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#oom-kill

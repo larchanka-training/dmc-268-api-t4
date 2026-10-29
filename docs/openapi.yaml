@@ -925,7 +925,11 @@ components:
                 keeps the stage of the step that failed. Use `status` for that.
             summary:
               type: [string, "null"]
-              description: The summary comment posted on the pull request.
+              description: |
+                Plain text: the verdict and the model's summary of a completed review.
+                The posted check run summary is Markdown with counts the console draws
+                itself. Null until the job completes, and for jobs completed before the
+                summary was kept.
             error_log:
               type: [string, "null"]
               description: Redacted diagnostic text; shown only to the owning account.
@@ -1024,7 +1028,13 @@ components:
         category:
           type: string
           enum: [security, correctness, concurrency, performance, maintainability]
-        message: { type: string, description: Markdown, as posted on the pull request. }
+        message:
+          type: string
+          description: |
+            The finding's own text (the model may use inline Markdown such as backticks).
+            The severity heading, the suggestion block and the hidden fingerprint marker
+            of the posted comment are left out: they come as `severity`, `category` and
+            `suggestion`.
         suggestion:
           oneOf:
             - $ref: "#/components/schemas/Suggestion"

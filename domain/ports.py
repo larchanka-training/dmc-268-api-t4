@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
+from domain.alerts import Alert
 from domain.auth import Session, SignInAttempt
 from domain.models import ReviewResult
 from domain.publishing import PublishPlan
@@ -321,6 +322,8 @@ class ReviewJob:
     retry_count: int = 0
     next_attempt_at: datetime | None = None
     started_at: datetime | None = None
+    # The published summary as plain text; None until a review completes with one.
+    summary: str | None = None
 
     def __post_init__(self) -> None:
         if not self.job_id.strip():
@@ -333,12 +336,21 @@ class ClaimedJob:
 
     The job is already PROCESSING and leased to `worker_id`;
     `attempt` is the job's retry_count at claim time.
+
+    The three times come from the store's own clock (`created_at`, `next_attempt_at`
+    and `started_at`), so the worker's job metrics measure queue wait without
+    comparing two clocks (docs/observability.md § Application). None when a store
+    does not know them.
     """
 
     job_id: str
     payload: NewReviewJob
     attempt: int
     worker_id: str
+    enqueued_at: datetime | None = None
+    #: When this attempt became claimable: the enqueue, or the end of a retry's backoff.
+    claimable_at: datetime | None = None
+    claimed_at: datetime | None = None
 
 
 class GitProvider(Protocol):
@@ -380,9 +392,12 @@ class JobRepository(Protocol):
         """
         ...
 
-    async def complete(self, job_id: str, stats: JobStats, *, worker_id: str) -> bool:
-        """PROCESSING and leased to `worker_id` → COMPLETED with stats and
-        finished_at; False otherwise."""
+    async def complete(
+        self, job_id: str, stats: JobStats, *, worker_id: str, summary: str | None = None
+    ) -> bool:
+        """PROCESSING and leased to `worker_id` → COMPLETED with stats, finished_at and
+        the plain-text summary the review published (None when nothing was posted);
+        False otherwise."""
         ...
 
     async def fail(
@@ -516,6 +531,35 @@ class JobHistory(Protocol):
 
 class JobStore(JobRepository, JobHistory, Protocol):
     """A queue the console can also read: both job stores are one."""
+
+
+#: The statuses of a job that is still in the queue, in the order the gauges list them.
+QUEUE_STATUSES = (ReviewJobStatus.QUEUED, ReviewJobStatus.RETRYING, ReviewJobStatus.PROCESSING)
+
+
+@dataclass(frozen=True, slots=True)
+class QueueSnapshot:
+    """The queue's depth, as the API's DB sampler exports it
+    (docs/observability.md § Application)."""
+
+    #: Jobs per status of QUEUE_STATUSES, zeros included.
+    jobs: tuple[tuple[ReviewJobStatus, int], ...]
+    #: Seconds since the oldest claimable job (QUEUED, or RETRYING with its backoff
+    #: over) became claimable; 0 when none is. A job still in its backoff is not backlog.
+    oldest_claimable_age_seconds: float
+
+
+class AlertNotifier(Protocol):
+    """Where the alert relay sends an alert (adapters/alerting/telegram.py). Raises when
+    the message is not delivered; the relay logs and counts that."""
+
+    async def notify(self, alert: Alert) -> None: ...
+
+
+class QueueStats(Protocol):
+    """Reads the queue's depth; both job stores implement it."""
+
+    async def queue_snapshot(self) -> QueueSnapshot: ...
 
 
 class ReviewCommentStore(Protocol):
