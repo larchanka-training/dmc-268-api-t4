@@ -397,10 +397,19 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/FindingContext" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: The commit or the installation is gone; context cannot be rebuilt.
+          description: |
+            `context_unavailable`: the commit or the installation is gone, or the finding's
+            line is no longer in the diff; context cannot be rebuilt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: "`forge_unavailable`: the forge failed for a transient reason."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -411,7 +420,9 @@ paths:
       summary: A range of lines from a reviewed file
       description: |
         Serves the "unfold context" control of the diff viewer. Same sourcing and the same
-        `409` as the endpoint above; the range is clamped to the file.
+        `409` as the endpoint above; the range is clamped to the file. Only a file that one
+        of the job's findings is on can be read (`404` otherwise); a request returns at most
+        1000 lines, and `from` after `to` is `400 bad_range`.
       parameters:
         - $ref: "#/components/parameters/job_id"
         - name: path
@@ -432,8 +443,17 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/FileLines" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "409":
-          description: The commit or the installation is gone.
+          description: "`context_unavailable`: the commit or the installation is gone."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: "`forge_unavailable`: the forge failed for a transient reason."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

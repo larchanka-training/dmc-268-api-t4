@@ -182,3 +182,15 @@ class DiffFormatError(Exception):
         super().__init__(f"malformed diff at line {line_number}: {reason}")
         self.reason = reason
         self.line_number = line_number
+
+
+class ContextUnavailableError(Exception):
+    """The code behind a finding cannot be rebuilt from the forge: the installation or a
+    reviewed commit is gone, or the finding's line is not in the diff any more.
+
+    The reason is a short fixed phrase for logs, never repository content.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"context unavailable: {reason}")
+        self.reason = reason

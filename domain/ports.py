@@ -140,6 +140,21 @@ class RepositoryContents(Protocol):
         ...
 
 
+class CompareDiffs(Protocol):
+    """Reads the unified diff between two commits, as the installation sees it."""
+
+    async def compare_diff(
+        self, installation_id: int, repo_full_name: str, base_sha: str, head_sha: str
+    ) -> str | None:
+        """The diff of `base_sha...head_sha` (from their merge base, as a pull request
+        shows it), or None when either commit no longer exists on the forge.
+
+        Raises InstallationGoneError when the installation no longer grants access, and
+        ForgeUnavailableError for everything transient.
+        """
+        ...
+
+
 class RulesParser(Protocol):
     """Turns rules.md text into the rules a review would apply."""
 
