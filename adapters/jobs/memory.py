@@ -160,7 +160,9 @@ class MemoryJobStore:
                 claimed_at=now,
             )
 
-    async def complete(self, job_id: str, stats: JobStats, *, worker_id: str) -> bool:
+    async def complete(
+        self, job_id: str, stats: JobStats, *, worker_id: str, summary: str | None = None
+    ) -> bool:
         async with self._lock:
             record = self._records.get(job_id)
             if record is None or not _held_by(record, worker_id):
@@ -170,6 +172,7 @@ class MemoryJobStore:
                     record.job,
                     status=ReviewJobStatus.COMPLETED,
                     stats=stats,
+                    summary=summary,
                     finished_at=self._clock.now(),
                     next_attempt_at=None,
                 )

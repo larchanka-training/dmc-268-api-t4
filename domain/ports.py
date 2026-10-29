@@ -307,6 +307,8 @@ class ReviewJob:
     retry_count: int = 0
     next_attempt_at: datetime | None = None
     started_at: datetime | None = None
+    # The published summary as plain text; None until a review completes with one.
+    summary: str | None = None
 
     def __post_init__(self) -> None:
         if not self.job_id.strip():
@@ -375,9 +377,12 @@ class JobRepository(Protocol):
         """
         ...
 
-    async def complete(self, job_id: str, stats: JobStats, *, worker_id: str) -> bool:
-        """PROCESSING and leased to `worker_id` → COMPLETED with stats and
-        finished_at; False otherwise."""
+    async def complete(
+        self, job_id: str, stats: JobStats, *, worker_id: str, summary: str | None = None
+    ) -> bool:
+        """PROCESSING and leased to `worker_id` → COMPLETED with stats, finished_at and
+        the plain-text summary the review published (None when nothing was posted);
+        False otherwise."""
         ...
 
     async def fail(
