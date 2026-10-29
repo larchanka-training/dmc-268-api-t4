@@ -1093,6 +1093,17 @@ adds no new category of data leaving the box. It is not part of this plan's DoD.
    counts them in `webhook_redeliveries_total`, which joins the ingest SLO's denominator
    so an outage counts against it. It changes ingest behaviour, so it is decided
    in [WORKFLOW_DESIGN.md](./WORKFLOW_DESIGN.md) first.
+3. **A PR too large to review: an error or an expected outcome?** Today the job ends
+   `FAILED` with `skip_diff_too_large`, and `job.finished` is logged at `error` with the
+   exception, so each one is a Sentry event (`LLMInputTooLargeError`, seen in production
+   on 2026-10-29): the first triggers "New issue" (email and Telegram), a busy day of
+   large PRs can trigger "Error burst", and it counts against the "Review success" SLO
+   (phase 6). Nothing is broken, though: it is a limit, and the author already learns of
+   it from the "skipped" check run. Proposed: treat it as expected. The job stays
+   `FAILED` and in `jobs_finished_total{error_kind="skip_diff_too_large"}`, but
+   `job.finished` is logged at `warning` without the exception (no Sentry event), and the
+   SLO excludes that error kind. The cost: large PRs no longer show in Sentry, only on the
+   Pipeline dashboard ("Failures by error_kind") and in Loki.
 
 **Closed:**
 
