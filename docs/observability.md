@@ -712,10 +712,14 @@ no-data state. Three consequences:
 `monitoring`, `business`). The notification policy groups by `domain` (group wait 30 s,
 group interval 5 min, repeat 4 h), so alerts that do fire together arrive as one message.
 
-The files are Prometheus-format, and `sync.py` imports them through Grafana's import API
-(`/api/convert/prometheus/config/v1/rules`), which turns them into Grafana-managed rules
-that keep Prometheus semantics: no data is *OK* (shown as "Normal (NoData)") on every
-rule. The roots need no *Alerting* no-data state, because the silence they cover has an
+The files are Prometheus-format, and `sync.py` writes them to Grafana as Grafana-managed
+rules through the alerting provisioning API (`/api/v1/provisioning`), in the form
+Grafana's own import of Prometheus rules produces: the expression as an instant query
+evaluated a minute in the past (Alloy pushes once a minute), a math step that makes every
+returned series 1, and a threshold above 0. They keep Prometheus semantics: one alert
+per returned series, and no data is *OK* (shown as "Normal (NoData)") on every rule. The
+import API itself (`/api/convert/prometheus/config/v1/rules`) is not served by Grafana
+Cloud: it answered 404 on 2026-10-30. The roots need no *Alerting* no-data state, because the silence they cover has an
 explicit rule of its own: "Telemetry missing" is itself an absent-series rule.
 
 **Every rule carries `runbook_url` and `owner`.** `runbook_url` points to a section of
@@ -764,11 +768,10 @@ by its root. Every condition is a metric (there are no Loki-based rules), so eve
 testable. A pytest test (`tests/ops/test_observability_rules.py`) holds the files to this
 table: one rule per row, each with `domain`, `severity`, `owner` and a `runbook_url`
 whose section exists. "Target down" is three rules sharing the name, one per process and
-domain. The SLO burn alerts come with the SLOs (phase 6). Routing: the import makes the
-rules Grafana-managed, so the notification policy sends them to `telegram`. That path
-was verified against Grafana 13.2 in the lab (`deploy/lab/`, where a stopped worker
-fires "Target down"); ⚠️ the checklist's "Rule routing check" confirms it in Grafana
-Cloud.
+domain. The SLO burn alerts come with the SLOs (phase 6). Routing: the rules are
+Grafana-managed, so the notification policy sends them to `telegram`. That path was
+verified against Grafana 13.2 in the lab (`deploy/lab/`, where a stopped worker fires
+"Target down"); ⚠️ the checklist's "Rule routing check" confirms it in Grafana Cloud.
 
 ### Synthetic checks
 

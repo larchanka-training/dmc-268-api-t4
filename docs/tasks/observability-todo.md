@@ -174,8 +174,10 @@ Rules for every step:
       `domain` (the file), `severity`, `owner` (`unassigned` until the checklist's
       "Owners"); annotations `summary`, `runbook_url`; dependants carry their root's
       `unless on()`. "API error rate" and "API latency" leave `/health` out. Upload:
-      Grafana's import API, verified against Grafana 13.2 in the lab; the Grafana Cloud
-      check stays **blocked by:** "Rule routing check".
+      Grafana-managed rules through the provisioning API, in the form Grafana's own
+      import produces (the import API itself is 404 on Grafana Cloud); verified against
+      Grafana 13.2 in the lab; the Grafana Cloud check stays **blocked by:** "Rule
+      routing check".
 - [x] 38. Rule tests — `ops/observability/alerts/tests/*.test.yaml` for `promtool test
       rules`: per rule fire, not fire, absent series, suppressed by its root; `ci.yml`
       job `alert-rules` runs promtool from the lab's pinned Prometheus image.
@@ -190,7 +192,8 @@ Rules for every step:
       `https://<site>/api/health`, every 2 min, Frankfurt, London and Paris (names, so
       `sync.py` resolves the ids), basic metrics, job `dmc268-site`.
 - [x] 41. Sync — `ops/observability/sync.py`: idempotent push of the dashboards (folder
-      DMC-268), rules (import API, removed groups deleted), alerting (contact point
+      DMC-268), rules (provisioning API, folder "DMC-268 alerts", removed groups
+      deleted), alerting (contact point
       `telegram` created once with placeholders and never overwritten, the two mute
       timings, the policy grouped by `domain`) and the synthetic check (Synthetic
       Monitoring API: `GRAFANA_SM_URL`, `GRAFANA_SM_TOKEN`); `--only`, `--dry-run`; tests

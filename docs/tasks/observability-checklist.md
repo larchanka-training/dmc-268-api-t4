@@ -135,11 +135,12 @@ Other:
 - [ ] Actions → Observability sync → Run workflow: with `dry_run` first, then for real.
       The service account behind `GRAFANA_SA_TOKEN` needs the Editor role (enough for
       every call, checked against Grafana 13.2).
-- [ ] **Rule routing check** — the code uses Grafana's import of Prometheus-format rules
-      (Grafana-managed rules, routed by the notification policy); verified on Grafana
-      13.2 in the lab. In Grafana Cloud, after the sync: Alerting → Alert rules lists 24
-      rules in the folder "DMC-268 alerts", and a rule's notification preview shows the
-      `telegram` contact point.
+- [ ] **Rule routing check** — `sync.py` writes the rules as Grafana-managed rules through
+      the provisioning API, routed by the notification policy; verified on Grafana 13.2
+      in the lab. (Grafana Cloud does not serve the rule import API: 404 on 2026-10-30.)
+      In Grafana Cloud, after the sync: Alerting → Alert rules lists 24 rules in the
+      folder "DMC-268 alerts", and a rule's notification preview shows the `telegram`
+      contact point.
 - [ ] Notification policy — `sync.py` provisions it (group by `domain`, 30 s / 5 min / 4 h,
       child routes muting "No throughput" and "Canary review stale" outside working
       hours, Europe/Berlin); check it in Alerting → Notification policies.
