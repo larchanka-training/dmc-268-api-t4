@@ -1,0 +1,17 @@
+diff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml
+index 4c1d2e7..8a9f3b1 100644
+--- a/.github/workflows/deploy.yml
++++ b/.github/workflows/deploy.yml
+@@ -30,4 +30,12 @@ jobs:
+       - name: Upload config
+         run: |
+           set -euo pipefail
++          # nginx reads its config only on reload: reload when the file differs.
++          remote=$(ssh web "cd /srv/app && sha256sum nginx.conf 2>/dev/null || true")
++          differs() { ! grep -qxF "$(sha256sum "conf/$1" | cut -d' ' -f1)  $1" <<<"$remote"; }
++          if differs nginx.conf; then echo "RELOAD_NGINX=true" >> "$GITHUB_ENV"; fi
+           scp -q conf/nginx.conf web:/srv/app/
++
++      - name: Reload nginx
++        if: env.RELOAD_NGINX == 'true'
++        run: ssh web "sudo nginx -s reload"

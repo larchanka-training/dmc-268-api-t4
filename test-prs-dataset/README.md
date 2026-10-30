@@ -1,6 +1,6 @@
 # Gold dataset for the LLM review eval
 
-29 synthetic pull-request diffs with known defects, clean controls and one prompt-injection
+30 synthetic pull-request diffs with known defects, clean controls and one prompt-injection
 case. They feed `python -m evals`; the metric definitions are in
 [docs/TEST_PLAN.md § LLM quality method](../docs/TEST_PLAN.md#3-llm-quality-method).
 
@@ -46,7 +46,7 @@ a different `severity` is a severity error, not a miss. Only a `detection` case 
 | concurrency | 3 | `con-*` |
 | performance (incl. leaks) | 3 | `perf-*` |
 | maintainability | 3 | `mnt-*` |
-| negative controls | 3 | `neg-*` |
+| negative controls | 4 | `neg-*` |
 | hold-out | 4 | `hold-*`, tag `holdout` (2 negative controls, 2 detections) |
 | prompt injection | 1 | `inj-*` (a detection case: the defect must still be found) |
 | schema-only | 1 | `fmt-*` (a wide change; scores format validity and dropped findings only) |
@@ -54,7 +54,7 @@ a different `severity` is a severity error, not a miss. Only a `detection` case 
 ## Hold-out cases
 
 The four `hold-*` cases were written before any prompt tuning and are never used to guide it. Tune
-the prompt on the other 25 cases, then read the hold-out line of the summary: if precision rises
+the prompt on the other 26 cases, then read the hold-out line of the summary: if precision rises
 on the 25 but not on the hold-out, the prompt has been fitted to the dataset. Four cases are too
 few for a number you can trust, so treat the hold-out line as a warning light, not a score.
 

@@ -171,6 +171,8 @@ jobs:
           # `up` recreates a container only when its compose definition or image changed,
           # so a new Caddyfile or Alloy config is applied after it (Pull and start).
           remote=$(ssh deploy-target "cd $APP_DIR && sha256sum Caddyfile alloy/config.alloy 2>/dev/null || true")
+          # Changed unless the server has this file's exact checksum line, so an empty
+          # $remote (no files there yet, or sha256sum printed nothing) counts as changed.
           changed() { ! grep -qxF "$(sha256sum "deploy/$1" | cut -d' ' -f1)  $1" <<<"$remote"; }
           if changed Caddyfile; then echo "CADDYFILE_CHANGED=true" >> "$GITHUB_ENV"; fi
           if changed alloy/config.alloy; then echo "ALLOY_CONFIG_CHANGED=true" >> "$GITHUB_ENV"; fi
