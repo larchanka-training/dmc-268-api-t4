@@ -129,7 +129,7 @@ of `/opt/dmc268/logs`). Produced by `structlog` on top of stdlib `logging`, so e
 | `request_id` | API requests | middleware; echoed as `X-Request-ID` |
 | `delivery_id` | webhooks | `X-GitHub-Delivery` / GitLab event UUID |
 | `job_id`, `installation_id`, `repo_id`, `pr_number`, `head_sha`, `attempt`; `account_id` once tenancy lands | review context | bound once per job via `contextvars`. Jobs carry no `account_id` yet (`adapters/db/models.py:197`), so `installation_id` is the tenant key until then |
-| `step`, `outcome`, `duration_ms` | `step` on `job.step_record.failed`; `outcome` on `job.finished` and `job.skipped_check_run`; `duration_ms` on every event that times something | the step helper; the worker at the terminal transition |
+| `step`, `outcome`, `duration_ms` | `step` on `job.step_record.failed` and `step.finished`; `outcome` on `job.finished`, `job.skipped_check_run` and `step.finished`; `duration_ms` on every event that times something | the step helper; the worker at the terminal transition |
 | `error_kind`, `error_type` | errors | `_classify` in `worker/process.py` (the closed vocabulary of [PIPELINE_SPEC.md §4.2](./PIPELINE_SPEC.md); the reaper adds `lease_expired`); exception class name |
 | `result`, `reason`, `user_id`, `organizations`, `had_session` | sign-in events | passed as `extra={…}` in `api/auth.py` and `api/github_setup.py`; lifted into the line by structlog's `ExtraAdder` |
 | `http.method`, `http.route`, `http.status`, `duration_ms` | access log | middleware (replaces uvicorn's access log) |
@@ -188,6 +188,7 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `job.store.failed` | error | A store call failed while recording the outcome | `job_id`, `provider`, `repo`, `pr_number`, `stage` (`complete`, `fail`, `get`), `error_kind`, `error_type`, `duration_ms` |
 | `job.skipped_check_run` | info when published; warning when posting failed | The PR is over the input budget: the "skipped" check run says why no review appears | `job_id`, `provider`, `repo`, `pr_number`, `input_tokens` (the estimate), `max_input_tokens`, `outcome` (`published`, `failed`); `error_type` when failed |
 | `job.step_record.failed` | error | Writing a `pr_review_steps` row failed; the job goes on | `job_id`, `step`, `error_type` |
+| `step.finished` | info | A pipeline step ended (the `Observer`, `adapters/observability/observer.py`), with its row, span and `review_step_duration_seconds` | `job_id`, `step`, `outcome` (`OK`, `FAILED`), `duration_ms`; `error_kind` when failed |
 | `job.findings.not_kept` | error | Findings were posted but not stored | `job_id`, `provider`, `repo`, `pr_number`, `findings`, `error_type` |
 | `github.token.minted` | info | An installation token was minted | `provider`, `installation_id` |
 | `github.pull_request.fetched` | info | PR detail, commits and diff fetched | `provider`, `installation_id`, `repo`, `pr_number`, `sha`, `commits`, `dropped_commits`, `diff_bytes`, `duration_ms` |
@@ -228,7 +229,6 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `sentry.enabled` | info | Sentry is initialised | — |
 | `sentry.disabled` | info | No `SENTRY_DSN`: Sentry is off | — |
 
-Planned, with the phase that adds them: `step.finished` (phase 5, the `Observer`).
 
 ### What is never logged
 
@@ -395,12 +395,12 @@ DB sampler and `llm_daily_budget_usd` in one process only.
 | `review_duration_seconds` | histogram | `status` | **Enqueue → terminal status** per job, so queue wait counts. Buckets include 60, 120, 300, 600 and 900 s, so the latency SLO threshold sits on a bucket edge |
 | `jobs_finished_total` | counter | `status` (`COMPLETED`, `FAILED`, `RETRYING`: one per attempt), `error_kind` (empty when completed) | Forge outage vs bug |
 | `lease_expiries_total` | counter | — | Counted from the reaper's result. A worker died, or a review outlived its 600 s lease: the lease is renewed only before `LLM_CALL` and `POST_FEEDBACK`, and `LLM_CALL` can take 2 × 300 s plus the rule screen and verifier. BACKEND_ARCHITECTURE.md reads non-zero as "workers are dying" only |
-| `llm_requests_total` | counter | `provider`, `model`, `purpose`, `outcome` | Provider failures, fallbacks. `purpose` is `review`, `correction`, `rule_screen` or `verify`: one review makes several calls |
+| `llm_requests_total` | counter | `provider`, `model`, `purpose`, `outcome` | Provider failures, fallbacks. One per HTTP request, so a key rotation counts twice. `purpose` is `review`, `correction`, `summary` (the per-file mode's summary call), `rule_screen` or `verify`: one review makes several calls. `outcome` is `ok`, `rate_limited` (429, key cooled down), `key_rejected` (401/403, key disabled) or `error`; TypeSafe's (`provider="typesafe"`) are `ok` or `error` |
 | `llm_tokens_total` | counter | `provider`, `model`, `purpose`, `direction` | The bill, before it arrives |
 | `llm_key_rotations_total` | counter | `provider` | 429 pressure |
 | `llm_cost_usd_total` | counter | `provider`, `model`, `purpose`, `direction` | The bill in money, the TypeSafe rule screen and verifier included: tokens × a price table from config (`llm_prices`), so a price change is a config change, not a deploy |
 | `llm_daily_budget_usd` | gauge | — | `llm_daily_budget_usd` from config, exported so the spend alert can compare against it: PromQL cannot read app config. Exported by the API only: the rule uses `scalar()`, which returns NaN, and so never fires, if two processes export the series |
-| `forge_rate_limit_remaining_ratio` | gauge | `provider` | The lowest `X-RateLimit-Remaining / X-RateLimit-Limit` seen across installations in the last 5 min. One value, no installation label |
+| `forge_rate_limit_remaining_ratio` | gauge | `provider` | The lowest `X-RateLimit-Remaining / X-RateLimit-Limit` seen across installations in the last 5 min, from an httpx response hook on every App and installation client. The `core` resource only (search has a budget of its own). One value, no installation label; absent without a call in the window. Exported by both processes |
 | `security_events_total` | counter | `kind` (`oauth_state_mismatch`, `csrf_rejected`, `session_rejected`, `id_not_found`) | Takeover and enumeration attempts; the auth tests treat each of these as a refusal path. `oauth_state_mismatch`: the callback's state does not match the browser's sign-in attempt (`api/auth.py`). `csrf_rejected`: a 403 `csrf` from `enforce_csrf` (`api/deps.py`). `session_rejected`: a 401 `no_session`, which every tab polling after its session expired also produces, so it is on the dashboard but not in the alert. There is no password login, so no `login_failed`; a cancelled sign-in (`access_denied`) is not an attack, and an identity-provider failure (`server_error`) is an error log. `id_not_found` is a `404` for an id in the path of an authenticated route. Tenant scoping lives in the repository layer, so another account's id looks exactly like a missing one; telling them apart would take the unscoped lookup scoping exists to prevent. A real leak would be a *success*, which no counter sees; the deliberate cross-tenant test guards that ([BACKEND_ARCHITECTURE.md § Testing strategy](./BACKEND_ARCHITECTURE.md)) |
 | `alert_relay_failures_total` | counter | — | Sentry alerts not reaching Telegram; alerted from Grafana, never from Sentry |
 | `alert_relay_dropped_total` | counter | `reason` (`stale`, `duplicate`, `rate_limited`) | Alerts the relay chose not to forward; a `stale` count means Sentry delivers late |
@@ -423,9 +423,10 @@ Postgres:
   after every restart, so `time() - gauge` is huge and every staleness alert fires after
   every deploy; worse, a gauge re-initialised to "now" on start would hide a broken daily
   purge forever if deploys come more often than every two days (`2 × interval`). Postgres
-  keeps the real value. Periodic tasks have no row to read today, so the worker upserts
-  `periodic_task_runs (task, last_success_at)` after each success (⚠️ not in
-  [db_models_and_migrations.md](./db_models_and_migrations.md) yet).
+  keeps the real value: the leader worker upserts `periodic_task_runs (task,
+  last_success_at, interval_seconds)` after each successful tick (migration 0005,
+  [db_models_and_migrations.md](./db_models_and_migrations.md)), and the sampler reads it
+  on its own, so a failure there leaves the queue gauges.
 
 **A failed sample clears its gauges.** If a query fails, the sampler removes the gauges it
 sets instead of leaving the last value, so a stale number never looks current; Postgres
@@ -554,9 +555,9 @@ recording fake.
 
 **Webhook → worker in one trace.** The enqueue transaction stores the current
 `sentry-trace` and `baggage` headers in a `trace_context` column on `pr_review_jobs`; the
-worker continues from it on claim. The column is to be added in
-[db_models_and_migrations.md](./db_models_and_migrations.md), the one place columns are
-listed (⚠️ not there yet).
+worker continues from it on claim (migration 0004,
+[db_models_and_migrations.md](./db_models_and_migrations.md)). So a review's log lines
+carry the webhook's `trace_id`, and Loki finds both sides with one query.
 
 ### Frontend
 

@@ -83,7 +83,9 @@ class JevRuleScreen:
             return RuleScreenReport(VerificationOutcome.SKIPPED, unchanged)
         started = time.monotonic()
         try:
-            response = await self._client.ask_noul(rules_block(rules), _questions(len(rules)))
+            response = await self._client.ask_noul(
+                rules_block(rules), _questions(len(rules)), purpose="rule_screen"
+            )
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning(
                 "llm.rule_screen.failed",

@@ -393,3 +393,39 @@ def test_main_reports_a_failure_on_stderr_and_exits_1(
 def test_main_refuses_an_unknown_part() -> None:
     with pytest.raises(SystemExit):
         sync.main(["--only", "dashbords"])
+
+
+def test_the_drill_is_pushed_alone_and_deletes_nothing() -> None:
+    grafana = FakeGrafana(rule_groups=["api"])
+
+    sync_with(grafana, "drill")
+
+    puts = [r for r in grafana.requests if r.method == "PUT"]
+    assert [r.url.path for r in puts] == [f"{RULE_GROUPS}/drill"]
+    [rule] = json.loads(puts[0].content)["rules"]
+    assert rule["title"] == "NoThroughputDrill"
+    assert not [path for method, path in grafana.writes() if method == "DELETE"]
+
+
+def test_the_next_rules_sync_removes_the_drill() -> None:
+    grafana = FakeGrafana(rule_groups=["drill"])
+
+    sync_with(grafana, "rules")
+
+    assert ("DELETE", "/api/v1/provisioning/alert-rules/old-drill") in grafana.writes()
+
+
+def test_a_full_sync_leaves_the_drill_out() -> None:
+    grafana = FakeGrafana()
+
+    sync_with(grafana)
+
+    assert f"{RULE_GROUPS}/drill" not in [r.url.path for r in grafana.requests]
+
+
+def test_main_accepts_the_drill_part(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(sync, "run", lambda settings, parts, **_: calls.append(tuple(parts)))
+
+    assert sync.main(["--only", "drill"]) == 0
+    assert calls == [("drill",)]

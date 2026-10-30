@@ -11,6 +11,10 @@ from adapters.llm.config import (
     DEFAULT_TYPESAFE_BASE_URL,
     DEFAULT_TYPESAFE_MODEL,
 )
+from adapters.observability import metrics
+
+#: The provider label of TypeSafe's requests (llm_requests_total, llm_tokens_total).
+TYPESAFE = "typesafe"
 
 
 class JevAnswer(BaseModel):
@@ -60,8 +64,28 @@ class JevClient:
         self._timeout_seconds = timeout_seconds
         self._transport = transport
 
-    async def ask_noul(self, state: str, questions: Mapping[str, str]) -> JevResponse:
-        """Raises httpx.HTTPError on transport or HTTP errors, ValueError on a bad reply."""
+    async def ask_noul(
+        self, state: str, questions: Mapping[str, str], *, purpose: str
+    ) -> JevResponse:
+        """Raises httpx.HTTPError on transport or HTTP errors, ValueError on a bad reply.
+        ``purpose`` (rule_screen, verify) labels the request's metrics."""
+        try:
+            response = await self._ask(state, questions)
+        except Exception:
+            metrics.count_llm_request(TYPESAFE, self._model, purpose, "error")
+            raise
+        metrics.count_llm_request(TYPESAFE, self._model, purpose, "ok")
+        usage = response.usage or {}
+        metrics.count_llm_tokens(
+            TYPESAFE,
+            self._model,
+            purpose,
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=usage.get("output_tokens"),
+        )
+        return response
+
+    async def _ask(self, state: str, questions: Mapping[str, str]) -> JevResponse:
         payload_questions = {
             question: {"type": "noul", "instructions": instructions}
             for question, instructions in questions.items()

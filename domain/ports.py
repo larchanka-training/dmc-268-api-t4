@@ -1,5 +1,6 @@
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -276,6 +277,10 @@ class NewReviewJob:
     author_login: str | None = None
     head_ref: str | None = None
     base_ref: str | None = None
+    #: The enqueuing request's trace as propagation headers (``sentry-trace``,
+    #: ``baggage``), so the review continues it (docs/observability.md § Review
+    #: pipeline). None when Sentry is off.
+    trace_context: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         if not self.provider.strip():
@@ -475,6 +480,23 @@ class JobEventsSource(Protocol):
         ...
 
 
+class StepHandle(Protocol):
+    """What a running step can still say about itself: shape, never content."""
+
+    def set(self, **attrs: str | int | bool) -> None: ...
+
+
+class Observer(Protocol):
+    """One helper for every signal of a pipeline step, so they cannot drift: the
+    ``pr_review_steps`` row, the span, the duration metric and the log line
+    (docs/observability.md § Review pipeline). An exception leaving the block ends
+    the step FAILED with its error_kind and is raised on."""
+
+    def step(
+        self, step: "JobStep", **attrs: str | int | bool
+    ) -> AbstractAsyncContextManager[StepHandle]: ...
+
+
 class StepRecorder(Protocol):
     """Where the worker records pipeline steps (`pr_review_steps`).
 
@@ -536,10 +558,24 @@ class AlertNotifier(Protocol):
     async def notify(self, alert: Alert) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class PeriodicTaskRun:
+    """A periodic task's last success (``periodic_task_runs``), upserted by the leader
+    worker after each tick. The interval is stored with it, so whoever reads the row
+    (the API's DB sampler) needs no copy of the worker's configuration."""
+
+    task: str
+    last_success_at: datetime
+    interval_seconds: float
+
+
 class QueueStats(Protocol):
-    """Reads the queue's depth; both job stores implement it."""
+    """Reads the queue's depth and the periodic tasks' freshness; both job stores
+    implement it. The two are read separately, so one failing leaves the other."""
 
     async def queue_snapshot(self) -> QueueSnapshot: ...
+
+    async def periodic_runs(self) -> tuple[PeriodicTaskRun, ...]: ...
 
 
 class ReviewCommentStore(Protocol):

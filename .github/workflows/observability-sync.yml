@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Comma-separated parts: dashboards, rules, alerting, synthetics (empty = all)"
+        description: "Comma-separated parts: dashboards, rules, alerting, synthetics (empty = all); drill for the No throughput drill rule"
         required: false
         default: ""
       dry_run:

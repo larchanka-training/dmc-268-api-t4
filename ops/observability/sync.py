@@ -60,6 +60,10 @@ CONTACT_POINT = "telegram"
 PLACEHOLDER = "placeholder: enter the bot token and chat id in Grafana"
 DEFAULT_PROM_DATASOURCE_UID = "grafanacloud-prom"
 PARTS = ("dashboards", "rules", "alerting", "synthetics")
+#: Pushed only when asked for (``--only drill``): the "No throughput" drill copy. The next
+#: ``rules`` sync deletes it, since its group is not among the rules files.
+DRILL = "drill"
+DRILL_ALERTS = ALERTS / "drill"
 TIMEOUT_SECONDS = 30.0
 
 #: Working hours (Europe/Berlin, Mon-Fri) for the two rules notified only then. Each
@@ -245,10 +249,10 @@ def sync_dashboards(grafana: Api, settings: Settings, report: Callable[[str], No
 # --- rules -------------------------------------------------------------------------
 
 
-def rule_groups() -> list[dict[str, Any]]:
-    """Every group of every rules file, in file order."""
+def rule_groups(folder: Path = ALERTS) -> list[dict[str, Any]]:
+    """Every group of every rules file in ``folder``, in file order."""
     groups: list[dict[str, Any]] = []
-    for path in sorted(ALERTS.glob("*.rules.yaml")):
+    for path in sorted(folder.glob("*.rules.yaml")):
         groups.extend(yaml.safe_load(path.read_text(encoding="utf-8"))["groups"])
     names = [group["name"] for group in groups]
     if len(names) != len(set(names)):
@@ -328,9 +332,18 @@ def grafana_rule(rule: Mapping[str, Any], group: str, datasource_uid: str) -> di
     }
 
 
-def sync_rules(grafana: Api, settings: Settings, report: Callable[[str], None]) -> None:
+def sync_rules(
+    grafana: Api,
+    settings: Settings,
+    report: Callable[[str], None],
+    *,
+    folder: Path = ALERTS,
+    prune: bool = True,
+) -> None:
+    """Every group of ``folder``; with ``prune``, the rules of any other group in the
+    rules' Grafana folder are deleted (the drill pushes without it)."""
     ensure_folder(grafana, RULES_FOLDER_UID, RULES_FOLDER_TITLE, report)
-    groups = rule_groups()
+    groups = rule_groups(folder)
     for group in groups:
         name = group["name"]
         rules = [grafana_rule(rule, name, settings.prom_datasource_uid) for rule in group["rules"]]
@@ -346,6 +359,8 @@ def sync_rules(grafana: Api, settings: Settings, report: Callable[[str], None]) 
             },
         )
         report(f"  rule group {name}: {len(rules)} rules")
+    if not prune:
+        return
     # A group removed from the files is removed from Grafana too.
     wanted = {group["name"] for group in groups}
     for listed in grafana.get("/api/v1/provisioning/alert-rules") or []:
@@ -483,7 +498,12 @@ def run(
             dry_run=dry_run,
             report=report,
         )
-        steps = {"dashboards": sync_dashboards, "rules": sync_rules, "alerting": sync_alerting}
+        steps: dict[str, Callable[[Api, Settings, Callable[[str], None]], None]] = {
+            "dashboards": sync_dashboards,
+            "rules": sync_rules,
+            "alerting": sync_alerting,
+            DRILL: lambda g, s, r: sync_rules(g, s, r, folder=DRILL_ALERTS, prune=False),
+        }
         try:
             for part in grafana_parts:
                 report(f"{part}:")
@@ -520,13 +540,17 @@ def run(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Push dashboards, rules and checks to Grafana.")
-    parser.add_argument("--only", default="", help=f"comma-separated parts of {', '.join(PARTS)}")
+    parser.add_argument(
+        "--only",
+        default="",
+        help=f"comma-separated parts of {', '.join(PARTS)}; or {DRILL} for the drill rule",
+    )
     parser.add_argument("--dry-run", action="store_true", help="print the writes; reads still run")
     args = parser.parse_args(argv)
     parts = [part.strip() for part in args.only.split(",") if part.strip()] or list(PARTS)
-    unknown = [part for part in parts if part not in PARTS]
+    unknown = [part for part in parts if part not in (*PARTS, DRILL)]
     if unknown:
-        parser.error(f"unknown parts {unknown}; choose from {', '.join(PARTS)}")
+        parser.error(f"unknown parts {unknown}; choose from {', '.join((*PARTS, DRILL))}")
     try:
         run(Settings.from_env(), parts, dry_run=args.dry_run)
     except (SyncError, httpx.HTTPError) as error:

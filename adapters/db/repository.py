@@ -36,6 +36,7 @@ from domain.ports import (
     Clock,
     JobStats,
     NewReviewJob,
+    PeriodicTaskRun,
     QueueSnapshot,
     ReviewJob,
     ReviewJobStatus,
@@ -116,11 +117,12 @@ class PostgresJobStore:
                     "INSERT INTO pr_review_jobs"
                     " (id, delivery_id, provider, installation_id, repo_id,"
                     " repo_full_name, pr_number, head_sha, base_sha, event_action,"
-                    " pr_title, author_login, head_ref, base_ref, status,"
+                    " pr_title, author_login, head_ref, base_ref, trace_context, status,"
                     " next_attempt_at)"
                     " VALUES (:id, :delivery_id, :provider, :installation_id, :repo_id,"
                     " :repo_full_name, :pr_number, :head_sha, :base_sha, :event_action,"
-                    " :pr_title, :author_login, :head_ref, :base_ref, 'QUEUED', now())"
+                    " :pr_title, :author_login, :head_ref, :base_ref,"
+                    " CAST(:trace_context AS JSONB), 'QUEUED', now())"
                     " ON CONFLICT (provider, delivery_id) DO NOTHING"
                 ),
                 {
@@ -138,6 +140,9 @@ class PostgresJobStore:
                     "author_login": job.author_login,
                     "head_ref": job.head_ref,
                     "base_ref": job.base_ref,
+                    "trace_context": (
+                        None if job.trace_context is None else json.dumps(dict(job.trace_context))
+                    ),
                 },
             )
             if inserted.rowcount == 0:
@@ -171,7 +176,7 @@ class PostgresJobStore:
                     " FOR UPDATE SKIP LOCKED LIMIT 1)"
                     " RETURNING id, provider, delivery_id, installation_id, repo_id,"
                     " repo_full_name, pr_number, head_sha, base_sha, event_action,"
-                    " pr_title, author_login, head_ref, base_ref, retry_count,"
+                    " pr_title, author_login, head_ref, base_ref, trace_context, retry_count,"
                     # RETURNING sees the updated row: next_attempt_at is still the
                     # value that made the job claimable, started_at is now().
                     " created_at, next_attempt_at, started_at"
@@ -326,6 +331,34 @@ class PostgresJobStore:
                 )
             )
             return len(result.all())
+
+    async def record_periodic_run(self, task: str, interval_seconds: float) -> None:
+        """A periodic task's success, by the leader that ran it (``periodic_task_runs``,
+        migration 0005), stamped with the database's clock."""
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO periodic_task_runs (task, last_success_at, interval_seconds)"
+                    " VALUES (:task, now(), :interval)"
+                    " ON CONFLICT (task) DO UPDATE"
+                    " SET last_success_at = now(), interval_seconds = EXCLUDED.interval_seconds"
+                ),
+                {"task": task, "interval": float(interval_seconds)},
+            )
+
+    async def periodic_runs(self) -> tuple[PeriodicTaskRun, ...]:
+        """Every periodic task's last success, for the API's DB sampler."""
+        async with self._engine.connect() as conn:
+            rows = await conn.execute(
+                text(
+                    "SELECT task, last_success_at, interval_seconds FROM periodic_task_runs"
+                    " ORDER BY task"
+                )
+            )
+            return tuple(
+                PeriodicTaskRun(row.task, row.last_success_at, float(row.interval_seconds))
+                for row in rows
+            )
 
     async def queue_snapshot(self) -> QueueSnapshot:
         """Queue depth for the API's DB sampler, every 15 s. Each filter is the
@@ -500,6 +533,8 @@ def _payload_from_row(row: Row[Any]) -> NewReviewJob:
         author_login=row.author_login,
         head_ref=row.head_ref,
         base_ref=row.base_ref,
+        # Only the claim reads it; the other queries' rows have no such column.
+        trace_context=row._mapping.get("trace_context"),
     )
 
 

@@ -128,6 +128,7 @@ def test_upgrade_head_creates_tables_indexes_and_constraints(migrated_url: str) 
     assert "pr_review_jobs" in tables
     assert "pr_review_steps" in tables
     assert "pr_review_comments" in tables
+    assert "periodic_task_runs" in tables
 
     index_names = {row[0] for row in asyncio.run(_fetch_all(migrated_url, JOB_INDEXES_SQL))}
     for name in JOB_INDEXES:
@@ -238,4 +239,4 @@ def test_reupgrade_head_is_repeatable(migrated_url: str) -> None:
     assert "pr_review_comments" in tables
     assert "pg_stat_statements" in asyncio.run(_extensions(migrated_url))
     versions = asyncio.run(_fetch_all(migrated_url, "SELECT version_num FROM alembic_version"))
-    assert versions[0][0] == "0003"
+    assert versions[0][0] == "0005"

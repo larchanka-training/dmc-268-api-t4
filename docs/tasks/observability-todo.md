@@ -213,36 +213,47 @@ Rules for every step:
 
 ## Phase 5: pipeline instrumentation
 
-- [ ] 45. Classification — move `_classify` from `worker/process.py` to
-      `domain/errors.py` as a public function; behaviour unchanged; tests follow it.
-- [ ] 46. Observer — `Observer` port in `domain/ports.py` (async `step()` context
-      manager, `StepHandle.set`); `adapters/observability/observer.py` wrapping
-      `StepRecorder`: row, span, `review_step_duration_seconds`, `step.finished`; an
-      exception ends the step `FAILED` with its `error_kind`; a failed row write is
-      logged and ignored. Recording fake in `tests/`; it replaces `_Steps` in
-      `worker/process.py`.
-- [ ] 47. Job trace — migration adding `pr_review_jobs.trace_context` (+
-      `docs/db_models_and_migrations.md`); store `sentry-trace` and `baggage` at
-      enqueue; continue as the `review.job` root span on claim.
-- [ ] 48. LLM — `adapters/llm/`: spans `llm.rule_screen`, `llm.attempt` (purpose
-      `review`/`correction`), `llm.verify`; `llm_requests_total`, `llm_tokens_total`,
-      `llm_key_rotations_total` with `purpose`. `llm_cost_usd_total` and the API's
-      `llm_daily_budget_usd` gauge **blocked by:** "LLM prices and budget".
-- [ ] 49. Forge — `forge_rate_limit_remaining_ratio` from `X-RateLimit-*` in
-      `adapters/github/client.py` and `publisher.py` (lowest in the last 5 min).
-- [ ] 50. Security events — `security_events_total`: `oauth_state_mismatch`
-      (`api/auth.py`), `csrf_rejected` (`enforce_csrf`), `session_rejected`
-      (`current_session`), `id_not_found` (the `ApiError` handler, 404 on a route with a
-      path id).
-- [ ] 51. Reaper — `lease_expiries_total` from `reap_expired()`'s count; migration for
-      `periodic_task_runs (task, last_success_at)` (+ db_models doc), upserted by the
-      leader after each tick; the DB sampler exports
-      `periodic_task_last_success_timestamp` and `periodic_task_interval_seconds`.
-- [ ] 52. Drill rule — `ops/observability/alerts/drill/no_throughput_drill.rules.yaml`
-      (15 min lookback, no time window), outside the normal sync; used once by the
-      checklist drill, then deleted.
-- [ ] 53. Tests and verify — the fake sees row, span, metric and log per step; LLM
-      metrics per purpose; one security kind per refusal path; five commands green; stop.
+- [x] 45. Classification — `classify` and `ERROR_KINDS` in `domain/errors.py`, public;
+      behaviour unchanged; `tests/domain/test_error_kinds.py`.
+- [x] 46. Observer — `Observer` and `StepHandle` ports in `domain/ports.py`;
+      `adapters/observability/observer.py` (`StepObserver`) wraps `StepRecorder`: the
+      row, a `review.step` span named after the step (its attributes: counts, sizes,
+      provider, model), `review_step_duration_seconds{step, outcome}` and
+      `step.finished`; an exception ends the step `FAILED` with its `error_kind`; a
+      failed row write is logged and ignored. It replaces `_Steps`; `process_claimed_job`
+      takes an `observer` (the tests' recording fake). The four recorded steps' series
+      start at 0.
+- [x] 47. Job trace — migration 0004 adds `pr_review_jobs.trace_context` (JSONB; +
+      `docs/db_models_and_migrations.md`); the webhook stores `sentry-trace` and
+      `baggage` at enqueue (none without a DSN); each job runs in a `review.job`
+      transaction continuing it, so the worker's log lines carry the webhook's trace id.
+- [x] 48. LLM — spans `llm.attempt` (one per HTTP request, under `llm_call`),
+      `llm.rule_screen`, `llm.verify`, with counts, names and outcomes only;
+      `llm_requests_total`, `llm_tokens_total`, `llm_key_rotations_total` with `purpose`
+      (`review`, `correction`, `summary`, `rule_screen`, `verify`), started at 0 by the
+      factory; TypeSafe as `provider="typesafe"`. `llm-smoke.yml` sends its spans with a
+      DSN (`ENV=smoke`). `llm_cost_usd_total` and the API's `llm_daily_budget_usd` gauge
+      **blocked by:** "LLM prices and budget".
+- [x] 49. Forge — `forge_rate_limit_remaining_ratio` from an httpx response hook on
+      every App and installation client in `adapters/github/` (`rate_limit.py`; a test
+      fails on a client without it), lowest in the last 5 min, `core` only, in both
+      processes.
+- [x] 50. Security events — `security_events_total`: `oauth_state_mismatch`
+      (`api/auth.py`), `csrf_rejected` (`enforce_csrf`, both refusals), `session_rejected`
+      (`current_session`, a cookie we do not know or one expired; no cookie is not one),
+      `id_not_found` (the `ApiError` handler, 404 on a route with a path id).
+- [x] 51. Reaper — `lease_expiries_total` from each leader tick's count; migration 0005
+      for `periodic_task_runs (task, last_success_at, interval_seconds)` (+ db_models
+      doc), upserted by the leader after each tick; the DB sampler exports
+      `periodic_task_last_success_timestamp` and `periodic_task_interval_seconds`, read
+      separately from the queue so one failing leaves the other.
+- [x] 52. Drill rule — `ops/observability/alerts/drill/no_throughput_drill.rules.yaml`
+      (15 min lookback, no time window) with a promtool test in CI; pushed with `sync
+      --only drill`, removed by the next `rules` sync.
+- [x] 53. Tests and verify — the observer's row, span, metric and log per step; the
+      trace from webhook to review; LLM metrics and spans per purpose with no prompt or
+      reply text; one security kind per refusal path; the rate-limit hook on every
+      client; periodic runs on memory and Postgres; five commands green.
 
 ## Phase 6: canary and SLOs
 

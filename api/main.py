@@ -169,8 +169,12 @@ def create_app(
     app.state.alert_relay = alert_relay
 
     @app.exception_handler(ApiError)
-    async def handle_api_error(_: Request, error: Exception) -> JSONResponse:
+    async def handle_api_error(request: Request, error: Exception) -> JSONResponse:
         assert isinstance(error, ApiError)
+        if error.status_code == 404 and request.path_params:
+            # An id in the path that is not there, or not the caller's: enumeration
+            # looks like a run of these (docs/observability.md § Metrics).
+            metrics.count_security_event("id_not_found")
         return api_error_response(error)
 
     @app.middleware("http")

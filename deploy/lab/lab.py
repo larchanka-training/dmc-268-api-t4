@@ -777,6 +777,34 @@ def check() -> bool:
             ", ".join(sorted(str(n) for n in names & {"/health", RELAY_PATH})),
         )
         report.check(title not in json.dumps(items), "the PR title reached no Sentry payload")
+        # Phase 5: the review continues the webhook's trace (trace_context, migration 0004).
+        reviews = poll(
+            lambda: [
+                t
+                for t in transactions(sentry_items(), started)
+                if t.get("transaction") == "review.job"
+            ],
+            bool,
+            30,
+        ) or []  # fmt: skip
+        webhook_traces = {t["contexts"]["trace"]["trace_id"] for t in webhook}
+        report.check(
+            bool(reviews)
+            and any(t["contexts"]["trace"]["trace_id"] in webhook_traces for t in reviews),
+            "the claimed job is a review.job transaction in its webhook's trace",
+            f"{len(reviews)} review.job transactions",
+        )
+        steps = {
+            span.get("description")
+            for t in reviews
+            for span in t.get("spans", [])
+            if span.get("op") == "review.step"
+        }
+        report.check(
+            {"claimed", "fetch_diff"} <= steps,
+            "its steps are spans: claimed, fetch_diff",
+            ", ".join(sorted(str(step) for step in steps)),
+        )
 
     step("Grafana: production's dashboards and alert rules (ops/observability/)")
     expected = rules_in_files()

@@ -36,6 +36,7 @@ from domain.ports import (
     Clock,
     JobStats,
     NewReviewJob,
+    PeriodicTaskRun,
     QueueSnapshot,
     ReviewJob,
     ReviewJobStatus,
@@ -70,6 +71,7 @@ class MemoryJobStore:
         self._clock = clock or SystemClock()
         self._rng = rng or random.Random()
         self._records: dict[str, _Record] = {}
+        self._periodic: dict[str, PeriodicTaskRun] = {}
         self._lock = asyncio.Lock()
 
     async def enqueue(self, job: NewReviewJob) -> str | None:
@@ -226,6 +228,15 @@ class MemoryJobStore:
                 locked_until=self._clock.now() + timedelta(seconds=LEASE_SECONDS),
             )
             return True
+
+    async def record_periodic_run(self, task: str, interval_seconds: float) -> None:
+        """The Postgres store's upsert, for tests: the memory mode runs no reaper."""
+        async with self._lock:
+            self._periodic[task] = PeriodicTaskRun(task, self._clock.now(), interval_seconds)
+
+    async def periodic_runs(self) -> tuple[PeriodicTaskRun, ...]:
+        async with self._lock:
+            return tuple(self._periodic[task] for task in sorted(self._periodic))
 
     async def queue_snapshot(self) -> QueueSnapshot:
         """Same counts and age as the Postgres store's: the DB sampler's twin."""

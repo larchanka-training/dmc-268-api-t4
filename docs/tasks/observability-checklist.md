@@ -167,9 +167,23 @@ Other:
 
 ## Phase 5: pipeline
 
-- [ ] Throughput drill — deploy the drill rule, watch it fire in a quiet period, delete
-      it.
-- [ ] An `llm-smoke.yml` run with a DSN shows the LLM spans.
+- [ ] After the merge deploy, once: `docker compose exec api alembic upgrade head`
+      (migrations 0004 `trace_context` and 0005 `periodic_task_runs`). Until then the
+      sampler logs `metrics.sampler.failed` for its periodic read, and the queue gauges
+      keep reporting.
+- [ ] One trace — a real review: Sentry's trace explorer shows the webhook request and
+      `review.job` under one trace id, with the `claimed`, `fetch_diff`, `llm_call` (and
+      its `llm.attempt` spans) and `post_feedback` spans; Loki finds the API's and the
+      worker's lines by that `trace_id`.
+- [ ] Metrics — in Explore: `review_step_duration_seconds_count`, `llm_requests_total`,
+      `llm_tokens_total`, `forge_rate_limit_remaining_ratio`, `lease_expiries_total`,
+      `periodic_task_last_success_timestamp{task="reaper"}`; the Pipeline dashboard's
+      step, LLM and forge panels fill in.
+- [ ] Throughput drill — in a quiet period: Observability sync with `only: drill`; with
+      no review for 15 minutes, `NoThroughputDrill` fires and reaches Telegram; then a
+      sync with `only: rules` removes it.
+- [ ] An `llm-smoke.yml` run with the DSN shows the LLM spans (Sentry environment
+      `smoke`).
 
 ## Phase 6: canary
 

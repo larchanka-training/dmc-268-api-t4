@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 
 class LLMGatewayError(Exception):
@@ -182,3 +182,43 @@ class DiffFormatError(Exception):
         super().__init__(f"malformed diff at line {line_number}: {reason}")
         self.reason = reason
         self.line_number = line_number
+
+
+#: Every error_kind ``classify`` returns, and whether the job is retried for it: the
+#: closed error vocabulary of docs/PIPELINE_SPEC.md §4.2/§5. The job metrics start a
+#: series at 0 for each (docs/observability.md § Metrics).
+ERROR_KINDS: Mapping[str, bool] = {
+    "forge_unavailable": True,
+    "installation_removed": False,
+    "pr_not_found": False,
+    "diff_parse_failed": False,
+    "provider_unavailable": True,
+    "llm_output_invalid": False,
+    "skip_diff_too_large": False,
+    "internal_error": False,
+}
+
+
+def classify(error: BaseException) -> tuple[str, bool]:
+    """Map an exception to (error_kind, retryable). Anything not named here is
+    ``internal_error``: a bug, not an outage, so it is not retried."""
+    kind = error_kind(error)
+    return kind, ERROR_KINDS[kind]
+
+
+def error_kind(error: BaseException) -> str:
+    if isinstance(error, ForgeUnavailableError):
+        return "forge_unavailable"
+    if isinstance(error, InstallationGoneError):
+        return "installation_removed"
+    if isinstance(error, PrNotFoundError):
+        return "pr_not_found"
+    if isinstance(error, DiffFormatError):
+        return "diff_parse_failed"
+    if isinstance(error, (AllProvidersFailedError, ProviderUnavailableError)):
+        return "provider_unavailable"
+    if isinstance(error, LLMOutputError):
+        return "llm_output_invalid"
+    if isinstance(error, LLMInputTooLargeError):
+        return "skip_diff_too_large"
+    return "internal_error"

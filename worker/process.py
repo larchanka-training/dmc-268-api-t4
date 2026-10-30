@@ -22,33 +22,26 @@ never be set outside a developer machine.
 import logging
 import os
 import time
-from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 
 from adapters.observability import metrics
 from adapters.observability.config import DEFAULT_ENV, read_env
 from adapters.observability.logging import bind_context
+from adapters.observability.observer import StepObserver
+from adapters.observability.sentry import job_transaction
 from domain.diff import parse_diff, split_into_chunks
 from domain.diff_filter import filter_files
-from domain.errors import (
-    AllProvidersFailedError,
-    DiffFormatError,
-    ForgeUnavailableError,
-    InstallationGoneError,
-    LLMInputTooLargeError,
-    LLMOutputError,
-    PrNotFoundError,
-    ProviderUnavailableError,
-)
+from domain.errors import LLMInputTooLargeError, classify
 from domain.findings import NewPublishedFinding, published_findings
-from domain.jobs import JobStep, StepStatus
+from domain.jobs import JobStep
 from domain.ports import (
     ClaimedJob,
     GitProvider,
     JobRepository,
     JobStats,
     LLMGateway,
+    Observer,
     PullRequestTarget,
     ReviewCommentStore,
     ReviewJobStatus,
@@ -80,6 +73,10 @@ class ReviewStage:
     comments: ReviewCommentStore | None = None
 
 
+#: The steps a run records today (docs/observability.md § Review pipeline); the other
+#: JobStep values join as they are built. Their duration series start at 0.
+RECORDED_STEPS = (JobStep.CLAIMED, JobStep.FETCH_DIFF, JobStep.LLM_CALL, JobStep.POST_FEEDBACK)
+
 #: Dev-only escape hatch: when "1", the fetched diff text is logged verbatim
 #: after the fetch. This knowingly deviates from AGENTS.md hard rule 3 (raw
 #: diffs are never logged) and is the only place in the codebase that does,
@@ -101,104 +98,6 @@ def _clip(value: str, limit: int = 2000) -> str:
     return value[:limit] + "..."
 
 
-class _Steps:
-    """The step the job is in, mirrored to a `StepRecorder` when one is given.
-
-    Recording is progress for the console, never part of the job's outcome: a failed
-    write is logged (exception class only) and the job goes on."""
-
-    def __init__(
-        self, recorder: StepRecorder | None, claimed: ClaimedJob, log: logging.Logger
-    ) -> None:
-        self._recorder = recorder
-        self._claimed = claimed
-        self._log = log
-        self._current: JobStep | None = None
-
-    async def begin(self, step: JobStep) -> None:
-        """Finish the current step as OK and start `step`."""
-        await self.end(StepStatus.OK)
-        self._current = step
-        if self._recorder is not None:
-            await self._guarded(
-                step,
-                self._recorder.start(
-                    self._claimed.job_id,
-                    self._claimed.attempt,
-                    step,
-                    worker_id=self._claimed.worker_id,
-                ),
-            )
-
-    async def end(self, status: StepStatus, error_kind: str | None = None) -> None:
-        step, self._current = self._current, None
-        if step is None or self._recorder is None:
-            return
-        await self._guarded(
-            step,
-            self._recorder.finish(
-                self._claimed.job_id,
-                self._claimed.attempt,
-                step,
-                status,
-                worker_id=self._claimed.worker_id,
-                error_kind=error_kind,
-            ),
-        )
-
-    async def _guarded(self, step: JobStep, write: Awaitable[None]) -> None:
-        try:
-            await write
-        except Exception as err:
-            self._log.error(
-                "job.step_record.failed",
-                extra={
-                    "job_id": self._claimed.job_id,
-                    "step": str(step),
-                    "error_type": type(err).__name__,
-                },
-            )
-
-
-#: Every error_kind _classify returns, and whether the job is retried for it: the
-#: closed error vocabulary of docs/PIPELINE_SPEC.md §4.2/§5. The job metrics start a
-#: series at 0 for each (docs/observability.md § Metrics).
-ERROR_KINDS: Mapping[str, bool] = {
-    "forge_unavailable": True,
-    "installation_removed": False,
-    "pr_not_found": False,
-    "diff_parse_failed": False,
-    "provider_unavailable": True,
-    "llm_output_invalid": False,
-    "skip_diff_too_large": False,
-    "internal_error": False,
-}
-
-
-def _classify(error: Exception) -> tuple[str, bool]:
-    """Map an exception to (error_kind, retryable)."""
-    kind = _error_kind(error)
-    return kind, ERROR_KINDS[kind]
-
-
-def _error_kind(error: Exception) -> str:
-    if isinstance(error, ForgeUnavailableError):
-        return "forge_unavailable"
-    if isinstance(error, InstallationGoneError):
-        return "installation_removed"
-    if isinstance(error, PrNotFoundError):
-        return "pr_not_found"
-    if isinstance(error, DiffFormatError):
-        return "diff_parse_failed"
-    if isinstance(error, (AllProvidersFailedError, ProviderUnavailableError)):
-        return "provider_unavailable"
-    if isinstance(error, LLMOutputError):
-        return "llm_output_invalid"
-    if isinstance(error, LLMInputTooLargeError):
-        return "skip_diff_too_large"
-    return "internal_error"
-
-
 async def process_claimed_job(
     claimed: ClaimedJob,
     vcs: GitProvider,
@@ -207,9 +106,14 @@ async def process_claimed_job(
     review: ReviewStage | None = None,
     steps: StepRecorder | None = None,
     logger: logging.Logger | None = None,
+    observer: Observer | None = None,
 ) -> bool:
     """Fetch and parse one claimed pull request diff, review and publish it when a
     review stage is given; record stats or failure, and each step in `steps`.
+
+    Each step goes through an `Observer` (its row, span, duration and log line); by
+    default the `StepObserver` over `steps`. The run is one ``review.job`` transaction
+    that continues the webhook's trace, so the webhook and the review are one trace.
 
     Returns True only when the job reached COMPLETED. Returns False when the
     lease was lost mid-flight (a superseding delivery or the reaper owns the
@@ -226,8 +130,20 @@ async def process_claimed_job(
     """
     if claimed.claimable_at is not None and claimed.claimed_at is not None:
         metrics.observe_claim_latency((claimed.claimed_at - claimed.claimable_at).total_seconds())
-    with bind_context(**_bound_fields(claimed)), metrics.WORKER_IN_FLIGHT.track_inprogress():
-        return await _process(claimed, vcs, jobs, review=review, steps=steps, logger=logger)
+    log = logger if logger is not None else logging.getLogger(__name__)
+    with (
+        bind_context(**_bound_fields(claimed)),
+        metrics.WORKER_IN_FLIGHT.track_inprogress(),
+        job_transaction(claimed.payload.trace_context),
+    ):
+        return await _process(
+            claimed,
+            vcs,
+            jobs,
+            review=review,
+            observer=observer if observer is not None else StepObserver(steps, claimed, log),
+            log=log,
+        )
 
 
 def _bound_fields(claimed: ClaimedJob) -> dict[str, object]:
@@ -248,111 +164,120 @@ async def _process(
     jobs: JobRepository,
     *,
     review: ReviewStage | None,
-    steps: StepRecorder | None,
-    logger: logging.Logger | None,
+    observer: Observer,
+    log: logging.Logger,
 ) -> bool:
-    log = logger if logger is not None else logging.getLogger(__name__)
     started = time.monotonic()
     job_id = claimed.job_id
     payload = claimed.payload
-    progress = _Steps(steps, claimed, log)
 
     try:
-        await progress.begin(JobStep.CLAIMED)
-        await progress.begin(JobStep.FETCH_DIFF)
-        context = await vcs.fetch_pull_request(
-            payload.installation_id, payload.repo_full_name, payload.pr_number
-        )
-        if _debug_log_diff_enabled():
-            # Logged before parsing on purpose: a diff that fails to parse is
-            # exactly the case a developer needs to see.
+        async with observer.step(JobStep.CLAIMED) as step:
+            if claimed.enqueued_at is not None and claimed.claimed_at is not None:
+                waited = claimed.claimed_at - claimed.enqueued_at
+                step.set(queue_wait_ms=round(waited.total_seconds() * 1000))
+        async with observer.step(JobStep.FETCH_DIFF) as step:
+            context = await vcs.fetch_pull_request(
+                payload.installation_id, payload.repo_full_name, payload.pr_number
+            )
+            if _debug_log_diff_enabled():
+                # Logged before parsing on purpose: a diff that fails to parse is
+                # exactly the case a developer needs to see.
+                log.info(
+                    "job.diff.debug",
+                    extra={
+                        "job_id": job_id,
+                        "repo": payload.repo_full_name,
+                        "pr_number": payload.pr_number,
+                        "diff_text": context.diff_text,
+                    },
+                )
+            step.set(bytes=len(context.diff_text.encode()))
+            files = parse_diff(context.diff_text)
+            filtered = filter_files(files)
+            kept_paths = ", ".join(diff.new_path or diff.old_path for diff in filtered.kept)
+            skipped_paths = ", ".join(
+                f"{entry.path} ({entry.reason.value})" for entry in filtered.skipped
+            )
             log.info(
-                "job.diff.debug",
+                "job.files",
                 extra={
                     "job_id": job_id,
                     "repo": payload.repo_full_name,
                     "pr_number": payload.pr_number,
-                    "diff_text": context.diff_text,
+                    "reviewable_paths": _clip(kept_paths),
+                    "skipped_paths": _clip(skipped_paths),
                 },
             )
-        files = parse_diff(context.diff_text)
-        filtered = filter_files(files)
-        kept_paths = ", ".join(diff.new_path or diff.old_path for diff in filtered.kept)
-        skipped_paths = ", ".join(
-            f"{entry.path} ({entry.reason.value})" for entry in filtered.skipped
-        )
-        log.info(
-            "job.files",
-            extra={
-                "job_id": job_id,
-                "repo": payload.repo_full_name,
-                "pr_number": payload.pr_number,
-                "reviewable_paths": _clip(kept_paths),
-                "skipped_paths": _clip(skipped_paths),
-            },
-        )
-        stats = JobStats(
-            files_total=len(files),
-            files_reviewable=len(filtered.kept),
-            hunks_total=sum(len(diff.hunks) for diff in files),
-            chunks_total=sum(len(split_into_chunks(diff)) for diff in filtered.kept),
-            skipped_counts=tuple((reason.value, count) for reason, count in filtered.skip_counts),
-        )
+            stats = JobStats(
+                files_total=len(files),
+                files_reviewable=len(filtered.kept),
+                hunks_total=sum(len(diff.hunks) for diff in files),
+                chunks_total=sum(len(split_into_chunks(diff)) for diff in filtered.kept),
+                skipped_counts=tuple(
+                    (reason.value, count) for reason, count in filtered.skip_counts
+                ),
+            )
+            step.set(files=stats.files_total, reviewable=stats.files_reviewable)
         if review is not None:
             # LLM_CALL can take minutes (two 300 s attempts plus a fallback): renew the
             # lease before it and again before posting, and stop if it was lost.
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                 return False
-            await progress.begin(JobStep.LLM_CALL)
             target = _pull_request_target(claimed, context.head_sha)
-            try:
-                result = await review.gateway.review(
-                    ReviewRequest(
-                        diff_text=context.diff_text,
-                        pr_title=context.title,
-                        pr_description=context.description,
+            async with observer.step(JobStep.LLM_CALL) as step:
+                try:
+                    result = await review.gateway.review(
+                        ReviewRequest(
+                            diff_text=context.diff_text,
+                            pr_title=context.title,
+                            pr_description=context.description,
+                        )
+                    )
+                except LLMInputTooLargeError as too_large:
+                    # The job still fails as skip_diff_too_large below; the check run
+                    # only tells the author why nothing else appears.
+                    await _publish_skipped(
+                        review.publisher, target, too_large, len(filtered.kept), claimed, log
+                    )
+                    raise
+                step.set(
+                    provider=result.provider, model=result.model, findings=len(result.findings)
+                )
+                posted = (
+                    frozenset()
+                    if review.comments is None
+                    else await review.comments.posted_fingerprints(
+                        provider=payload.provider,
+                        installation_id=payload.installation_id,
+                        repo_id=payload.repo_id,
+                        pr_number=payload.pr_number,
                     )
                 )
-            except LLMInputTooLargeError as too_large:
-                # The job still fails as skip_diff_too_large below; the check run only
-                # tells the author why nothing else appears.
-                await _publish_skipped(
-                    review.publisher, target, too_large, len(filtered.kept), claimed, log
+                plan = build_plan(
+                    result.findings,
+                    model_summary=result.summary,
+                    lines=CommentableLines.from_files(filtered.kept),
+                    policy=review.policy,
+                    posted_fingerprints=posted,
+                    model_risk=result.risk,
+                    checklist=result.checklist,
+                    dismissed_by_verifier=result.rejected_by_verifier,
                 )
-                raise
-            posted = (
-                frozenset()
-                if review.comments is None
-                else await review.comments.posted_fingerprints(
-                    provider=payload.provider,
-                    installation_id=payload.installation_id,
-                    repo_id=payload.repo_id,
-                    pr_number=payload.pr_number,
-                )
-            )
-            plan = build_plan(
-                result.findings,
-                model_summary=result.summary,
-                lines=CommentableLines.from_files(filtered.kept),
-                policy=review.policy,
-                posted_fingerprints=posted,
-                model_risk=result.risk,
-                checklist=result.checklist,
-                dismissed_by_verifier=result.rejected_by_verifier,
-            )
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                 return False
-            await progress.begin(JobStep.POST_FEEDBACK)
-            outcome = await review.publisher.publish(target, plan)
-            stats = replace(stats, findings_published=len(outcome.comments))
-            if review.comments is not None:
-                await _keep_findings(
-                    review.comments, claimed, published_findings(plan, outcome), log
+            async with observer.step(JobStep.POST_FEEDBACK) as step:
+                outcome = await review.publisher.publish(target, plan)
+                step.set(
+                    comments_posted=len(outcome.comments), inline_fallback=outcome.inline_fallback
                 )
-        await progress.end(StepStatus.OK)
+                stats = replace(stats, findings_published=len(outcome.comments))
+                if review.comments is not None:
+                    await _keep_findings(
+                        review.comments, claimed, published_findings(plan, outcome), log
+                    )
     except Exception as err:
-        error_kind, retryable = _classify(err)
-        await progress.end(StepStatus.FAILED, error_kind)
+        error_kind, retryable = classify(err)
         return await _record_failure(
             jobs,
             claimed,
