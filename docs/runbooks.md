@@ -18,7 +18,7 @@ this link.
   duration and a comment. Prefer a silence to pausing a rule: a silence expires on its
   own.
 - **Owners:** `owner` is `unassigned` until the team assigns one person per domain
-  (tasks/observability-checklist.md).
+  (docs/tasks/observability-checklist.md).
 
 ## Target down
 

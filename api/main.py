@@ -209,7 +209,7 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     the app enqueues into PostgreSQL and a separate worker process consumes
     (`dispatch_inline=False`, engine disposed on app shutdown); without it,
     dev mode keeps the in-memory queue and the API claims inline
-    (tasks/plan-pg-queue.md)."""
+    (docs/tasks/plan-pg-queue.md)."""
     # Before the app exists, so the SDK's FastAPI integration instruments it.
     init_sentry(SentrySettings.from_env())
     clock = SystemClock()
@@ -231,7 +231,7 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         dispatch_inline = False
     else:
         # No DATABASE_URL: dev mode keeps the in-memory queue (the
-        # PostgreSQL path exists — tasks/plan-pg-queue.md) and the API
+        # PostgreSQL path exists — docs/tasks/plan-pg-queue.md) and the API
         # claims inline; no worker process is used.
         logger.info("queue.in_memory")
         jobs = queue_stats = MemoryJobStore(clock=clock)

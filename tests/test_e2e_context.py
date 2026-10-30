@@ -3,7 +3,7 @@
 One signed `pull_request` delivery drives the real endpoint wiring, a real
 GitHubVCSClient over a RecordingTransport serving the token, pull-request,
 commits and .diff endpoints, and the in-memory job queue. The queue is
-in-memory now and PostgreSQL later (tasks/plan.md decision 1, 2026-10-07);
+in-memory now and PostgreSQL later (docs/tasks/plan.md decision 1, 2026-10-07);
 the port stays, so this test stays. No network, no sleeps: the background
 task is drained. The diff, PR title and description are sentinels, so the
 caplog assertions prove untrusted content never reaches the logs

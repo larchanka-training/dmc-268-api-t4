@@ -1016,7 +1016,7 @@ UPDATE pr_review_jobs
   creates. `CREATE EXTENSION` succeeds without the preload, so the two land in
   either order; the view returns rows once both have. The exporter's read-only role
   `dmc268_exporter` (`pg_monitor`) is not a migration: its password is a deploy
-  secret, so it is created once by hand (tasks/observability-checklist.md, phase 3).
+  secret, so it is created once by hand (docs/tasks/observability-checklist.md, phase 3).
 * **Table growth.** `pr_review_jobs` is append-mostly and unbounded. The partial
   indexes keep queue operations flat, but the table itself needs a retention policy
   — monthly partitioning on `created_at`, or a purge of terminal rows older than N

@@ -1,7 +1,7 @@
 """In-memory review job store.
 
 A stand-in for the PostgreSQL queue: `adapters/db/jobs.py` replaces it behind
-the same `domain.ports.JobRepository` port (decision 1 in tasks/plan.md,
+the same `domain.ports.JobRepository` port (decision 1 in docs/tasks/plan.md,
 2026-10-07; DDL in docs/db_models_and_migrations.md). Enqueue mirrors the
 single transaction of docs/WORKFLOW_DESIGN.md §2 Step 3 — dedup, supersede,
 insert — under one lock here. The dedup check deliberately runs before the

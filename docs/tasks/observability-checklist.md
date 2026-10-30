@@ -1,6 +1,6 @@
 # Checklist — Observability, outside the code
 
-Spec: [docs/observability.md](../docs/observability.md). Code steps:
+Spec: [docs/observability.md](../observability.md). Code steps:
 [observability-todo.md](observability-todo.md); its **Blocked by** notes name the bold
 items below. Secrets go into GitHub Secrets only, never into a file or a chat.
 
@@ -106,14 +106,14 @@ Other:
 - [x] Redeploy (Actions → Deploy → Run workflow, or the next merge) once
       `SENTRY_WEBHOOK_SECRET` and the two Telegram secrets exist: the VPS `.env` gets them
       only on a deploy. Until then the relay route answers 404.
-- [ ] Sentry alert rules — Monitors → Alerts → Create Alert, project `dmc268-backend`,
+- [x] Sentry alert rules — Monitors → Alerts → Create Alert, project `dmc268-backend`,
       environment `production`; each with "Notify on preferred channel" (the admin,
       email) and "Send a notification via an integration" → `telegram-relay`:
-      - [ ] New issue ("A new issue is created");
-      - [ ] Regression ("A resolved issue regresses");
-      - [ ] Error burst ("An event or issue activity is captured" + Number of events more than
+      - [x] New issue ("A new issue is created");
+      - [x] Regression ("A resolved issue regresses");
+      - [x] Error burst ("An event or issue activity is captured" + Number of events more than
       10 in 10 minutes); 
-      - [ ] Critical (same trigger + Event level equals `fatal`). If
+      - [x] Critical (same trigger + Event level equals `fatal`). If
       `telegram-relay` is not offered, check that Alert Rule Action is on. The Grafana
       rules are not created by hand: the `observability-sync` workflow pushes them.
 - [x] "Send Test Notification" on one of the rules: a message arrives in the Telegram
@@ -133,8 +133,8 @@ Other:
       `GRAFANA_PROM_DATASOURCE_UID` (only if the stack's Prometheus is not
       `grafanacloud-prom`: Connections → Data sources).
 - [ ] Actions → Observability sync → Run workflow: with `dry_run` first, then for real.
-      A 403 from an `/api/v1/provisioning` call means the service account behind
-      `GRAFANA_SA_TOKEN` needs the Admin role.
+      The service account behind `GRAFANA_SA_TOKEN` needs the Editor role (enough for
+      every call, checked against Grafana 13.2).
 - [ ] **Rule routing check** — the code uses Grafana's import of Prometheus-format rules
       (Grafana-managed rules, routed by the notification policy); verified on Grafana
       13.2 in the lab. In Grafana Cloud, after the sync: Alerting → Alert rules lists 24

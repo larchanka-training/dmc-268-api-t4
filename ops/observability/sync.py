@@ -65,8 +65,17 @@ QUIET_HOURS = {
 LOCATION = "Europe/Berlin"
 
 
+#: What Grafana answers when creating a folder whose uid exists: 412 in Grafana 13, 409
+#: in older versions.
+FOLDER_EXISTS = frozenset({409, 412})
+
+
 class SyncError(Exception):
     """A Grafana API call failed. The text names the call and the status, never a token."""
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass
@@ -150,7 +159,8 @@ class Api:
             # The body is Grafana's error message; it never echoes the token.
             raise SyncError(
                 f"{method} {self._name}{path} answered HTTP {response.status_code}: "
-                f"{response.text[:300]}"
+                f"{response.text[:300]}",
+                response.status_code,
             )
         if not response.content:
             return None
@@ -178,9 +188,16 @@ def prepared_dashboard(path: Path, settings: Settings) -> dict[str, Any]:
 
 
 def sync_dashboards(grafana: Api, settings: Settings, report: Callable[[str], None]) -> None:
-    if grafana.get(f"/api/folders/{FOLDER_UID}", missing_ok=True) is None:
+    # Created, not looked up first: below Admin, Grafana answers a lookup of a folder that
+    # does not exist with 403 (folders:read), since no permission exists on it yet.
+    try:
         grafana.send("POST", "/api/folders", json_body={"uid": FOLDER_UID, "title": FOLDER_TITLE})
-        report(f"  folder {FOLDER_TITLE} created")
+    except SyncError as error:
+        if error.status not in FOLDER_EXISTS:
+            raise
+        report(f"  folder {FOLDER_TITLE} exists")
+    else:
+        report(f"  folder {FOLDER_TITLE} ready")
     for path in dashboard_files():
         dashboard = prepared_dashboard(path, settings)
         grafana.send(

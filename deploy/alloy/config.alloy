@@ -98,7 +98,7 @@ prometheus.relabel "containers" {
 // --- Postgres ------------------------------------------------------------------------
 
 // The read-only dmc268_exporter role (pg_monitor), created once by hand
-// (tasks/observability-checklist.md, phase 3).
+// (docs/tasks/observability-checklist.md, phase 3).
 prometheus.exporter.postgres "db" {
 	data_source_names  = ["postgresql://dmc268_exporter:" + encoding.url_encode(sys.env("POSTGRES_EXPORTER_PASSWORD")) + "@postgres:5432/dmc268?sslmode=disable"]
 	enabled_collectors = ["database", "locks", "stat_database", "stat_user_tables", "stat_statements"]

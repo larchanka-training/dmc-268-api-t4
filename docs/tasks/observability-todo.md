@@ -1,6 +1,6 @@
 # Todo — Observability
 
-Spec: [docs/observability.md](../docs/observability.md); section names below (§ …) are
+Spec: [docs/observability.md](../observability.md); section names below (§ …) are
 its sections, and its tables are the exact requirements. Work outside the code (accounts,
 secrets, VPS, drills, team decisions): [observability-checklist.md](observability-checklist.md).
 

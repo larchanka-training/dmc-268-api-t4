@@ -46,11 +46,11 @@ class FakeGrafana:
         method, path = request.method, request.url.raw_path.decode().split("?")[0]
         if method == "GET":
             return self._get(path, request)
+        if (method, path) == ("POST", "/api/folders") and self.folder:
+            return httpx.Response(412, json={"message": "the folder has been changed"})
         return httpx.Response(200, json={})
 
     def _get(self, path: str, request: httpx.Request) -> httpx.Response:
-        if path == "/api/folders/dmc268":
-            return httpx.Response(200 if self.folder else 404, json={})
         if path == "/api/v1/provisioning/contact-points":
             return httpx.Response(200, json=[{"name": "telegram"}] if self.contact_point else [])
         if path.startswith("/api/v1/provisioning/mute-timings/"):
@@ -130,12 +130,23 @@ def test_dashboards_go_into_their_folder_and_overwrite() -> None:
     assert sentry["query"] == "https://acme.de.sentry.io"
 
 
-def test_an_existing_folder_is_not_created_again() -> None:
+def test_an_existing_folder_is_kept_and_the_dashboards_still_pushed() -> None:
+    """Grafana 13 answers 412 to a folder uid that exists (409 before)."""
     grafana = FakeGrafana(folder=True)
+
+    lines = sync_with(grafana, "dashboards")
+
+    assert "  folder DMC-268 exists" in lines
+    assert len([r for r in grafana.requests if r.url.path == "/api/dashboards/db"]) == 4
+
+
+def test_the_folder_is_never_looked_up_first() -> None:
+    """Below Admin, a lookup of a missing folder is 403, not 404 (seen with Editor)."""
+    grafana = FakeGrafana()
 
     sync_with(grafana, "dashboards")
 
-    assert ("POST", "/api/folders") not in grafana.writes()
+    assert not [r for r in grafana.requests if r.method == "GET" and "folders" in r.url.path]
 
 
 def test_rules_are_imported_group_by_group_and_a_removed_group_is_deleted() -> None:

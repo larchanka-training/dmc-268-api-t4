@@ -3,7 +3,7 @@
 This is Step 5 of the review workflow (docs/WORKFLOW_DESIGN.md §2). The
 production caller is the worker claim loop (§2 Step 4); the webhook runs the
 same function inline as a one-shot claimer until that loop lands
-(tasks/plan.md decision 2, 2026-10-07).
+(docs/tasks/plan.md decision 2, 2026-10-07).
 
 The job arrives already claimed — PROCESSING and leased to
 `claimed.worker_id` — so this stage never claims by itself. It does not call
