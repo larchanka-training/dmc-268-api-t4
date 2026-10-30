@@ -213,9 +213,11 @@ async def test_the_worker_reports_each_step_and_its_shape_never_its_content() ->
         ("CLAIMED", "OK"),
         ("FETCH_DIFF", "OK"),
         ("LLM_CALL", "OK"),
+        ("POSTPROCESS", "OK"),
         ("POST_FEEDBACK", "OK"),
     ]
     attrs = {name: attrs for name, attrs, _ in observer.steps}
+    assert attrs["POSTPROCESS"] == {"findings_total": 0, "already_posted": 0}
     assert set(attrs["FETCH_DIFF"]) == {"bytes", "files", "reviewable"}
     assert attrs["LLM_CALL"] == {"provider": "p", "model": "m", "findings": 0}
     assert attrs["POST_FEEDBACK"] == {"comments_posted": 0, "inline_fallback": False}

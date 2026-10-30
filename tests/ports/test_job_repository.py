@@ -465,12 +465,18 @@ async def test_complete_by_the_holder_completes_and_roundtrips_stats_via_get(
         skipped_counts=(("lockfile", 2), ("generated", 1)),
     )
 
-    assert await env.store.complete(job_id, stats, worker_id=claimed.worker_id) is True
+    assert (
+        await env.store.complete(
+            job_id, stats, worker_id=claimed.worker_id, summary="💬 Issues worth a look"
+        )
+        is True
+    )
 
     stored = await env.store.get(job_id)
     assert stored is not None
     assert stored.status is ReviewJobStatus.COMPLETED
     assert stored.stats == stats
+    assert stored.summary == "💬 Issues worth a look"
     assert stored.finished_at is not None
     assert stored.error_kind is None
 

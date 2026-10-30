@@ -394,13 +394,22 @@ class FakeInstallationGateway:
         repositories: tuple[Repository, ...] = (),
         *,
         error: Exception | None = None,
+        by_installation: dict[int, tuple[Repository, ...] | Exception] | None = None,
     ) -> None:
+        """`by_installation` answers per installation id and wins over the
+        shared `repositories` and `error`, which every other installation gets."""
         self.repositories = repositories
         self.error = error
+        self.by_installation = by_installation or {}
         self.calls: list[int] = []
 
     async def list_repositories(self, installation_id: int) -> tuple[Repository, ...]:
         self.calls.append(installation_id)
+        answer = self.by_installation.get(installation_id)
+        if isinstance(answer, Exception):
+            raise answer
+        if answer is not None:
+            return answer
         if self.error is not None:
             raise self.error
         return self.repositories
@@ -447,6 +456,7 @@ def build_test_app(
     job_events: Any = None,
     findings: Any = None,
     job_rules: Any = None,
+    finding_context: Any = None,
     metrics_port: int | None = None,
     queue_stats: Any = None,
     alert_relay: Any = None,
@@ -471,6 +481,7 @@ def build_test_app(
         job_events=job_events,
         findings=findings,
         job_rules=job_rules,
+        finding_context=finding_context,
         metrics_port=metrics_port,
         queue_stats=queue_stats,
         alert_relay=alert_relay,

@@ -156,6 +156,7 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `github.setup.redirect` | info | GitHub sent the browser to the App's setup URL | `had_session` |
 | `repositories.list.failed` | warning | Listing repositories on GitHub failed; the API answers 502 | `reason` |
 | `rules.read.failed` | warning | Reading `.review/rules.md` for the rules preview failed; the API answers 502 | `job_id`, `reason` |
+| `finding_context.read.failed` | warning | Reading a finding's diff or file lines from the forge failed; the API answers 502 | `job_id`, `reason` |
 | `metrics.serving` | info | A process started its Prometheus endpoint: the API on 9100, the worker on 9101 | `port` |
 | `metrics.unavailable` | warning | The metrics port could not be bound; the process runs without it, and its scrape target is down | `port`, `error_type` |
 | `alert.relay_forwarded` | info | The relay sent a Sentry alert on to Telegram | `issue_id`, `alert_level`, `duration_ms` |
@@ -196,6 +197,8 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `github.repositories.listed` | info | An installation's repositories were listed | `provider`, `installation_id`, `count` |
 | `github.repositories.page_cap` | warning | The repository listing stopped at the page cap | `provider`, `installation_id`, `pages` |
 | `github.file.read` | info | A repository file was read (the rules preview); never its content | `provider`, `installation_id`, `repo`, `found`, `bytes`, `duration_ms` |
+| `github.compare.fetched` | info | The diff between a job's base and head was fetched for a finding's context; never its content | `provider`, `installation_id`, `repo`, `found`, `diff_bytes`, `duration_ms` |
+| `finding_context.unavailable` | info | A finding's code could not be rebuilt (installation or commit gone, line not in the diff) | `job_id`, `reason` |
 | `github.review.published` | info | The review was posted | `provider`, `installation_id`, `comments`, `inline_fallback`, `conclusion` |
 | `github.review.inline_rejected` | warning | GitHub refused the inline comments (422); they go into the review body | `provider`, `comments` |
 | `identity.profile.loaded` | info | Sign-in loaded the GitHub profile | `provider`, `organizations` |
@@ -517,15 +520,15 @@ review.job                         (root, worker; continues the webhook's trace)
 │   ├── llm.attempt                one per request: provider, model, purpose (review | correction), outcome
 │   │   └── http.client POST …     (httpx, automatic)
 │   └── llm.verify                 findings_in, findings_rejected, outcome (TypeSafe)
-├── postprocess                    (planned) findings_total, findings_new, severity histogram
+├── postprocess                    findings_total, already_posted (the plan: dedup against posted findings)
 ├── post_feedback                  comments_posted, check_run_updated
 └── meter                          (planned) tokens_billed; db spans (automatic)
 ```
 
 The span names are the `pr_review_steps` stages from
 [WORKFLOW_DESIGN.md §2](./WORKFLOW_DESIGN.md), lower-cased; attributes are the same
-"shape, never content" set that table stores. The worker records four of the ten today
-(`CLAIMED`, `FETCH_DIFF`, `LLM_CALL`, `POST_FEEDBACK`); the rest are already in `JobStep`
+"shape, never content" set that table stores. The worker records five of the ten today
+(`CLAIMED`, `FETCH_DIFF`, `LLM_CALL`, `POSTPROCESS`, `POST_FEEDBACK`); the rest are already in `JobStep`
 and the `ck_pr_review_steps_step` constraint, and join the trace as they are built.
 
 One helper produces all four signals, so they cannot drift: the step row, the span, the

@@ -75,7 +75,13 @@ class ReviewStage:
 
 #: The steps a run records today (docs/observability.md § Review pipeline); the other
 #: JobStep values join as they are built. Their duration series start at 0.
-RECORDED_STEPS = (JobStep.CLAIMED, JobStep.FETCH_DIFF, JobStep.LLM_CALL, JobStep.POST_FEEDBACK)
+RECORDED_STEPS = (
+    JobStep.CLAIMED,
+    JobStep.FETCH_DIFF,
+    JobStep.LLM_CALL,
+    JobStep.POSTPROCESS,
+    JobStep.POST_FEEDBACK,
+)
 
 #: Dev-only escape hatch: when "1", the fetched diff text is logged verbatim
 #: after the fetch. This knowingly deviates from AGENTS.md hard rule 3 (raw
@@ -219,6 +225,7 @@ async def _process(
                 ),
             )
             step.set(files=stats.files_total, reviewable=stats.files_reviewable)
+        summary: str | None = None
         if review is not None:
             # LLM_CALL can take minutes (two 300 s attempts plus a fallback): renew the
             # lease before it and again before posting, and stop if it was lost.
@@ -244,6 +251,7 @@ async def _process(
                 step.set(
                     provider=result.provider, model=result.model, findings=len(result.findings)
                 )
+            async with observer.step(JobStep.POSTPROCESS) as step:
                 posted = (
                     frozenset()
                     if review.comments is None
@@ -264,6 +272,7 @@ async def _process(
                     checklist=result.checklist,
                     dismissed_by_verifier=result.rejected_by_verifier,
                 )
+                step.set(findings_total=len(result.findings), already_posted=len(posted))
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                 return False
             async with observer.step(JobStep.POST_FEEDBACK) as step:
@@ -272,6 +281,7 @@ async def _process(
                     comments_posted=len(outcome.comments), inline_fallback=outcome.inline_fallback
                 )
                 stats = replace(stats, findings_published=len(outcome.comments))
+                summary = plan.plain_summary
                 if review.comments is not None:
                     await _keep_findings(
                         review.comments, claimed, published_findings(plan, outcome), log
@@ -289,7 +299,7 @@ async def _process(
         )
 
     try:
-        completed = await jobs.complete(job_id, stats, worker_id=claimed.worker_id)
+        completed = await jobs.complete(job_id, stats, worker_id=claimed.worker_id, summary=summary)
     except Exception as err:
         log.error(
             "job.store.failed",

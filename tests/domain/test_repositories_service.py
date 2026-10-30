@@ -1,5 +1,6 @@
 """The service against fake ports: no network, no clock reads but the injected one."""
 
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from adapters.memory.repositories import InMemoryRepositoriesCache
 from domain.errors import ForgeUnavailableError, InstallationGoneError
 from domain.repositories import RepositoriesService
+from domain.tenancy import AccountType
 from tests.conftest import (
     FakeInstallationGateway,
     FixedClock,
@@ -150,7 +152,7 @@ async def test_find_returns_a_connected_repository(
 
     found = await service(auth_clock, gateway, repositories_cache).find(session, wanted.id)
 
-    assert found == wanted
+    assert found == replace(wanted, organization_id=ORG.id)
 
 
 async def test_find_is_none_for_an_unknown_id(
@@ -209,3 +211,78 @@ async def test_find_sees_past_the_first_page(
 
     assert found is not None
     assert found.name == "repo-24"
+
+
+# --- several installations ---------------------------------------------
+
+PERSONAL = make_organization("octocat", "1", installation_id=7, account_type=AccountType.USER)
+
+
+async def test_every_installation_is_listed_together_and_tagged(
+    auth_clock: FixedClock, repositories_cache: InMemoryRepositoriesCache
+) -> None:
+    gateway = FakeInstallationGateway(
+        by_installation={
+            42: (make_repository("acme", "web"),),
+            7: (make_repository("octocat", "dotfiles"), make_repository("octocat", "blog")),
+        }
+    )
+    session = make_session(auth_clock, organizations=(PERSONAL, ORG))
+
+    result = await service(auth_clock, gateway, repositories_cache).list_page(session)
+
+    assert [(item.full_name, item.organization_id) for item in result.items] == [
+        ("acme/web", "100"),
+        ("octocat/blog", "1"),
+        ("octocat/dotfiles", "1"),
+    ]
+    assert result.total_count == 3
+    assert sorted(gateway.calls) == [7, 42]
+
+
+async def test_a_gone_installation_drops_out_without_hiding_the_others(
+    auth_clock: FixedClock, repositories_cache: InMemoryRepositoriesCache
+) -> None:
+    gateway = FakeInstallationGateway(
+        by_installation={
+            42: InstallationGoneError(42, "HTTP 404"),
+            7: (make_repository("octocat", "dotfiles"),),
+        }
+    )
+    session = make_session(auth_clock, organizations=(ORG, PERSONAL))
+
+    result = await service(auth_clock, gateway, repositories_cache).list_page(session)
+
+    assert [item.full_name for item in result.items] == ["octocat/dotfiles"]
+
+
+async def test_each_installation_is_cached_on_its_own(
+    auth_clock: FixedClock, repositories_cache: InMemoryRepositoriesCache
+) -> None:
+    gateway = FakeInstallationGateway(
+        by_installation={
+            42: (make_repository("acme", "web"),),
+            7: (make_repository("octocat", "dotfiles"),),
+        }
+    )
+    reviews = service(auth_clock, gateway, repositories_cache)
+
+    await reviews.list_page(make_session(auth_clock, organizations=(ORG,)))
+    await reviews.list_page(make_session(auth_clock, organizations=(ORG, PERSONAL)))
+
+    assert gateway.calls == [42, 7]
+
+
+async def test_find_tags_the_repository_with_its_organisation(
+    auth_clock: FixedClock, repositories_cache: InMemoryRepositoriesCache
+) -> None:
+    repository = make_repository("octocat", "dotfiles")
+    gateway = FakeInstallationGateway(
+        by_installation={42: (make_repository("acme", "web"),), 7: (repository,)}
+    )
+    session = make_session(auth_clock, organizations=(ORG, PERSONAL))
+
+    found = await service(auth_clock, gateway, repositories_cache).find(session, repository.id)
+
+    assert found is not None
+    assert found.organization_id == "1"

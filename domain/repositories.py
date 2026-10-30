@@ -5,7 +5,7 @@ out of the database, so there is no `repositories` table
 (component-architecture-and-ER-model.md, "Deliberately absent").
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -41,6 +41,10 @@ class Repository:
     connected_at: datetime | None = None
     # The newest review of this repository; null until review jobs exist.
     last_run_at: datetime | None = None
+    # The session organisation (installation account) this repository came
+    # through. Set by RepositoriesService, not by the forge adapter, which only
+    # knows the installation id.
+    organization_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.owner.strip() or not self.name.strip():
@@ -99,15 +103,14 @@ def _parse_cursor(cursor: str | None) -> int:
     return int(cursor)
 
 
-def connect_url(organization: Organization | None, app_slug: str) -> str:
-    """Where to send the user to connect a repository.
+def connect_url(app_slug: str) -> str:
+    """Where to send the user to connect a repository: the app's install page.
 
-    With no organisation the app is installed nowhere, so the destination is its
-    install page rather than an installation's settings.
+    GitHub asks there which account to install on, personal or an organisation,
+    and offers "Configure" for accounts that already have it. Sending the user
+    to one installation's settings instead left no way to add another account.
     """
-    if organization is None:
-        return _APP_INSTALL_URL.format(slug=app_slug)
-    return installation_settings_url(organization)
+    return _APP_INSTALL_URL.format(slug=app_slug)
 
 
 def installation_settings_url(organization: Organization) -> str:
@@ -125,7 +128,8 @@ def installation_settings_url(organization: Organization) -> str:
 
 
 class RepositoriesService:
-    """Reads the current organisation's repositories, cached for a short while."""
+    """Reads the repositories of every installation the session can see, each
+    installation cached for a short while."""
 
     def __init__(
         self,
@@ -154,14 +158,25 @@ class RepositoriesService:
         return next((item for item in repositories if item.id == repository_id), None)
 
     async def _all(self, session: Session) -> tuple[Repository, ...]:
-        """The whole sorted list. Empty when nothing is reachable, which covers
-        both "installed nowhere" and "the installation is gone"."""
-        organization = session.current_organization
-        if organization is None:
-            # Installed nowhere: the forge is not called at all.
-            return ()
+        """Every installation's repositories, as one list sorted by full name.
 
-        installation_id = organization.installation_id
+        Empty when nothing is reachable, which covers both "installed nowhere"
+        and "every installation is gone". A personal installation and an
+        organisation's are listed together; each item says which it came through.
+        """
+        collected: list[Repository] = []
+        seen: set[str] = set()
+        for organization in sorted(session.organizations, key=lambda item: item.login):
+            for repository in await self._installation(organization.installation_id):
+                # One app installation per account, so a repository cannot come
+                # through two of them; the guard keeps ids unique regardless.
+                if repository.id in seen:
+                    continue
+                seen.add(repository.id)
+                collected.append(replace(repository, organization_id=organization.id))
+        return sort_by_full_name(tuple(collected))
+
+    async def _installation(self, installation_id: int) -> tuple[Repository, ...]:
         cached = await self._cache.get(installation_id)
         if cached is not None:
             return cached
@@ -169,8 +184,9 @@ class RepositoriesService:
         try:
             fetched = await self._gateway.list_repositories(installation_id)
         except InstallationGoneError:
-            # Uninstalled or suspended. The console shows "no repositories" rather
-            # than an error, and the next sign-in refreshes the organisations.
+            # Uninstalled or suspended. Its repositories drop out of the list
+            # rather than failing it, and the next sign-in refreshes the
+            # organisations.
             await self._cache.drop(installation_id)
             return ()
 

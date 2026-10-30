@@ -20,6 +20,7 @@ from adapters.db.repository import PostgresJobStore
 from adapters.db.review_comments import PostgresReviewCommentStore
 from adapters.db.session import build_engine
 from adapters.github.app_auth import GitHubAppAuth
+from adapters.github.compare import GitHubCompareDiffs
 from adapters.github.config import PROVIDER_NAME, GitHubAppSettings
 from adapters.github.contents import GitHubRepositoryContents
 from adapters.github.factory import build_vcs_client
@@ -52,6 +53,7 @@ from api.jobs import router as jobs_router
 from api.repositories import router as repositories_router
 from api.webhooks.github import GitHubWebhookDeps
 from api.webhooks.github import router as github_webhook_router
+from domain.finding_context import FindingContextService
 from domain.ports import (
     Clock,
     GitProvider,
@@ -137,6 +139,7 @@ def create_app(
     job_events: JobEventsSource | None = None,
     findings: ReviewCommentStore | None = None,
     job_rules: JobRulesService | None = None,
+    finding_context: FindingContextService | None = None,
     metrics_port: int | None = None,
     queue_stats: QueueStats | None = None,
     alert_relay: AlertRelay | None = None,
@@ -158,6 +161,7 @@ def create_app(
         jobs=jobs,
         findings=findings if findings is not None else MemoryReviewCommentStore(jobs),
         job_rules=job_rules,
+        finding_context=finding_context,
     )
     app.state.webhooks = GitHubWebhookDeps(
         jobs=jobs,
@@ -240,6 +244,10 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         logger.info("queue.in_memory")
         jobs = queue_stats = MemoryJobStore(clock=clock)
         dispatch_inline = True
+    findings: ReviewCommentStore = (
+        MemoryReviewCommentStore(jobs) if engine is None else PostgresReviewCommentStore(engine)
+    )
+    contents = GitHubRepositoryContents(app_settings, app_auth, transport=transport)
     return create_app(
         settings=settings,
         identity_provider=GitHubIdentityProvider(
@@ -264,11 +272,13 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         job_events=(
             InMemoryJobEventsSource() if engine is None else PostgresJobEventsSource(engine)
         ),
-        findings=None if engine is None else PostgresReviewCommentStore(engine),
-        job_rules=JobRulesService(
+        findings=findings,
+        job_rules=JobRulesService(jobs=jobs, contents=contents, parser=MarkdownRulesParser()),
+        finding_context=FindingContextService(
             jobs=jobs,
-            contents=GitHubRepositoryContents(app_settings, app_auth, transport=transport),
-            parser=MarkdownRulesParser(),
+            findings=findings,
+            diffs=GitHubCompareDiffs(app_settings, app_auth, transport=transport),
+            contents=contents,
         ),
         metrics_port=metrics.API_PORT,
         queue_stats=queue_stats,

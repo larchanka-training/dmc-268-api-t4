@@ -7,6 +7,11 @@ most recent step, for a console that only polls this endpoint and never opens th
 job is visible to a session that has an organisation on the job's installation; any other job
 answers 404.
 
+`GET /jobs/{job_id}/findings/{finding_id}/context` and `GET /jobs/{job_id}/file-lines` rebuild
+the code behind a finding from the forge on every call and store nothing
+(docs/PIPELINE_SPEC.md §7.4); both answer 409 `context_unavailable` when that is no longer
+possible.
+
 `GET /jobs/{job_id}/events` streams the job's status and step changes until it reaches a
 terminal status. It adds to polling of `/jobs` and does not replace it.
 
@@ -37,7 +42,15 @@ from fastapi.responses import StreamingResponse
 
 from api.deps import NO_STORE, ApiError, current_session, services
 from domain.auth import Session
-from domain.errors import ForgeUnavailableError, InstallationGoneError
+from domain.diff import DiffHunk, DiffLineKind, FileStatus
+from domain.errors import ContextUnavailableError, ForgeUnavailableError, InstallationGoneError
+from domain.finding_context import (
+    DEFAULT_CONTEXT_LINES,
+    MAX_CONTEXT_LINES,
+    MAX_FILE_LINES,
+    FindingContext,
+    FindingContextService,
+)
 from domain.findings import PublishedFinding
 from domain.jobs import (
     ACTIVE_STATUSES,
@@ -51,6 +64,7 @@ from domain.jobs import (
     ui_stage,
 )
 from domain.ports import ReviewJob, ReviewJobStatus
+from domain.publishing import comment_message
 from domain.repository_rules import RULES_PATH, RulesPreview
 
 logger = logging.getLogger(__name__)
@@ -78,8 +92,10 @@ async def list_jobs(
     cursor: str | None = None,
     limit: int = DEFAULT_LIMIT,
 ) -> dict[str, Any]:
-    organization = session.current_organization
-    if organization is None:
+    # Every installation the session can see, as the repository list does:
+    # personal and organisation runs show together.
+    installation_ids = frozenset(item.installation_id for item in session.organizations)
+    if not installation_ids:
         return {"items": [], "next_cursor": None}
     if not 1 <= limit <= MAX_LIMIT:
         raise ApiError(400, "bad_limit")
@@ -88,7 +104,7 @@ async def list_jobs(
     except ValueError:
         raise ApiError(400, "bad_cursor") from None
     query = JobQuery(
-        installation_ids=frozenset({organization.installation_id}),
+        installation_ids=installation_ids,
         statuses=_statuses(status),
         repository=repository,
         author=author,
@@ -123,8 +139,8 @@ async def read_job(
         **_job_json(job),
         # The console's 4-stage progress bar; null before the first step is recorded.
         "stage": _current_stage(steps),
-        # Not stored yet: the summary, the diagnostic log and the check run link.
-        "summary": None,
+        # Not stored yet: the diagnostic log and the check run link.
+        "summary": job.summary,
         "error_log": None,
         "external_check_url": None,
         "steps": [_step_json(step) for step in steps],
@@ -171,6 +187,117 @@ def _rules_json(preview: RulesPreview) -> dict[str, Any]:
         ],
         "dropped_suspicious": preview.parsed.dropped_suspicious,
         "dropped_over_limit": preview.parsed.dropped_over_limit,
+    }
+
+
+@router.get("/jobs/{job_id}/findings/{finding_id}/context")
+async def read_finding_context(
+    job_id: str,
+    finding_id: str,
+    request: Request,
+    session: Annotated[Session, Depends(current_session)],
+    context_lines: int = DEFAULT_CONTEXT_LINES,
+) -> dict[str, Any]:
+    if not 0 <= context_lines <= MAX_CONTEXT_LINES:
+        raise ApiError(400, "bad_context_lines")
+    service = _finding_context(request)
+    try:
+        context = await service.context(session, job_id, finding_id, context_lines)
+    except ContextUnavailableError as failure:
+        raise _unavailable(job_id, failure) from None
+    except ForgeUnavailableError as failure:
+        raise _forge_failed(job_id, failure) from None
+    if context is None:
+        raise ApiError(404, "not_found")
+    return _context_json(context)
+
+
+@router.get("/jobs/{job_id}/file-lines")
+async def read_file_lines(
+    job_id: str,
+    request: Request,
+    session: Annotated[Session, Depends(current_session)],
+    path: str,
+    from_: Annotated[int, Query(alias="from")],
+    to: int,
+) -> dict[str, Any]:
+    if not 1 <= from_ <= to:
+        raise ApiError(400, "bad_range")
+    # "Expand all" on a long gap may ask for more; it gets the first MAX_FILE_LINES.
+    to = min(to, from_ + MAX_FILE_LINES - 1)
+    service = _finding_context(request)
+    try:
+        lines = await service.file_lines(session, job_id, path, from_, to)
+    except ContextUnavailableError as failure:
+        raise _unavailable(job_id, failure) from None
+    except ForgeUnavailableError as failure:
+        raise _forge_failed(job_id, failure) from None
+    if lines is None:
+        raise ApiError(404, "not_found")
+    return {"path": lines.path, "from": lines.start, "lines": list(lines.lines)}
+
+
+def _finding_context(request: Request) -> FindingContextService:
+    service = services(request).finding_context
+    if service is None:
+        raise ApiError(502, "forge_unavailable")
+    return service
+
+
+def _unavailable(job_id: str, failure: ContextUnavailableError) -> ApiError:
+    logger.info("finding_context.unavailable", extra={"job_id": job_id, "reason": failure.reason})
+    return ApiError(409, "context_unavailable")
+
+
+def _forge_failed(job_id: str, failure: ForgeUnavailableError) -> ApiError:
+    logger.warning(
+        "finding_context.read.failed", extra={"job_id": job_id, "reason": failure.reason}
+    )
+    return ApiError(502, "forge_unavailable")
+
+
+# The wire names of docs/openapi.yaml (FindingContext, DiffLine).
+_FILE_STATUS = {
+    FileStatus.ADDED: "added",
+    FileStatus.MODIFIED: "modified",
+    FileStatus.DELETED: "removed",
+    FileStatus.RENAMED: "renamed",
+}
+_LINE_TYPE = {
+    DiffLineKind.CONTEXT: "context",
+    DiffLineKind.ADDED: "added",
+    DiffLineKind.DELETED: "removed",
+}
+
+
+def _context_json(context: FindingContext) -> dict[str, Any]:
+    return {
+        "path": context.path,
+        "old_path": context.old_path,
+        "status": _FILE_STATUS[context.status],
+        "file_line_count": context.file_line_count,
+        "hunks": [_hunk_json(hunk) for hunk in context.hunks],
+    }
+
+
+def _hunk_json(hunk: DiffHunk) -> dict[str, Any]:
+    return {
+        # Stable within the file: no two hunks of one diff start on the same lines.
+        "id": f"hunk-{hunk.old_start}-{hunk.new_start}",
+        "old_start": hunk.old_start,
+        "old_lines": hunk.old_count,
+        "new_start": hunk.new_start,
+        "new_lines": hunk.new_count,
+        "header": hunk.section,
+        "lines": [
+            {
+                "type": _LINE_TYPE[line.kind],
+                "old_line": line.old_lineno,
+                "new_line": line.new_lineno,
+                "content": line.content,
+            }
+            for line in hunk.lines
+        ],
     }
 
 
@@ -317,7 +444,9 @@ def _finding_json(finding: PublishedFinding, pull_request_url: str) -> dict[str,
         "side": str(finding.side),
         "severity": str(finding.severity),
         "category": str(finding.category),
-        "message": finding.message,
+        # The stored body is the posted Markdown; the console draws the severity,
+        # category and suggestion itself.
+        "message": comment_message(finding.message, finding.suggestion),
         "suggestion": None
         if suggestion is None
         else {"before": list(suggestion.before), "after": list(suggestion.after)},

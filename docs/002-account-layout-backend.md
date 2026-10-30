@@ -118,10 +118,14 @@ Tests first: `tests/domain/test_repositories.py`.
   - the cursor is the offset as a string;
   - a malformed or negative cursor → `ValueError`, which the API turns into `400`;
   - `total_count` counts the whole sorted list.
-- `connect_url(organization | None, app_slug) -> str`:
+- `connect_url(app_slug) -> str` → `https://github.com/apps/{app_slug}/installations/new`,
+  whatever the session holds. GitHub asks there which account to install on and offers
+  "Configure" for accounts that already have the App, so a personal account can be added
+  next to an organisation's. (Originally an installation's settings page once one existed,
+  which left no way to add a second account.)
+- `installation_settings_url(organization) -> str`:
   - organisation account → `https://github.com/organizations/{login}/settings/installations/{installation_id}`;
-  - personal account → `https://github.com/settings/installations/{installation_id}`;
-  - no organisation → `https://github.com/apps/{app_slug}/installations/new`.
+  - personal account → `https://github.com/settings/installations/{installation_id}`.
 
 ### Step 2 — Ports (`domain/ports.py`)
 
@@ -177,13 +181,15 @@ Step 5 has nothing to call.
 Tests first: `tests/domain/test_repositories_service.py`, with fake ports.
 
 - `list_page(session, cursor)`:
-  1. No current organisation → empty page (`items: []`, `next_cursor: null`,
+  1. No organisations → empty page (`items: []`, `next_cursor: null`,
      `total_count: 0`), without asking GitHub.
-  2. Otherwise take the cached list for the organisation's `installation_id`, or fetch it,
-     sort it and cache it for `REPOSITORIES_CACHE_TTL_SECONDS`.
+  2. Otherwise, for **every** organisation in the session (personal accounts included),
+     take the cached list for its `installation_id`, or fetch it, sort it and cache it for
+     `REPOSITORIES_CACHE_TTL_SECONDS`. Tag each repository with that organisation's id
+     (`organization_id`), merge, and sort by full name.
   3. Return `page(...)`.
-- `InstallationGone` → drop the cache and return an empty page. The console then shows
-  "no repositories" rather than an error, and the next sign-in refreshes the organisations.
+- `InstallationGone` for one installation → drop its cache; its repositories drop out of
+  the list and the others still show. The next sign-in refreshes the organisations.
 - `ForgeUnavailable` → propagate; the API answers `502`.
 
 ### Step 6 — Routes (`api/repositories.py`, `api/github_setup.py`)
@@ -194,23 +200,24 @@ fakes and `TestClient`.
 **`GET /repositories?cursor=`** (`current_session`):
 
 - `200 { items, next_cursor, total_count }` in the Spec 002 §5 shape (`connected_at:
-null`);
+null`), plus `organization_id` on each item: the session organisation it came through;
 - `400 {"error": "bad_cursor"}` for a malformed cursor;
 - `502 {"error": "forge_unavailable"}` when GitHub fails.
 
 **`GET /repositories/connect-url`** (`current_session`):
 
-- returns `200 { "url": connect_url(current organisation, GITHUB_APP_SLUG) }`;
-- members get the URL too: GitHub refuses non-owners on its side, and the console already
-  disables the button for them (Spec 002 §6);
+- returns `200 { "url": connect_url(GITHUB_APP_SLUG) }`, the App's install page;
+- everyone gets the same URL: a member of an organisation can still install the App on
+  their own account, and GitHub refuses non-owners for an organisation on its side;
 - reading the URL changes nothing, so it stays a `GET` and needs no CSRF header.
 
 **`GET /repositories/{id}/disconnect-url`** (`current_session`):
 
-- `200 { "url": installation_settings_url(current organisation) }`;
-- `404 {"error": "not_found"}` when the repository is not in the installation,
-  when there is no current organisation, or when the installation is gone;
-- the URL is **the same page `connect-url` returns**: GitHub has no page for a
+- `200 { "url": installation_settings_url(the repository's organisation) }`, found through
+  the item's `organization_id`;
+- `404 {"error": "not_found"}` when the repository is in none of the session's
+  installations, or its installation is gone;
+- the URL is the installation's settings page: GitHub has no page for a
   single repository of an installation. Per repository anyway, so the backend can
   confirm the repository is still connected, can link more precisely if GitHub
   ever allows it, and so the mock knows which one to remove (frontend spec 002 §5).
@@ -292,10 +299,10 @@ Safari rejects `Secure` cookies on `http://localhost`.
 
 | # | Do this | Expect | If it looks wrong |
 | - | ------- | ------ | ----------------- |
-| 1 | Sign in as an organisation **owner** | `/repositories` and the sidebar list the installation's repositories in name order with the right count; never-reviewed ones say "Not reviewed yet" | An empty list usually means the session predates the installation — sign out and in. With several installations the console shows only the first by login, `min()` over the login string, so an uppercase login wins |
-| 2 | **Connect repository** | GitHub's installation settings for that organisation. Add a repository and save | A 404 means `GITHUB_APP_SLUG` does not match the App's real slug |
+| 1 | Sign in as an organisation **owner** | `/repositories` and the sidebar list the installation's repositories in name order with the right count; never-reviewed ones say "Not reviewed yet" | An empty list usually means the session predates the installation — sign out and in. With several installations the list merges all of them; each repository names its account |
+| 2 | **Connect repository** | GitHub's install page for the App: pick the organisation ("Configure") or your personal account, add a repository and save | A 404 means `GITHUB_APP_SLUG` does not match the App's real slug |
 | 3 | Let GitHub redirect you back | `/api/github/setup` → sign-in without a prompt → `/repositories` with the "Your repository list is up to date" banner and the new repository. Reload: no banner | Staying on GitHub means **Redirect on update** is off. The banner is `?connected=1`, which the console strips after reading |
-| 4 | Sign in as a **member** of the same organisation | The list shows; **Connect** is disabled with the owners-only hint | Everyone looking like a member means the Members permission is missing, or was granted after this installation and needs accepting |
+| 4 | Sign in as a **member** of the same organisation | The list shows; **Connect** is enabled and lets the member install on their personal account; GitHub refuses them for the organisation | Everyone looking like a member means the Members permission is missing, or was granted after this installation and needs accepting |
 | 5 | Sign in with an account that has **no** installation | "Install the review app" → GitHub's install page → after installing, back on `/repositories` with the new organisation in the account menu | Landing on `/repositories` empty instead means the Setup URL is unset, so GitHub sent the user to its own page |
 
 Waiting up to `REPOSITORIES_CACHE_TTL_SECONDS` (default 60) for a change is the cache, not
@@ -313,8 +320,8 @@ and 3–5:
 | -------- | ---- |
 | 1 | `tests/api/test_repositories.py::test_the_list_is_sorted_and_paged_like_the_console` |
 | 3 | `tests/api/test_github_setup.py::test_signing_in_after_setup_lands_on_the_repositories_page` |
-| 4 | `tests/api/test_repositories.py::test_connect_url_is_given_to_members_too`, and the console's `permissions.test.ts` |
-| 5 | `tests/api/test_repositories.py::test_connect_url_points_at_the_install_page_without_an_organisation` |
+| 4 | `tests/api/test_repositories.py::test_connect_url_is_given_to_members_too` |
+| 5 | `tests/api/test_repositories.py::test_connect_url_is_the_install_page_without_an_organisation` |
 
 What is left to a human is therefore narrow, and it is the part fakes cannot judge: that
 the App's own settings are right, that GitHub's live responses map onto our model, and

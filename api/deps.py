@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from adapters.observability import metrics
 from api.config import AppSettings
 from domain.auth import Session, hash_session_id
+from domain.finding_context import FindingContextService
 from domain.ports import (
     Clock,
     IdentityProvider,
@@ -65,6 +66,8 @@ class Services:
     findings: ReviewCommentStore
     # None only in tests that do not wire the forge; the rules route answers 502.
     job_rules: JobRulesService | None = None
+    # Same: without the forge the context routes answer 502.
+    finding_context: FindingContextService | None = None
 
 
 def services(request: Request) -> Services:
