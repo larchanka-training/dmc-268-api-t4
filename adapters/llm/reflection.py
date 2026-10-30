@@ -100,7 +100,9 @@ class JevVerifier:
 
         started = time.monotonic()
         try:
-            response = await self._client.ask_noul(state, _questions(len(findings)))
+            response = await self._client.ask_noul(
+                state, _questions(len(findings)), purpose="verify"
+            )
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning(
                 "llm.verifier.failed",

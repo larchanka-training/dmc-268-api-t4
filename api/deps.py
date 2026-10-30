@@ -6,6 +6,7 @@ from typing import cast
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 
+from adapters.observability import metrics
 from api.config import AppSettings
 from domain.auth import Session, hash_session_id
 from domain.finding_context import FindingContextService
@@ -133,6 +134,8 @@ async def current_session(request: Request, response: Response) -> Session:
     session = await service.sessions.get(hash_session_id(raw_value))
     now = service.clock.now()
     if session is None or session.is_expired(now):
+        # A cookie we do not know, or one past its time; none at all is only "signed out".
+        metrics.count_security_event("session_rejected")
         raise ApiError(401, "no_session")
 
     refreshed = session.touch(now, service.settings.session_ttl)
@@ -170,8 +173,10 @@ def enforce_csrf(request: Request) -> JSONResponse | None:
     if request.method in _SAFE_METHODS:
         return None
     if request.headers.get("x-requested-with") != _REQUESTED_WITH:
+        metrics.count_security_event("csrf_rejected")
         return api_error_response(ApiError(403, "csrf"))
     origin = request.headers.get("origin")
     if origin != services(request).settings.app_origin:
+        metrics.count_security_event("csrf_rejected")
         return api_error_response(ApiError(403, "csrf"))
     return None

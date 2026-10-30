@@ -14,20 +14,25 @@ reads a missing series as "not firing", so "No throughput" could never fire afte
 restart with no traffic. The sampled queue gauges are the exception: they exist only
 while the last sample succeeded, so a stale value never looks current.
 
-The metrics later phases record (LLM calls, forge rate limit, security events, steps,
-the canary) are added with their instrumentation: a counter exported at 0 before
-anything increments it would read as "nothing happened" rather than "not measured".
+The metrics later phases record (the LLM cost, the canary) are added with their
+instrumentation: a counter exported at 0 before anything increments it would
+read as "nothing happened" rather than "not measured".
 """
 
 import logging
+import threading
+import time
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 
 import prometheus_client
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 from prometheus_client.core import GaugeMetricFamily, Metric
 
 from domain.alerts import DropReason
-from domain.ports import QueueSnapshot, ReviewJobStatus
+from domain.models import Severity
+from domain.ports import PeriodicTaskRun, QueueSnapshot, ReviewJobStatus
 
 API_PORT = 9100
 WORKER_PORT = 9101
@@ -93,14 +98,30 @@ ALERT_RELAY_DROPPED = Counter(
 )
 
 
+#: The refusal paths the auth tests treat as attacks or probes (docs/observability.md §
+#: Metrics): a forged OAuth state, a cross-site request, a session cookie we do not
+#: know, and a 404 for an id in the path (enumeration).
+SECURITY_KINDS = ("oauth_state_mismatch", "csrf_rejected", "session_rejected", "id_not_found")
+SECURITY_EVENTS = Counter(
+    "security_events_total",
+    "Requests refused on a security path, by kind.",
+    ["kind"],
+    registry=API_REGISTRY,
+)
+
+
 class QueueGauges:
-    """``queue_jobs`` and ``queue_oldest_claimable_age_seconds`` from the DB sampler's
-    last successful sample, and nothing at all after a failed one."""
+    """The DB sampler's gauges from its last successful sample, and nothing at all after
+    a failed one: ``queue_jobs`` and ``queue_oldest_claimable_age_seconds`` from
+    ``snapshot``, the periodic tasks' last success and interval from ``periodic`` (read
+    separately, so one failing leaves the other)."""
 
     def __init__(self) -> None:
         self.snapshot: QueueSnapshot | None = None
+        self.periodic: tuple[PeriodicTaskRun, ...] | None = None
 
     def collect(self) -> Iterator[Metric]:
+        yield from self._periodic_gauges()
         snapshot = self.snapshot
         if snapshot is None:
             return
@@ -115,6 +136,28 @@ class QueueGauges:
             "Age of the oldest job that could be claimed now, from its next_attempt_at.",
             value=snapshot.oldest_claimable_age_seconds,
         )
+
+    def _periodic_gauges(self) -> Iterator[Metric]:
+        # A timestamp gauge is absent until there is a real value: 0 would read as "last
+        # success in 1970" (§ Metrics), so a task with no row yet has no series.
+        runs = self.periodic
+        if not runs:
+            return
+        last = GaugeMetricFamily(
+            "periodic_task_last_success_timestamp",
+            "When each periodic task last succeeded, epoch seconds (DB sampler).",
+            labels=["task"],
+        )
+        interval = GaugeMetricFamily(
+            "periodic_task_interval_seconds",
+            "Each periodic task's configured interval (DB sampler).",
+            labels=["task"],
+        )
+        for run in runs:
+            last.add_metric([run.task], run.last_success_at.timestamp())
+            interval.add_metric([run.task], run.interval_seconds)
+        yield last
+        yield interval
 
 
 QUEUE_GAUGES = QueueGauges()
@@ -147,6 +190,122 @@ WORKER_IN_FLIGHT = Gauge(
     "Jobs this worker process is running now.",
     registry=WORKER_REGISTRY,
 )
+#: Step outcomes as the pr_review_steps rows record them.
+STEP_OUTCOMES = ("OK", "FAILED")
+LEASE_EXPIRIES = Counter(
+    "lease_expiries_total",
+    "Leases the reaper took back: a worker died, or a review outlived its lease.",
+    registry=WORKER_REGISTRY,
+)
+REVIEW_STEP_DURATION = Histogram(
+    "review_step_duration_seconds",
+    "Duration of each recorded pipeline step, by step and outcome (OK or FAILED).",
+    ["step", "outcome"],
+    # A claim takes milliseconds, an LLM call minutes.
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600),
+    registry=WORKER_REGISTRY,
+)
+#: The worker's Postgres calls per job, named like job.store.failed's ``stage``.
+DB_OPERATIONS = (
+    "claim",
+    "extend_lease",
+    "posted_fingerprints",
+    "record_findings",
+    "complete",
+    "fail",
+    "get",
+)
+WORKER_DB_DURATION = Histogram(
+    "worker_db_duration_seconds",
+    "The worker's Postgres calls by operation, failed calls included.",
+    ["operation"],
+    buckets=(0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
+    registry=WORKER_REGISTRY,
+)
+FINDINGS_POSTED = Counter(
+    "findings_posted_total",
+    "Findings the forge accepted, inline or in the review body, by severity.",
+    ["severity"],
+    registry=WORKER_REGISTRY,
+)
+
+
+class RateLimitGauge:
+    """``forge_rate_limit_remaining_ratio``: per provider, the lowest
+    remaining / limit seen in the last ``window`` seconds, across installations (a GitHub
+    rate limit is per installation token). Absent without a sample in the window, so an
+    idle process says nothing rather than "plenty left". Fed from the event loop, read
+    by the metrics thread, hence the lock."""
+
+    def __init__(self, window: float = 300.0, clock: Callable[[], float] = time.monotonic):
+        self._window = window
+        self._clock = clock
+        self._samples: dict[str, deque[tuple[float, float]]] = {}
+        self._lock = threading.Lock()
+
+    def observe(self, provider: str, remaining: int, limit: int) -> None:
+        with self._lock:
+            self._samples.setdefault(provider, deque()).append((self._clock(), remaining / limit))
+
+    def lowest(self) -> dict[str, float]:
+        cutoff = self._clock() - self._window
+        with self._lock:
+            for samples in self._samples.values():
+                while samples and samples[0][0] < cutoff:
+                    samples.popleft()
+            return {p: min(r for _, r in s) for p, s in self._samples.items() if s}
+
+    def collect(self) -> Iterator[Metric]:
+        lowest = self.lowest()
+        if not lowest:
+            return
+        gauge = GaugeMetricFamily(
+            "forge_rate_limit_remaining_ratio",
+            "Lowest X-RateLimit-Remaining / X-RateLimit-Limit seen in the last 5 min.",
+            labels=["provider"],
+        )
+        for provider, ratio in sorted(lowest.items()):
+            gauge.add_metric([provider], ratio)
+        yield gauge
+
+
+# Both processes call the forge: the API lists repositories, the worker fetches diffs
+# and posts reviews. Each process serves its own registry, so the gauge is in both.
+FORGE_RATE_LIMIT = RateLimitGauge()
+API_REGISTRY.register(FORGE_RATE_LIMIT)
+WORKER_REGISTRY.register(FORGE_RATE_LIMIT)
+
+# The LLM gateway (adapters/llm/), in the worker. One request is one HTTP call: a key
+# rotation retries with the next key, so it counts twice.
+LLM_PURPOSES = ("review", "correction", "summary", "rule_screen", "verify")
+LLM_OUTCOMES = ("ok", "rate_limited", "key_rejected", "error")
+TOKEN_DIRECTIONS = ("input", "output")
+LLM_REQUESTS = Counter(
+    "llm_requests_total",
+    "LLM requests by provider, model, purpose and outcome; one per HTTP request.",
+    ["provider", "model", "purpose", "outcome"],
+    registry=WORKER_REGISTRY,
+)
+LLM_TOKENS = Counter(
+    "llm_tokens_total",
+    "LLM tokens as each provider reported them, by direction (input or output).",
+    ["provider", "model", "purpose", "direction"],
+    registry=WORKER_REGISTRY,
+)
+LLM_KEY_ROTATIONS = Counter(
+    "llm_key_rotations_total",
+    "API keys set aside: cooled down after a 429, or disabled after a 401 or 403.",
+    ["provider"],
+    registry=WORKER_REGISTRY,
+)
+LLM_REQUEST_DURATION = Histogram(
+    "llm_request_duration_seconds",
+    "Request to reply per LLM HTTP request that got one; failures are in llm_requests_total.",
+    ["provider", "model", "purpose"],
+    # LLM_TIMEOUT_SECONDS is 300 in production.
+    buckets=(0.5, 1, 2.5, 5, 10, 20, 30, 60, 90, 120, 180, 300),
+    registry=WORKER_REGISTRY,
+)
 
 
 # --- initialisation ----------------------------------------------------------------
@@ -169,11 +328,21 @@ def init_api_metrics(
             WEBHOOK_DELIVERIES.labels(provider, outcome)
     for reason in DropReason:
         ALERT_RELAY_DROPPED.labels(reason.value)
+    for kind in SECURITY_KINDS:
+        SECURITY_EVENTS.labels(kind)
 
 
-def init_worker_metrics(error_kinds: Mapping[str, bool]) -> None:
+def init_worker_metrics(error_kinds: Mapping[str, bool], *, steps: Iterable[str] = ()) -> None:
     """Start the job series at 0: COMPLETED, FAILED with every error kind, RETRYING with
-    every retryable one (``error_kinds`` maps each kind to whether it is retried)."""
+    every retryable one (``error_kinds`` maps each kind to whether it is retried), and
+    each step the worker records by outcome; its DB calls and findings too."""
+    for step in steps:
+        for outcome in STEP_OUTCOMES:
+            REVIEW_STEP_DURATION.labels(step, outcome)
+    for operation in DB_OPERATIONS:
+        WORKER_DB_DURATION.labels(operation)
+    for severity in Severity:
+        FINDINGS_POSTED.labels(severity.value)
     JOBS_FINISHED.labels(ReviewJobStatus.COMPLETED.value, "")
     for kind, retryable in error_kinds.items():
         JOBS_FINISHED.labels(ReviewJobStatus.FAILED.value, kind)
@@ -181,6 +350,22 @@ def init_worker_metrics(error_kinds: Mapping[str, bool]) -> None:
             JOBS_FINISHED.labels(ReviewJobStatus.RETRYING.value, kind)
     for status in (ReviewJobStatus.COMPLETED, ReviewJobStatus.FAILED):
         REVIEW_DURATION.labels(status.value)
+
+
+def init_llm_metrics(
+    callers: Iterable[tuple[str, str, Iterable[str], Iterable[str]]],
+) -> None:
+    """Start the LLM series at 0 for each (provider, model, purposes, outcomes) the
+    gateway can call; adapters/llm/factory.py knows them from the configuration."""
+    for provider, model, purposes, outcomes in callers:
+        LLM_KEY_ROTATIONS.labels(provider)
+        outcomes = tuple(outcomes)
+        for purpose in purposes:
+            LLM_REQUEST_DURATION.labels(provider, model, purpose)
+            for outcome in outcomes:
+                LLM_REQUESTS.labels(provider, model, purpose, outcome)
+            for direction in TOKEN_DIRECTIONS:
+                LLM_TOKENS.labels(provider, model, purpose, direction)
 
 
 # --- recording ---------------------------------------------------------------------
@@ -208,12 +393,64 @@ def record_job(
         REVIEW_DURATION.labels(status.value).observe(review_seconds)
 
 
+def count_security_event(kind: str) -> None:
+    SECURITY_EVENTS.labels(kind).inc()
+
+
 def count_relay_drop(reason: DropReason) -> None:
     ALERT_RELAY_DROPPED.labels(reason.value).inc()
 
 
 def count_relay_failure() -> None:
     ALERT_RELAY_FAILURES.inc()
+
+
+def count_llm_request(provider: str, model: str, purpose: str, outcome: str) -> None:
+    LLM_REQUESTS.labels(provider, model, purpose, outcome).inc()
+
+
+def observe_llm_latency(provider: str, model: str, purpose: str, seconds: float) -> None:
+    LLM_REQUEST_DURATION.labels(provider, model, purpose).observe(seconds)
+
+
+def count_llm_tokens(
+    provider: str, model: str, purpose: str, *, input_tokens: object, output_tokens: object
+) -> None:
+    """The provider's own counts; anything not a non-negative int is skipped."""
+    for direction, tokens in (("input", input_tokens), ("output", output_tokens)):
+        if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0:
+            LLM_TOKENS.labels(provider, model, purpose, direction).inc(tokens)
+
+
+def observe_rate_limit(provider: str, remaining: int, limit: int) -> None:
+    FORGE_RATE_LIMIT.observe(provider, remaining, limit)
+
+
+def count_key_rotation(provider: str) -> None:
+    LLM_KEY_ROTATIONS.labels(provider).inc()
+
+
+def count_lease_expiries(reaped: int) -> None:
+    LEASE_EXPIRIES.inc(reaped)
+
+
+def observe_step(step: str, outcome: str, seconds: float) -> None:
+    REVIEW_STEP_DURATION.labels(step, outcome).observe(seconds)
+
+
+@contextmanager
+def timed_db(operation: str) -> Iterator[None]:
+    """Time one of the worker's Postgres calls (``DB_OPERATIONS``), raising or not."""
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        WORKER_DB_DURATION.labels(operation).observe(time.monotonic() - started)
+
+
+def count_findings_posted(severities: Iterable[str]) -> None:
+    for severity in severities:
+        FINDINGS_POSTED.labels(severity).inc()
 
 
 def observe_claim_latency(seconds: float) -> None:

@@ -12,13 +12,15 @@ this link.
   - `docker compose logs --since 30m <service>` shows recent logs.
   - The rotated JSON logs are in `logs/api.jsonl` and `logs/worker.jsonl`.
 - **In Grafana:** the dashboards are in the DMC-268 folder. In Explore → Loki,
-  `{service="api"} | json | level="error"` finds the API's errors.
+  `{service="api"} | json | level="error"` finds the API's errors. Caddy's and Postgres's
+  lines are there too, `{service="caddy", level="error"}` or `{service="postgres"}`, and
+  outlive a recreated container, whose `docker compose logs` start empty.
 - **To silence** an alert for planned work: Grafana → Alerting → Silences → New silence.
   Match `alertname` (and `domain` if the name is shared, as with Target down), set a
   duration and a comment. Prefer a silence to pausing a rule: a silence expires on its
   own.
 - **Owners:** `owner` is `unassigned` until the team assigns one person per domain
-  (tasks/observability-checklist.md).
+  (docs/tasks/observability-checklist.md).
 
 ## Target down
 

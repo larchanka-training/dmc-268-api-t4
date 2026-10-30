@@ -23,6 +23,7 @@ from sqlalchemy.pool import NullPool
 
 from adapters.db.dsn import to_asyncpg
 from adapters.db.repository import PostgresJobStore
+from adapters.observability import metrics
 from domain.jobs import DEFAULT_MAX_RETRIES
 from domain.ports import JobStats, NewReviewJob, ReviewJobStatus
 from tests.db.support import (
@@ -83,7 +84,7 @@ def engine(worker_db: tuple[str, str]) -> Iterator[AsyncEngine]:
 def store(engine: AsyncEngine) -> PostgresJobStore:
     async def truncate() -> None:
         async with engine.begin() as conn:
-            await conn.execute(text("TRUNCATE TABLE pr_review_jobs CASCADE"))
+            await conn.execute(text("TRUNCATE TABLE pr_review_jobs, periodic_task_runs CASCADE"))
 
     asyncio.run(truncate())
     return PostgresJobStore(engine)
@@ -223,11 +224,27 @@ async def test_reap_tick_reaps_only_when_it_wins_the_lock(
     finally:
         await holder.close()
 
-    assert await reap_tick(store, TASK_KEYS["reaper"], dsn) == 1
+    expiries = metrics.WORKER_REGISTRY.get_sample_value("lease_expiries_total") or 0.0
+    assert await reap_tick(store, TASK_KEYS["reaper"], dsn, interval=30) == 1
     stored = await _get(store, job_id)
     assert stored.status is ReviewJobStatus.RETRYING
     assert stored.retry_count == 1
     assert stored.error_kind == "lease_expired"
+    # The leader counts what it reaped and records its success for "Periodic task stale".
+    assert metrics.WORKER_REGISTRY.get_sample_value("lease_expiries_total") == expiries + 1
+    [run] = await store.periodic_runs()
+    assert (run.task, run.interval_seconds) == ("reaper", 30.0)
+
+
+async def test_a_skipped_tick_records_no_success(store: PostgresJobStore, dsn: str) -> None:
+    holder = await asyncpg.connect(dsn)
+    try:
+        assert await holder.fetchval("SELECT pg_try_advisory_lock($1)", TASK_KEYS["reaper"])
+        assert await reap_tick(store, TASK_KEYS["reaper"], dsn) is None
+    finally:
+        await holder.close()
+
+    assert await store.periodic_runs() == ()
 
 
 async def test_reap_tick_uses_the_injected_connection_factory(

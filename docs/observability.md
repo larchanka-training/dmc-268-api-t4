@@ -31,6 +31,12 @@ model responses, in any log line, span, metric label or alert.
 6. One trace covers webhook → enqueue → claimed → fetch diff → LLM call → post feedback,
    the steps the worker records today (the others join the trace as they land), and the
    throughput alert fires in a drill (Build order phase 8 in the architecture doc).
+7. One dashboard (Overview) shows LLM latency, queue depth and RPS; Pipeline times each
+   stage, diff (`FETCH_DIFF`) → context (`BUILD_CONTEXT`) → LLM (`LLM_CALL`) → DB (the
+   worker's Postgres calls), and the alerts reach Telegram.
+8. Caddy's and Postgres's logs reach Loki next to the app's.
+9. Postgres is backed up on a schedule (⚠️ not built: where the off-server copy goes is
+   § Open questions, item 4).
 
 ---
 
@@ -129,7 +135,7 @@ of `/opt/dmc268/logs`). Produced by `structlog` on top of stdlib `logging`, so e
 | `request_id` | API requests | middleware; echoed as `X-Request-ID` |
 | `delivery_id` | webhooks | `X-GitHub-Delivery` / GitLab event UUID |
 | `job_id`, `installation_id`, `repo_id`, `pr_number`, `head_sha`, `attempt`; `account_id` once tenancy lands | review context | bound once per job via `contextvars`. Jobs carry no `account_id` yet (`adapters/db/models.py:197`), so `installation_id` is the tenant key until then |
-| `step`, `outcome`, `duration_ms` | `step` on `job.step_record.failed`; `outcome` on `job.finished` and `job.skipped_check_run`; `duration_ms` on every event that times something | the step helper; the worker at the terminal transition |
+| `step`, `outcome`, `duration_ms` | `step` on `job.step_record.failed` and `step.finished`; `outcome` on `job.finished`, `job.skipped_check_run` and `step.finished`; `duration_ms` on every event that times something | the step helper; the worker at the terminal transition |
 | `error_kind`, `error_type` | errors | `_classify` in `worker/process.py` (the closed vocabulary of [PIPELINE_SPEC.md §4.2](./PIPELINE_SPEC.md); the reaper adds `lease_expired`); exception class name |
 | `result`, `reason`, `user_id`, `organizations`, `had_session` | sign-in events | passed as `extra={…}` in `api/auth.py` and `api/github_setup.py`; lifted into the line by structlog's `ExtraAdder` |
 | `http.method`, `http.route`, `http.status`, `duration_ms` | access log | middleware (replaces uvicorn's access log) |
@@ -189,6 +195,7 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `job.store.failed` | error | A store call failed while recording the outcome | `job_id`, `provider`, `repo`, `pr_number`, `stage` (`complete`, `fail`, `get`), `error_kind`, `error_type`, `duration_ms` |
 | `job.skipped_check_run` | info when published; warning when posting failed | The PR is over the input budget: the "skipped" check run says why no review appears | `job_id`, `provider`, `repo`, `pr_number`, `input_tokens` (the estimate), `max_input_tokens`, `outcome` (`published`, `failed`); `error_type` when failed |
 | `job.step_record.failed` | error | Writing a `pr_review_steps` row failed; the job goes on | `job_id`, `step`, `error_type` |
+| `step.finished` | info | A pipeline step ended (the `Observer`, `adapters/observability/observer.py`), with its row, span and `review_step_duration_seconds` | `job_id`, `step`, `outcome` (`OK`, `FAILED`), `duration_ms`; `error_kind` when failed |
 | `job.findings.not_kept` | error | Findings were posted but not stored | `job_id`, `provider`, `repo`, `pr_number`, `findings`, `error_type` |
 | `github.token.minted` | info | An installation token was minted | `provider`, `installation_id` |
 | `github.pull_request.fetched` | info | PR detail, commits and diff fetched | `provider`, `installation_id`, `repo`, `pr_number`, `sha`, `commits`, `dropped_commits`, `diff_bytes`, `duration_ms` |
@@ -231,7 +238,6 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `sentry.enabled` | info | Sentry is initialised | — |
 | `sentry.disabled` | info | No `SENTRY_DSN`: Sentry is off | — |
 
-Planned, with the phase that adds them: `step.finished` (phase 5, the `Observer`).
 
 ### What is never logged
 
@@ -244,6 +250,11 @@ review:
 
 - **Allowlist processor.** Unknown top-level keys are dropped in production (kept in
   `local`).
+- **Caddy's query strings are cut in Alloy.** Caddy's error log carries the request, and
+  on `/api/auth/callback` the query holds the OAuth code. `config.alloy` replaces every
+  `?query` in a Caddy line with `?redacted` before it leaves the VPS (Caddy itself redacts
+  `Cookie` and `Authorization`); the lab checks it with the API stopped. Caddy writes no
+  access log: one would need the same cut.
 - **Our loggers: `event` is the format string, never the formatted message.** For every
   stdlib record not on the third-party list below, the processor takes `record.msg`
   (`"provider=%s reply rejected (%s)"`), not `record.getMessage()`, and drops
@@ -395,21 +406,23 @@ DB sampler and `llm_daily_budget_usd` in one process only.
 | `queue_oldest_claimable_age_seconds` | gauge | — | Age of the oldest job that could be claimed now: `QUEUED`, or `RETRYING` with `next_attempt_at <= now()`, measured from `next_attempt_at` (the partial index `ix_pr_review_jobs_claim` serves it). A job in its retry backoff is not backlog (DB sampler) |
 | `job_claim_latency_seconds` | histogram | — | Claimable → claim (from `next_attempt_at`, so a retry's backoff does not count); a wedged worker |
 | `review_step_duration_seconds` | histogram | `step`, `outcome` | Where review time goes |
+| `worker_db_duration_seconds` | histogram | `operation` (`claim`, `extend_lease`, `posted_fingerprints`, `record_findings`, `complete`, `fail`, `get`) | The pipeline's DB stage: the worker's Postgres calls per job, failed ones included. An empty claim counts too. Which statement is slow: `pg_stat_statements` |
 | `review_duration_seconds` | histogram | `status` | **Enqueue → terminal status** per job, so queue wait counts. Buckets include 60, 120, 300, 600 and 900 s, so the latency SLO threshold sits on a bucket edge |
 | `jobs_finished_total` | counter | `status` (`COMPLETED`, `FAILED`, `RETRYING`: one per attempt), `error_kind` (empty when completed) | Forge outage vs bug |
 | `lease_expiries_total` | counter | — | Counted from the reaper's result. A worker died, or a review outlived its 600 s lease: the lease is renewed only before `LLM_CALL` and `POST_FEEDBACK`, and `LLM_CALL` can take 2 × 300 s plus the rule screen and verifier. BACKEND_ARCHITECTURE.md reads non-zero as "workers are dying" only |
-| `llm_requests_total` | counter | `provider`, `model`, `purpose`, `outcome` | Provider failures, fallbacks. `purpose` is `review`, `correction`, `rule_screen` or `verify`: one review makes several calls |
+| `llm_requests_total` | counter | `provider`, `model`, `purpose`, `outcome` | Provider failures, fallbacks. One per HTTP request, so a key rotation counts twice. `purpose` is `review`, `correction`, `summary` (the per-file mode's summary call), `rule_screen` or `verify`: one review makes several calls. `outcome` is `ok`, `rate_limited` (429, key cooled down), `key_rejected` (401/403, key disabled) or `error`; TypeSafe's (`provider="typesafe"`) are `ok` or `error` |
 | `llm_tokens_total` | counter | `provider`, `model`, `purpose`, `direction` | The bill, before it arrives |
+| `llm_request_duration_seconds` | histogram | `provider`, `model`, `purpose` | Request to reply, per HTTP request that got one. Failures are only counted (`llm_requests_total`): a 429 takes milliseconds and would pull the latency down, and a timeout is `LLM_TIMEOUT_SECONDS` by definition |
 | `llm_key_rotations_total` | counter | `provider` | 429 pressure |
 | `llm_cost_usd_total` | counter | `provider`, `model`, `purpose`, `direction` | The bill in money, the TypeSafe rule screen and verifier included: tokens × a price table from config (`llm_prices`), so a price change is a config change, not a deploy |
 | `llm_daily_budget_usd` | gauge | — | `llm_daily_budget_usd` from config, exported so the spend alert can compare against it: PromQL cannot read app config. Exported by the API only: the rule uses `scalar()`, which returns NaN, and so never fires, if two processes export the series |
-| `forge_rate_limit_remaining_ratio` | gauge | `provider` | The lowest `X-RateLimit-Remaining / X-RateLimit-Limit` seen across installations in the last 5 min. One value, no installation label |
+| `forge_rate_limit_remaining_ratio` | gauge | `provider` | The lowest `X-RateLimit-Remaining / X-RateLimit-Limit` seen across installations in the last 5 min, from an httpx response hook on every App and installation client. The `core` resource only (search has a budget of its own). One value, no installation label; absent without a call in the window. Exported by both processes |
 | `security_events_total` | counter | `kind` (`oauth_state_mismatch`, `csrf_rejected`, `session_rejected`, `id_not_found`) | Takeover and enumeration attempts; the auth tests treat each of these as a refusal path. `oauth_state_mismatch`: the callback's state does not match the browser's sign-in attempt (`api/auth.py`). `csrf_rejected`: a 403 `csrf` from `enforce_csrf` (`api/deps.py`). `session_rejected`: a 401 `no_session`, which every tab polling after its session expired also produces, so it is on the dashboard but not in the alert. There is no password login, so no `login_failed`; a cancelled sign-in (`access_denied`) is not an attack, and an identity-provider failure (`server_error`) is an error log. `id_not_found` is a `404` for an id in the path of an authenticated route. Tenant scoping lives in the repository layer, so another account's id looks exactly like a missing one; telling them apart would take the unscoped lookup scoping exists to prevent. A real leak would be a *success*, which no counter sees; the deliberate cross-tenant test guards that ([BACKEND_ARCHITECTURE.md § Testing strategy](./BACKEND_ARCHITECTURE.md)) |
 | `alert_relay_failures_total` | counter | — | Sentry alerts not reaching Telegram; alerted from Grafana, never from Sentry |
 | `alert_relay_dropped_total` | counter | `reason` (`stale`, `duplicate`, `rate_limited`) | Alerts the relay chose not to forward; a `stale` count means Sentry delivers late |
 | `canary_review_last_success_timestamp` | gauge | — | Newest `finished_at` of a `COMPLETED` job for `CANARY_REPO_ID` (DB sampler); see § Synthetic checks |
-| `secrets_redacted_total` | counter | `rule` | A spike is worth telling the customer |
-| `findings_posted_total` | counter | `severity` | Model behaviour drift |
+| `secrets_redacted_total` | counter | `rule` | A spike is worth telling the customer. ⚠️ Not exported yet: it belongs to the `REDACT` step, and the diff is not redacted before the LLM call yet |
+| `findings_posted_total` | counter | `severity` | Model behaviour drift. Findings the forge accepted, inline or in the review body |
 | `worker_in_flight` | gauge | — | Concurrency actually used vs `worker_concurrency` |
 | `periodic_task_last_success_timestamp` | gauge | `task` | The periodic tasks are alive: the reaper (every 30 s, the only one today), then the grace sweep and purge as they land (DB sampler, from `periodic_task_runs`) |
 | `periodic_task_interval_seconds` | gauge | `task` | Each task's configured interval, exported by the DB sampler next to the timestamp (same target, so the two match label for label) so "Periodic task stale" can compute `2 × interval + 180 s` |
@@ -426,9 +439,10 @@ Postgres:
   after every restart, so `time() - gauge` is huge and every staleness alert fires after
   every deploy; worse, a gauge re-initialised to "now" on start would hide a broken daily
   purge forever if deploys come more often than every two days (`2 × interval`). Postgres
-  keeps the real value. Periodic tasks have no row to read today, so the worker upserts
-  `periodic_task_runs (task, last_success_at)` after each success (⚠️ not in
-  [db_models_and_migrations.md](./db_models_and_migrations.md) yet).
+  keeps the real value: the leader worker upserts `periodic_task_runs (task,
+  last_success_at, interval_seconds)` after each successful tick (migration 0005,
+  [db_models_and_migrations.md](./db_models_and_migrations.md)), and the sampler reads it
+  on its own, so a failure there leaves the queue gauges.
 
 **A failed sample clears its gauges.** If a query fails, the sampler removes the gauges it
 sets instead of leaving the last value, so a stale number never looks current; Postgres
@@ -443,6 +457,7 @@ being down is reported by "Target down" (`pg_up == 0`).
 | `prometheus.exporter.postgres` | Connections vs `max_connections`, locks, database and table size (`pr_review_jobs` growth), dead tuples and last autovacuum on `pr_review_jobs` (a `SKIP LOCKED` queue churns rows and bloats), top statements from `pg_stat_statements` |
 | Caddy | Requests and 5xx at the edge, including the `502`s Caddy returns while the API is down, which the app never sees. Served by a `metrics` site block on an internal port (`:2020`), never by Caddy's admin API, which can rewrite the config; turned on by the global `metrics` option (Caddy 2.11 deprecates `servers { metrics }`) |
 | Alloy self-metrics | WAL size, failed remote writes: the monitoring of the monitoring |
+| Container logs (`loki.source.docker`) | Caddy's and Postgres's stderr, which never reach `./logs`: Caddy's TLS, config and proxy errors (a `502` while the API is down), Postgres's errors, checkpoints and failed connections. Only this compose project's `caddy` and `postgres` (Alloy gets the project name as `COMPOSE_PROJECT`); the api and worker come from their files, so their stdout would arrive twice. Same labels as the app's lines: `service`, and `level` in the app's words (Caddy's `warn` is `warning`, Postgres's `LOG` is `info`, `FATAL` and `PANIC` are `critical`; a `DETAIL` or `STATEMENT` continuation line has none). Caddy's query strings are cut (§ What is never logged). No file fallback: Docker's `json-file` is their only copy on the VPS. No dashboard: Explore, `{service="caddy"}` |
 
 `pg_stat_statements` needs `shared_preload_libraries` in the Postgres container command
 and `CREATE EXTENSION` in a migration. The exporter connects as a dedicated role with
@@ -510,8 +525,8 @@ are copied into every log line.
 review.job                         (root, worker; continues the webhook's trace)
 ├── claimed                        queue_wait_ms
 ├── auth                           (planned; today inside fetch_diff) token_source, cache_hit
-├── fetch_diff                     files, bytes, pages
-├── build_context                  (planned) files, context_bytes, truncated
+├── fetch_diff                     bytes
+├── build_context                  files, reviewable, skipped, chunks (parse and filter)
 ├── redact                         (planned) rules_fired, ruleset_version
 ├── gate                           (planned) result (proceed | superseded | quota | cancelled)
 ├── llm_call                       model, input_tokens, output_tokens, retries
@@ -519,15 +534,15 @@ review.job                         (root, worker; continues the webhook's trace)
 │   ├── llm.attempt                one per request: provider, model, purpose (review | correction), outcome
 │   │   └── http.client POST …     (httpx, automatic)
 │   └── llm.verify                 findings_in, findings_rejected, outcome (TypeSafe)
-├── postprocess                    (planned) findings_total, findings_new, severity histogram
+├── postprocess                    findings_total, already_posted (the plan: dedup against posted findings)
 ├── post_feedback                  comments_posted, check_run_updated
 └── meter                          (planned) tokens_billed; db spans (automatic)
 ```
 
 The span names are the `pr_review_steps` stages from
 [WORKFLOW_DESIGN.md §2](./WORKFLOW_DESIGN.md), lower-cased; attributes are the same
-"shape, never content" set that table stores. The worker records four of the ten today
-(`CLAIMED`, `FETCH_DIFF`, `LLM_CALL`, `POST_FEEDBACK`); the rest are already in `JobStep`
+"shape, never content" set that table stores. The worker records six of the ten today
+(`CLAIMED`, `FETCH_DIFF`, `BUILD_CONTEXT`, `LLM_CALL`, `POSTPROCESS`, `POST_FEEDBACK`); the rest are already in `JobStep`
 and the `ck_pr_review_steps_step` constraint, and join the trace as they are built.
 
 One helper produces all four signals, so they cannot drift: the step row, the span, the
@@ -557,9 +572,9 @@ recording fake.
 
 **Webhook → worker in one trace.** The enqueue transaction stores the current
 `sentry-trace` and `baggage` headers in a `trace_context` column on `pr_review_jobs`; the
-worker continues from it on claim. The column is to be added in
-[db_models_and_migrations.md](./db_models_and_migrations.md), the one place columns are
-listed (⚠️ not there yet).
+worker continues from it on claim (migration 0004,
+[db_models_and_migrations.md](./db_models_and_migrations.md)). So a review's log lines
+carry the webhook's `trace_id`, and Loki finds both sides with one query.
 
 ### Frontend
 
@@ -600,9 +615,9 @@ and in the lab; panels on metrics a later phase adds show "No data" until then.
 
 | Dashboard | Panels |
 | :--- | :--- |
-| **Overview** | RPS, error rate, p95 latency, queue depth, oldest claimable age, jobs finished by status, LLM cost/day, SLO error budget remaining (phase 6), external probe status, firing alerts |
+| **Overview** | RPS, error rate, p95 latency, queue depth, oldest claimable age, jobs finished by status, LLM latency p95, LLM cost/day, SLO error budget remaining (phase 6), external probe status, firing alerts |
 | **API** | RPS and latency per route, status classes, webhook outcomes per provider, Caddy 5xx at the edge, security events by kind |
-| **Pipeline** | Review duration p50/p95, step duration stacked by `step`, claim latency, `error_kind` breakdown, LLM outcome per provider, LLM tokens and cost per model, forge rate-limit headroom, findings posted, secrets redacted, last canary review |
+| **Pipeline** | Review duration p50/p95, step duration stacked by `step`, LLM latency p50/p95 by provider, worker DB calls p95 by operation, claim latency, `error_kind` breakdown, LLM outcome per provider, LLM tokens and cost per model, forge rate-limit headroom, findings posted, secrets redacted, last canary review |
 | **Infrastructure** | Host CPU/RAM/disk and OOM kills, container CPU/RAM/restarts, Postgres connections, table sizes, dead tuples and top statements, TLS certificate expiry, Alloy WAL health |
 
 Every dashboard shows **deploy annotations**: `deploy.yml` posts one to the Grafana
@@ -715,10 +730,14 @@ no-data state. Three consequences:
 `monitoring`, `business`). The notification policy groups by `domain` (group wait 30 s,
 group interval 5 min, repeat 4 h), so alerts that do fire together arrive as one message.
 
-The files are Prometheus-format, and `sync.py` imports them through Grafana's import API
-(`/api/convert/prometheus/config/v1/rules`), which turns them into Grafana-managed rules
-that keep Prometheus semantics: no data is *OK* (shown as "Normal (NoData)") on every
-rule. The roots need no *Alerting* no-data state, because the silence they cover has an
+The files are Prometheus-format, and `sync.py` writes them to Grafana as Grafana-managed
+rules through the alerting provisioning API (`/api/v1/provisioning`), in the form
+Grafana's own import of Prometheus rules produces: the expression as an instant query
+evaluated a minute in the past (Alloy pushes once a minute), a math step that makes every
+returned series 1, and a threshold above 0. They keep Prometheus semantics: one alert
+per returned series, and no data is *OK* (shown as "Normal (NoData)") on every rule. The
+import API itself (`/api/convert/prometheus/config/v1/rules`) is not served by Grafana
+Cloud: it answered 404 on 2026-10-30. The roots need no *Alerting* no-data state, because the silence they cover has an
 explicit rule of its own: "Telemetry missing" is itself an absent-series rule.
 
 **Every rule carries `runbook_url` and `owner`.** `runbook_url` points to a section of
@@ -767,11 +786,10 @@ by its root. Every condition is a metric (there are no Loki-based rules), so eve
 testable. A pytest test (`tests/ops/test_observability_rules.py`) holds the files to this
 table: one rule per row, each with `domain`, `severity`, `owner` and a `runbook_url`
 whose section exists. "Target down" is three rules sharing the name, one per process and
-domain. The SLO burn alerts come with the SLOs (phase 6). Routing: the import makes the
-rules Grafana-managed, so the notification policy sends them to `telegram`. That path
-was verified against Grafana 13.2 in the lab (`deploy/lab/`, where a stopped worker
-fires "Target down"); ⚠️ the checklist's "Rule routing check" confirms it in Grafana
-Cloud.
+domain. The SLO burn alerts come with the SLOs (phase 6). Routing: the rules are
+Grafana-managed, so the notification policy sends them to `telegram`. That path was
+verified against Grafana 13.2 in the lab (`deploy/lab/`, where a stopped worker fires
+"Target down"); ⚠️ the checklist's "Rule routing check" confirms it in Grafana Cloud.
 
 ### Synthetic checks
 
@@ -1096,6 +1114,25 @@ adds no new category of data leaving the box. It is not part of this plan's DoD.
    counts them in `webhook_redeliveries_total`, which joins the ingest SLO's denominator
    so an outage counts against it. It changes ingest behaviour, so it is decided
    in [WORKFLOW_DESIGN.md](./WORKFLOW_DESIGN.md) first.
+3. **A PR too large to review: an error or an expected outcome?** Today the job ends
+   `FAILED` with `skip_diff_too_large`, and `job.finished` is logged at `error` with the
+   exception, so each one is a Sentry event (`LLMInputTooLargeError`, seen in production
+   on 2026-10-29): the first triggers "New issue" (email and Telegram), a busy day of
+   large PRs can trigger "Error burst", and it counts against the "Review success" SLO
+   (phase 6). Nothing is broken, though: it is a limit, and the author already learns of
+   it from the "skipped" check run. Proposed: treat it as expected. The job stays
+   `FAILED` and in `jobs_finished_total{error_kind="skip_diff_too_large"}`, but
+   `job.finished` is logged at `warning` without the exception (no Sentry event), and the
+   SLO excludes that error kind. The cost: large PRs no longer show in Sentry, only on the
+   Pipeline dashboard ("Failures by error_kind") and in Loki.
+4. **Postgres backup: where the off-server copy goes.** Proposed: a daily encrypted
+   `pg_dump -Fc`, 7 days kept on the VPS and copied off it; a
+   `pg_backup_last_success_timestamp` gauge with a "Backup stale" alert after 26 h; a
+   scripted restore into a scratch database, run monthly, so "restore tested"
+   ([BACKEND_ARCHITECTURE.md § Deployment](./BACKEND_ARCHITECTURE.md)) is true. A copy
+   only on the VPS does not survive losing the VPS or its disk, so the destination (an
+   S3-compatible bucket, the provider's storage box, …) and its credential are the team's
+   call.
 
 **Closed:**
 

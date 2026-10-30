@@ -381,13 +381,63 @@
     },
     {
       "id": 7,
+      "type": "timeseries",
+      "title": "LLM latency p95",
+      "description": "Request to reply, per HTTP request to the review model that got one; TypeSafe's rule screen and verifier excluded. By provider on Pipeline.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "fillOpacity": 0
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(llm_request_duration_seconds_bucket{provider!=\"typesafe\"}[1h])))",
+          "legendFormat": "p95"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 8,
       "type": "stat",
       "title": "LLM cost, last 24 h",
-      "description": "From phase 5.",
+      "description": "No data until the team decides the LLM prices (todo step 48).",
       "gridPos": {
         "h": 6,
         "w": 8,
-        "x": 0,
+        "x": 8,
         "y": 16
       },
       "datasource": {
@@ -424,14 +474,14 @@
       }
     },
     {
-      "id": 8,
+      "id": 9,
       "type": "stat",
       "title": "External probe",
       "description": "Grafana Synthetic Monitoring, every 2 minutes from three EU locations.",
       "gridPos": {
         "h": 6,
         "w": 8,
-        "x": 8,
+        "x": 16,
         "y": 16
       },
       "datasource": {
@@ -480,15 +530,15 @@
       }
     },
     {
-      "id": 9,
+      "id": 10,
       "type": "alertlist",
       "title": "Firing alerts",
       "description": "",
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 16
+        "w": 24,
+        "x": 0,
+        "y": 24
       },
       "options": {
         "viewMode": "list",

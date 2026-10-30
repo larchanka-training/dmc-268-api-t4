@@ -11,7 +11,8 @@ become the issue title and travel on to email and Telegram).
 """
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any, cast
 from urllib.parse import urlsplit
 
@@ -145,6 +146,40 @@ def init_sentry(settings: SentrySettings, *, transport: Transport | None = None)
     )
     logger.info("sentry.enabled")
     return True
+
+
+# --- the review's trace -----------------------------------------------------------
+
+#: The worker's root span per job (docs/observability.md § Review pipeline).
+JOB_TRANSACTION = "review.job"
+
+
+def current_trace_context() -> dict[str, str] | None:
+    """The active trace as propagation headers, stored with a job at enqueue so the
+    worker continues it; None when Sentry is off or no trace is active."""
+    # A client without a DSN still counts as active (sentry_sdk.init(dsn=None)) and
+    # still has a trace, but nothing it records goes anywhere.
+    if not sentry_sdk.get_client().dsn:
+        return None
+    traceparent = sentry_sdk.get_traceparent()
+    if not traceparent:
+        return None
+    context = {"sentry-trace": traceparent}
+    baggage = sentry_sdk.get_baggage()
+    if baggage:
+        context["baggage"] = baggage
+    return context
+
+
+@contextmanager
+def job_transaction(trace_context: Mapping[str, str] | None) -> Iterator[None]:
+    """The ``review.job`` transaction, continuing the enqueuing request's trace when
+    there is one, so webhook and review are one trace. A no-op with Sentry off."""
+    transaction = sentry_sdk.continue_trace(
+        dict(trace_context or {}), op="queue.task", name=JOB_TRANSACTION, source="task"
+    )
+    with sentry_sdk.start_transaction(transaction):
+        yield
 
 
 # --- helpers -------------------------------------------------------------------

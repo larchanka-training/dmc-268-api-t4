@@ -105,6 +105,8 @@ services:
       GRAFANA_CLOUD_LOKI_URL: ${GRAFANA_CLOUD_LOKI_URL:-}
       GRAFANA_CLOUD_LOKI_USER: ${GRAFANA_CLOUD_LOKI_USER:-}
       GRAFANA_CLOUD_TOKEN: ${GRAFANA_CLOUD_TOKEN:-}
+      # config.alloy ships this project's caddy and postgres logs, and no other container's.
+      COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME}
       POSTGRES_EXPORTER_PASSWORD: ${POSTGRES_EXPORTER_PASSWORD:-}
     # No ports: its UI listens on the container's loopback. Every mount is read-only but
     # the WAL. Reading the Docker and containerd sockets is root-equivalent, a deliberate

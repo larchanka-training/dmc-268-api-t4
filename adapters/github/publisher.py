@@ -25,6 +25,7 @@ import httpx
 
 from adapters.github.app_auth import GitHubAppAuth
 from adapters.github.config import PROVIDER_NAME, GitHubAppSettings
+from adapters.github.rate_limit import RATE_LIMIT_HOOKS
 from domain.errors import (
     ForgePermissionError,
     ForgeRateLimitedError,
@@ -85,6 +86,7 @@ class GitHubReviewPublisher:
                 base_url=self._settings.api_base_url,
                 timeout=self._settings.timeout_seconds,
                 transport=self._transport,
+                event_hooks=RATE_LIMIT_HOOKS,
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Accept": "application/vnd.github+json",
@@ -129,6 +131,7 @@ class GitHubReviewPublisher:
             base_url=self._settings.api_base_url,
             timeout=self._settings.timeout_seconds,
             transport=self._transport,
+            event_hooks=RATE_LIMIT_HOOKS,
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",

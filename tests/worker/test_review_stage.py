@@ -175,6 +175,8 @@ async def test_each_step_is_recorded_as_it_starts_and_ends() -> None:
         ("CLAIMED", "OK", None),
         ("FETCH_DIFF", "RUNNING", None),
         ("FETCH_DIFF", "OK", None),
+        ("BUILD_CONTEXT", "RUNNING", None),
+        ("BUILD_CONTEXT", "OK", None),
         ("LLM_CALL", "RUNNING", None),
         ("LLM_CALL", "OK", None),
         ("POSTPROCESS", "RUNNING", None),
@@ -244,6 +246,7 @@ async def test_a_failed_step_write_logs_the_step_and_the_error_class_only(
     assert [record.step for record in records] == [
         "CLAIMED",
         "FETCH_DIFF",
+        "BUILD_CONTEXT",
         "LLM_CALL",
         "POSTPROCESS",
         "POST_FEEDBACK",
