@@ -132,22 +132,25 @@ Other:
       `SENTRY_ORG_URL` (for the dashboard's traces link) and
       `GRAFANA_PROM_DATASOURCE_UID` (only if the stack's Prometheus is not
       `grafanacloud-prom`: Connections → Data sources).
-- [ ] Actions → Observability sync → Run workflow: with `dry_run` first, then for real.
-      The service account behind `GRAFANA_SA_TOKEN` needs the Editor role (enough for
-      every call, checked against Grafana 13.2).
-- [ ] **Rule routing check** — `sync.py` writes the rules as Grafana-managed rules through
+- [x] Actions → Observability sync → Run workflow: with `dry_run` first, then for real
+      (2026-10-30).
+      The service account behind `GRAFANA_SA_TOKEN` needs the Editor role plus the fixed
+      role Alerting → Provisioning writer (`fixed:alerting.provisioning:writer`): Grafana
+      Cloud's Editor lacks the provisioning permissions that vanilla Grafana's has (403
+      on the rule groups, 2026-10-30). Admin also works, with a broader token.
+- [x] **Rule routing check** — `sync.py` writes the rules as Grafana-managed rules through
       the provisioning API, routed by the notification policy; verified on Grafana 13.2
       in the lab. (Grafana Cloud does not serve the rule import API: 404 on 2026-10-30.)
       In Grafana Cloud, after the sync: Alerting → Alert rules lists 24 rules in the
       folder "DMC-268 alerts", and a rule's notification preview shows the `telegram`
       contact point.
-- [ ] Notification policy — `sync.py` provisions it (group by `domain`, 30 s / 5 min / 4 h,
+- [x] Notification policy — `sync.py` provisions it (group by `domain`, 30 s / 5 min / 4 h,
       child routes muting "No throughput" and "Canary review stale" outside working
       hours, Europe/Berlin); check it in Alerting → Notification policies.
-- [ ] Grafana contact point `telegram` — `sync.py` creates it with placeholders and never
+- [x] Grafana contact point `telegram` — `sync.py` creates it with placeholders and never
       overwrites it: Alerting → Contact points → telegram → Edit, type in the bot token
       and chat id, then Test; the message arrives in the group.
-- [ ] Dashboards → DMC-268 has the four dashboards; Synthetics has the check
+- [x] Dashboards → DMC-268 has the four dashboards; Synthetics has the check
       `dmc268-site`. After a few runs of the check,
       `probe_ssl_earliest_cert_expiry{job="dmc268-site"}` has data (the check sends basic
       metrics only; if it is missing, turn `basicMetricsOnly` off in
