@@ -1,4 +1,5 @@
 import logging
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -90,6 +91,7 @@ class OpenAICompatibleProvider:
                 span.set_data(name, value)
             span.set_data("purpose", purpose)
             outcome = "error"
+            started = time.monotonic()
             try:
                 response = await self._post(client, body, key=key)
                 if key is not None and self._key_pool is not None:
@@ -101,6 +103,9 @@ class OpenAICompatibleProvider:
                         return None
                 reply, usage = self._handle_response(response, key)
                 outcome = "ok"
+                metrics.observe_llm_latency(
+                    self._name, self._model, purpose, time.monotonic() - started
+                )
                 metrics.count_llm_tokens(
                     self._name,
                     self._model,

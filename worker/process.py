@@ -78,6 +78,7 @@ class ReviewStage:
 RECORDED_STEPS = (
     JobStep.CLAIMED,
     JobStep.FETCH_DIFF,
+    JobStep.BUILD_CONTEXT,
     JobStep.LLM_CALL,
     JobStep.POSTPROCESS,
     JobStep.POST_FEEDBACK,
@@ -199,6 +200,8 @@ async def _process(
                     },
                 )
             step.set(bytes=len(context.diff_text.encode()))
+        # Parsing and filtering: a diff that does not parse fails here, not in the fetch.
+        async with observer.step(JobStep.BUILD_CONTEXT) as step:
             files = parse_diff(context.diff_text)
             filtered = filter_files(files)
             kept_paths = ", ".join(diff.new_path or diff.old_path for diff in filtered.kept)
@@ -224,12 +227,17 @@ async def _process(
                     (reason.value, count) for reason, count in filtered.skip_counts
                 ),
             )
-            step.set(files=stats.files_total, reviewable=stats.files_reviewable)
+            step.set(
+                files=stats.files_total,
+                reviewable=stats.files_reviewable,
+                skipped=len(filtered.skipped),
+                chunks=stats.chunks_total,
+            )
         summary: str | None = None
         if review is not None:
             # LLM_CALL can take minutes (two 300 s attempts plus a fallback): renew the
             # lease before it and again before posting, and stop if it was lost.
-            if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
+            if not await _extend_lease(jobs, claimed):
                 return False
             target = _pull_request_target(claimed, context.head_sha)
             async with observer.step(JobStep.LLM_CALL) as step:
@@ -252,16 +260,15 @@ async def _process(
                     provider=result.provider, model=result.model, findings=len(result.findings)
                 )
             async with observer.step(JobStep.POSTPROCESS) as step:
-                posted = (
-                    frozenset()
-                    if review.comments is None
-                    else await review.comments.posted_fingerprints(
-                        provider=payload.provider,
-                        installation_id=payload.installation_id,
-                        repo_id=payload.repo_id,
-                        pr_number=payload.pr_number,
-                    )
-                )
+                posted: frozenset[str] = frozenset()
+                if review.comments is not None:
+                    with metrics.timed_db("posted_fingerprints"):
+                        posted = await review.comments.posted_fingerprints(
+                            provider=payload.provider,
+                            installation_id=payload.installation_id,
+                            repo_id=payload.repo_id,
+                            pr_number=payload.pr_number,
+                        )
                 plan = build_plan(
                     result.findings,
                     model_summary=result.summary,
@@ -273,7 +280,7 @@ async def _process(
                     dismissed_by_verifier=result.rejected_by_verifier,
                 )
                 step.set(findings_total=len(result.findings), already_posted=len(posted))
-            if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
+            if not await _extend_lease(jobs, claimed):
                 return False
             async with observer.step(JobStep.POST_FEEDBACK) as step:
                 outcome = await review.publisher.publish(target, plan)
@@ -282,10 +289,10 @@ async def _process(
                 )
                 stats = replace(stats, findings_published=len(outcome.comments))
                 summary = plan.plain_summary
+                published = published_findings(plan, outcome)
+                metrics.count_findings_posted(p.finding.severity.value for p in published)
                 if review.comments is not None:
-                    await _keep_findings(
-                        review.comments, claimed, published_findings(plan, outcome), log
-                    )
+                    await _keep_findings(review.comments, claimed, published, log)
     except Exception as err:
         error_kind, retryable = classify(err)
         return await _record_failure(
@@ -299,7 +306,10 @@ async def _process(
         )
 
     try:
-        completed = await jobs.complete(job_id, stats, worker_id=claimed.worker_id, summary=summary)
+        with metrics.timed_db("complete"):
+            completed = await jobs.complete(
+                job_id, stats, worker_id=claimed.worker_id, summary=summary
+            )
     except Exception as err:
         log.error(
             "job.store.failed",
@@ -402,6 +412,11 @@ async def _publish_skipped(
     log.info("job.skipped_check_run", extra={**fields, "outcome": "published"})
 
 
+async def _extend_lease(jobs: JobRepository, claimed: ClaimedJob) -> bool:
+    with metrics.timed_db("extend_lease"):
+        return await jobs.extend_lease(claimed.job_id, worker_id=claimed.worker_id)
+
+
 async def _keep_findings(
     comments: ReviewCommentStore,
     claimed: ClaimedJob,
@@ -412,7 +427,8 @@ async def _keep_findings(
     the forge already, and a retry would post it a second time. The dashboard misses
     these findings and the next review may repeat them; the log says so."""
     try:
-        await comments.record(claimed.job_id, findings)
+        with metrics.timed_db("record_findings"):
+            await comments.record(claimed.job_id, findings)
     except Exception as err:
         log.error(
             "job.findings.not_kept",
@@ -445,12 +461,13 @@ async def _record_failure(
     still returns False. A None status means the lease was lost; nothing is
     logged because the job's new owner logs its own run."""
     try:
-        status = await jobs.fail(
-            claimed.job_id,
-            error_kind,
-            retryable=retryable,
-            worker_id=claimed.worker_id,
-        )
+        with metrics.timed_db("fail"):
+            status = await jobs.fail(
+                claimed.job_id,
+                error_kind,
+                retryable=retryable,
+                worker_id=claimed.worker_id,
+            )
     except Exception as err:
         log.error(
             "job.store.failed",
@@ -497,7 +514,8 @@ async def _log_retrying(
     logged as '-'. The read is guarded like every other store call."""
     next_attempt_at: datetime | None = None
     try:
-        stored = await jobs.get(claimed.job_id)
+        with metrics.timed_db("get"):
+            stored = await jobs.get(claimed.job_id)
         if stored is not None:
             next_attempt_at = stored.next_attempt_at
     except Exception as err:

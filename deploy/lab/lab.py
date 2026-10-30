@@ -354,6 +354,11 @@ def prom_value(query: str) -> float | None:
 def loki(query: str, since: float | None = None) -> list[dict[str, Any]]:
     """Log lines since ``since`` (epoch seconds; default an hour ago), through Grafana's
     proxy (Loki publishes no port)."""
+    return [json.loads(line) for line in loki_lines(query, since)]
+
+
+def loki_lines(query: str, since: float | None = None) -> list[str]:
+    """The raw lines: Postgres writes text, not JSON."""
     start = time.time() - 3600 if since is None else since
     params = urllib.parse.urlencode({"query": query, "limit": 20, "start": str(int(start * 1e9))})
     url = f"{GRAFANA}/api/datasources/proxy/uid/loki/loki/api/v1/query_range?{params}"
@@ -361,7 +366,7 @@ def loki(query: str, since: float | None = None) -> list[dict[str, Any]]:
     if status != 200:
         raise ValueError(f"Loki through Grafana answered HTTP {status}")
     streams = json.loads(body)["data"]["result"]
-    return [json.loads(line) for stream in streams for _, line in stream["values"]]
+    return [line for stream in streams for _, line in stream["values"]]
 
 
 def grafana_rules() -> list[dict[str, Any]]:
@@ -712,6 +717,35 @@ def check() -> bool:
         f"{len(leaked)} lines" if leaked else f"Loki did not answer; last error: {last_error}",
     )
 
+    step("Loki: Caddy and Postgres, from Docker (config.alloy § container logs)")
+    # With the api stopped, Caddy logs the failed request, URI included: the query must
+    # not leave Alloy, since on /auth/callback it holds the OAuth code.
+    code = f"lab-oauth-code-{run_id}"
+    compose("stop", "api")
+    try:
+        status, _ = request(f"{CADDY}/api/auth/callback?code={code}&state=lab")
+    finally:
+        compose("up", "-d", "--wait", "api")
+    report.check(status == 502, "with the api stopped, Caddy answers 502", f"HTTP {status}")
+    proxied = poll(
+        lambda: loki_lines('{service="caddy", level="error"} |= "auth/callback"', started),
+        bool,
+        60,
+    ) or []  # fmt: skip
+    report.check(
+        any("/api/auth/callback?redacted" in line for line in proxied),
+        "Caddy's error line arrives with its query cut: /api/auth/callback?redacted",
+        f"{len(proxied)} lines; last error: {last_error}",
+    )
+    code_lines = poll(lambda: loki_lines(f'{{service=~".+"}} |= "{code}"'), lambda _: True, 30)
+    report.check(code_lines == [], "the OAuth code reached no log line", f"{code_lines}")
+    postgres = poll(lambda: loki_lines('{service="postgres", level="info"}'), bool, 30)
+    report.check(
+        bool(postgres),
+        "Postgres lines, with the app's level names",
+        f"none; last error: {last_error}",
+    )
+
     step("The Sentry relay (no bot, so alerts end as alert.dropped)")
     relay_event = f"{run_id}-alert"
     status = send_sentry_alert(relay_event)
@@ -800,6 +834,7 @@ def check() -> bool:
             for span in t.get("spans", [])
             if span.get("op") == "review.step"
         }
+        # The lab has no GitHub: the fetch fails and the job retries, so no later step.
         report.check(
             {"claimed", "fetch_diff"} <= steps,
             "its steps are spans: claimed, fetch_diff",

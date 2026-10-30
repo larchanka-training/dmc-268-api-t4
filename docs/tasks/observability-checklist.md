@@ -185,6 +185,17 @@ Other:
 - [ ] An `llm-smoke.yml` run with the DSN shows the LLM spans (Sentry environment
       `smoke`).
 
+## Phase 5b: the task's definition of done
+
+- [ ] After the deploy, Explore → Loki: `{service="caddy"}` and `{service="postgres"}`
+      show lines, labelled `level`. Empty after 5 minutes: on the VPS, `docker compose
+      exec alloy env | grep COMPOSE_PROJECT` must print the project (the directory name,
+      `dmc268`), which `docker compose` fills in; an empty value ships nothing.
+- [ ] No OAuth code in Caddy's lines: `{service="caddy"} |= "code="` finds nothing.
+- [ ] After a real review: Overview's "LLM latency p95", and Pipeline's "LLM latency by
+      provider", "Worker DB calls p95 by operation" and `BUILD_CONTEXT` in "Step
+      duration" have data; "Findings posted" too once a review posts one.
+
 ## Phase 6: canary
 
 - [ ] Repository `dmc268-canary` — App installed, a long-lived open PR, the workflow

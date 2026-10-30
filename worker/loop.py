@@ -23,6 +23,7 @@ from adapters.db.job_events import PostgresStepRecorder
 from adapters.db.repository import PostgresJobStore
 from adapters.db.review_comments import PostgresReviewCommentStore
 from adapters.db.session import build_engine
+from adapters.observability import metrics
 from domain.ports import GitProvider, JobRepository, StepRecorder
 from worker.config import DEFAULT_POLL_INTERVAL_SECONDS, WorkerSettings
 from worker.listener import listen_for_jobs
@@ -50,7 +51,8 @@ async def claim_and_process_once(
     store had nothing to hand this worker. The worker loop's drain step
     and the tests both call this directly.
     """
-    claimed = await store.claim(worker_id)
+    with metrics.timed_db("claim"):
+        claimed = await store.claim(worker_id)
     if claimed is None:
         return False
     log = logger if logger is not None else logging.getLogger(__name__)

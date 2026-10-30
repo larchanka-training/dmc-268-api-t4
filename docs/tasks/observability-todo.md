@@ -255,6 +255,27 @@ Rules for every step:
       reply text; one security kind per refusal path; the rate-limit hook on every
       client; periodic runs on memory and Postgres; five commands green.
 
+## Phase 5b: the task's definition of done
+
+The gaps a check against the task's DoD found (spec § Definition of done, items 7–9).
+
+- [x] 62. LLM latency — `llm_request_duration_seconds{provider, model, purpose}`, observed
+      for each request that got a reply (OpenAI-compatible and TypeSafe), started at 0 by
+      the factory; "LLM latency p95" on Overview (with queue depth and RPS) and p50/p95
+      by provider on Pipeline.
+- [x] 63. Context — `BUILD_CONTEXT` recorded on its own: parsing, filtering and the job
+      stats leave `FETCH_DIFF` (a diff that does not parse fails `BUILD_CONTEXT`);
+      attributes `files`, `reviewable`, `skipped`, `chunks`.
+- [x] 64. DB — `worker_db_duration_seconds{operation}` around the worker's Postgres calls
+      (claim, lease, posted fingerprints, findings, complete, fail, get); "Worker DB calls
+      p95 by operation" on Pipeline.
+- [x] 65. `findings_posted_total{severity}` from what the forge accepted, started at 0.
+- [x] 66. Container logs — `config.alloy` ships this compose project's `caddy` and
+      `postgres` logs from Docker (`COMPOSE_PROJECT` in both compose files), levels in the
+      app's words, Caddy's query strings cut; four lab checks (49 in all). No dashboard.
+- [ ] 67. Postgres backup. **Blocked by:** where the off-server copy goes (spec § Open
+      questions, item 4; the team).
+
 ## Phase 6: canary and SLOs
 
 - [ ] 54. Canary gauge — DB sampler: `canary_review_last_success_timestamp` = newest

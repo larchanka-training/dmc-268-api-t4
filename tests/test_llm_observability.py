@@ -58,6 +58,14 @@ def tokens(
     return value or 0.0
 
 
+def replies_timed(purpose: str = "review", provider: str = PROVIDER, model: str = MODEL) -> float:
+    value = metrics.WORKER_REGISTRY.get_sample_value(
+        "llm_request_duration_seconds_count",
+        {"provider": provider, "model": model, "purpose": purpose},
+    )
+    return value or 0.0
+
+
 def rotations(provider: str = PROVIDER) -> float:
     value = metrics.WORKER_REGISTRY.get_sample_value(
         "llm_key_rotations_total", {"provider": provider}
@@ -107,6 +115,23 @@ async def test_each_set_aside_key_is_a_request_and_a_rotation(clock: FakeClock) 
     assert requests("key_rejected") == before[1] + 1
     assert requests("ok") == before[2] + 1
     assert rotations() == before[3] + 2
+
+
+async def test_only_a_request_that_got_a_reply_is_timed(clock: FakeClock) -> None:
+    """A 429 answers in milliseconds: timed, it would pull the latency down."""
+    before = replies_timed("summary")
+    transport = RecordingTransport(
+        replies(httpx.Response(429, headers={"Retry-After": "30"}), chat_response("ok"))
+    )
+    provider = make_provider(transport, keys=(FAKE_KEY_A, FAKE_KEY_B), clock=clock)
+
+    await provider.complete(MESSAGES, purpose="summary")
+    with pytest.raises(ProviderUnavailableError):
+        await make_provider(RecordingTransport(replies(httpx.Response(500)))).complete(
+            MESSAGES, purpose="summary"
+        )
+
+    assert replies_timed("summary") == before + 1
 
 
 @pytest.mark.parametrize(
@@ -171,6 +196,8 @@ async def test_typesafe_requests_are_counted_by_purpose() -> None:
         requests("error", "rule_screen", TYPESAFE, "jev-model"),
         tokens("input", "verify", TYPESAFE, "jev-model"),
     )
+    timed = replies_timed("verify", TYPESAFE, "jev-model")
+    timed_screen = replies_timed("rule_screen", TYPESAFE, "jev-model")
     answers = iter(
         [
             httpx.Response(
@@ -190,6 +217,8 @@ async def test_typesafe_requests_are_counted_by_purpose() -> None:
     assert requests("ok", "verify", TYPESAFE, "jev-model") == before[0] + 1
     assert requests("error", "rule_screen", TYPESAFE, "jev-model") == before[1] + 1
     assert tokens("input", "verify", TYPESAFE, "jev-model") == before[2] + 50
+    assert replies_timed("verify", TYPESAFE, "jev-model") == timed + 1
+    assert replies_timed("rule_screen", TYPESAFE, "jev-model") == timed_screen
 
 
 def series(name: str, **labels: str) -> float | None:
@@ -214,6 +243,15 @@ def test_building_the_gateway_starts_its_series_at_zero() -> None:
                 model="start-at-zero-model",
                 purpose=purpose,
                 outcome="error",
+            )
+            == 0.0
+        )
+        assert (
+            series(
+                "llm_request_duration_seconds_count",
+                provider=name,
+                model="start-at-zero-model",
+                purpose=purpose,
             )
             == 0.0
         )

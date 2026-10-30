@@ -1,5 +1,6 @@
 """JEV (TypeSafe System One) client: typed questions about one state, answered with scores."""
 
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -69,12 +70,14 @@ class JevClient:
     ) -> JevResponse:
         """Raises httpx.HTTPError on transport or HTTP errors, ValueError on a bad reply.
         ``purpose`` (rule_screen, verify) labels the request's metrics."""
+        started = time.monotonic()
         try:
             response = await self._ask(state, questions)
         except Exception:
             metrics.count_llm_request(TYPESAFE, self._model, purpose, "error")
             raise
         metrics.count_llm_request(TYPESAFE, self._model, purpose, "ok")
+        metrics.observe_llm_latency(TYPESAFE, self._model, purpose, time.monotonic() - started)
         usage = response.usage or {}
         metrics.count_llm_tokens(
             TYPESAFE,

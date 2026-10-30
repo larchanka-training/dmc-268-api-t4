@@ -24,12 +24,14 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 
 import prometheus_client
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 from prometheus_client.core import GaugeMetricFamily, Metric
 
 from domain.alerts import DropReason
+from domain.models import Severity
 from domain.ports import PeriodicTaskRun, QueueSnapshot, ReviewJobStatus
 
 API_PORT = 9100
@@ -203,6 +205,29 @@ REVIEW_STEP_DURATION = Histogram(
     buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600),
     registry=WORKER_REGISTRY,
 )
+#: The worker's Postgres calls per job, named like job.store.failed's ``stage``.
+DB_OPERATIONS = (
+    "claim",
+    "extend_lease",
+    "posted_fingerprints",
+    "record_findings",
+    "complete",
+    "fail",
+    "get",
+)
+WORKER_DB_DURATION = Histogram(
+    "worker_db_duration_seconds",
+    "The worker's Postgres calls by operation, failed calls included.",
+    ["operation"],
+    buckets=(0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
+    registry=WORKER_REGISTRY,
+)
+FINDINGS_POSTED = Counter(
+    "findings_posted_total",
+    "Findings the forge accepted, inline or in the review body, by severity.",
+    ["severity"],
+    registry=WORKER_REGISTRY,
+)
 
 
 class RateLimitGauge:
@@ -273,6 +298,14 @@ LLM_KEY_ROTATIONS = Counter(
     ["provider"],
     registry=WORKER_REGISTRY,
 )
+LLM_REQUEST_DURATION = Histogram(
+    "llm_request_duration_seconds",
+    "Request to reply per LLM HTTP request that got one; failures are in llm_requests_total.",
+    ["provider", "model", "purpose"],
+    # LLM_TIMEOUT_SECONDS is 300 in production.
+    buckets=(0.5, 1, 2.5, 5, 10, 20, 30, 60, 90, 120, 180, 300),
+    registry=WORKER_REGISTRY,
+)
 
 
 # --- initialisation ----------------------------------------------------------------
@@ -302,10 +335,14 @@ def init_api_metrics(
 def init_worker_metrics(error_kinds: Mapping[str, bool], *, steps: Iterable[str] = ()) -> None:
     """Start the job series at 0: COMPLETED, FAILED with every error kind, RETRYING with
     every retryable one (``error_kinds`` maps each kind to whether it is retried), and
-    each step the worker records by outcome."""
+    each step the worker records by outcome; its DB calls and findings too."""
     for step in steps:
         for outcome in STEP_OUTCOMES:
             REVIEW_STEP_DURATION.labels(step, outcome)
+    for operation in DB_OPERATIONS:
+        WORKER_DB_DURATION.labels(operation)
+    for severity in Severity:
+        FINDINGS_POSTED.labels(severity.value)
     JOBS_FINISHED.labels(ReviewJobStatus.COMPLETED.value, "")
     for kind, retryable in error_kinds.items():
         JOBS_FINISHED.labels(ReviewJobStatus.FAILED.value, kind)
@@ -324,6 +361,7 @@ def init_llm_metrics(
         LLM_KEY_ROTATIONS.labels(provider)
         outcomes = tuple(outcomes)
         for purpose in purposes:
+            LLM_REQUEST_DURATION.labels(provider, model, purpose)
             for outcome in outcomes:
                 LLM_REQUESTS.labels(provider, model, purpose, outcome)
             for direction in TOKEN_DIRECTIONS:
@@ -371,6 +409,10 @@ def count_llm_request(provider: str, model: str, purpose: str, outcome: str) -> 
     LLM_REQUESTS.labels(provider, model, purpose, outcome).inc()
 
 
+def observe_llm_latency(provider: str, model: str, purpose: str, seconds: float) -> None:
+    LLM_REQUEST_DURATION.labels(provider, model, purpose).observe(seconds)
+
+
 def count_llm_tokens(
     provider: str, model: str, purpose: str, *, input_tokens: object, output_tokens: object
 ) -> None:
@@ -394,6 +436,21 @@ def count_lease_expiries(reaped: int) -> None:
 
 def observe_step(step: str, outcome: str, seconds: float) -> None:
     REVIEW_STEP_DURATION.labels(step, outcome).observe(seconds)
+
+
+@contextmanager
+def timed_db(operation: str) -> Iterator[None]:
+    """Time one of the worker's Postgres calls (``DB_OPERATIONS``), raising or not."""
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        WORKER_DB_DURATION.labels(operation).observe(time.monotonic() - started)
+
+
+def count_findings_posted(severities: Iterable[str]) -> None:
+    for severity in severities:
+        FINDINGS_POSTED.labels(severity).inc()
 
 
 def observe_claim_latency(seconds: float) -> None:

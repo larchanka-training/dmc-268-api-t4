@@ -212,13 +212,15 @@ async def test_the_worker_reports_each_step_and_its_shape_never_its_content() ->
     assert [(name, outcome) for name, _, outcome in observer.steps] == [
         ("CLAIMED", "OK"),
         ("FETCH_DIFF", "OK"),
+        ("BUILD_CONTEXT", "OK"),
         ("LLM_CALL", "OK"),
         ("POSTPROCESS", "OK"),
         ("POST_FEEDBACK", "OK"),
     ]
     attrs = {name: attrs for name, attrs, _ in observer.steps}
     assert attrs["POSTPROCESS"] == {"findings_total": 0, "already_posted": 0}
-    assert set(attrs["FETCH_DIFF"]) == {"bytes", "files", "reviewable"}
+    assert set(attrs["FETCH_DIFF"]) == {"bytes"}
+    assert set(attrs["BUILD_CONTEXT"]) == {"files", "reviewable", "skipped", "chunks"}
     assert attrs["LLM_CALL"] == {"provider": "p", "model": "m", "findings": 0}
     assert attrs["POST_FEEDBACK"] == {"comments_posted": 0, "inline_fallback": False}
     assert all(isinstance(value, int | str | bool) for a in attrs.values() for value in a.values())
@@ -243,5 +245,6 @@ async def test_the_failing_step_is_the_one_the_observer_sees_fail() -> None:
     assert [(name, outcome) for name, _, outcome in observer.steps] == [
         ("CLAIMED", "OK"),
         ("FETCH_DIFF", "OK"),
+        ("BUILD_CONTEXT", "OK"),
         ("LLM_CALL", "FAILED"),
     ]
