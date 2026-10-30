@@ -1,9 +1,0 @@
-fix(observability): sync with an Editor service account
-
-- sync.py creates the dashboards' folder instead of looking it up first: below Admin, Grafana answers a lookup of a folder that does not exist with 403 (folders:read), so the sync failed with an Editor token.
-- An existing folder answers 412 (409 in older Grafana) and is kept.
-- Checked against Grafana 13.2 with the Editor role: dashboards, the rule import, the contact point, the mute timings and the policy all go through.
-- docs/tasks/observability-checklist.md: the sync's service account needs Editor, not Admin.
-- tasks/ moves to docs/tasks/, next to the specs; every reference to it follows.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
