@@ -6,20 +6,25 @@ items below. Secrets go into GitHub Secrets only, never into a file or a chat.
 
 ## Team decisions
 
-- [ ] **Secret storage** — confirm "environment variables on the VPS" (2026-10-12), so
-      AGENTS.md open question 4 can be closed (todo 60).
-- [ ] **LLM prices and budget** — where `llm_prices` and `llm_daily_budget_usd` live
-      (database config or env) and the daily budget in USD (todo 48, 59).
-- [ ] Owners — a person per alert `domain` (`edge`, `api`, `worker`, `db`, `host`,
-      `monitoring`, `business`) for the `owner` label.
-- [ ] Lease vs LLM time — renew the lease between LLM attempts, or raise it to 900 s
-      (worker code, not observability).
-- [ ] `502 forge_unavailable` — keep it in the API availability SLO, or exclude it.
-- [ ] Sign-in audit — accept `user_id` going to Loki (EU region).
-- [ ] Spec open questions 1 (per-account dashboards), 2 (automatic redelivery) and 3 (a
-      PR too large to review: a Sentry error or an expected outcome).
-- [ ] WORKFLOW_DESIGN.md §4's claim that GitHub retries failed deliveries (comment at
-      the end of the spec).
+- [x] **Secret storage** — GitHub Secrets, written to the VPS's `.env` by `deploy.yml`
+      (2026-10-30); AGENTS.md open question 4 closed (todo 60).
+- [x] **LLM prices and budget** — global, not per tenant; env variables now, the config
+      table when it exists (2026-10-30). The work and the budget amount: the GitHub issue
+      "LLM cost metric and daily spend alert" (todo 48, 59).
+- [x] Owners — kept `unassigned` (2026-10-30): not everyone on the team can reach the
+      Grafana stack, and the free tier may not take more members. Revisit then.
+- [x] Lease vs LLM time — a heartbeat renews the lease while a job runs (2026-10-30),
+      as WORKFLOW_DESIGN.md §6 asks.
+- [x] `502 forge_unavailable` — kept in the API availability SLO (2026-10-30).
+- [x] Sign-in audit — `user_id` in Loki accepted (2026-10-30), disclosed in
+      `docs/privacy-policy.md` (a draft for legal review).
+- [ ] Spec open question 1 (per-account dashboards).
+- [ ] Spec open question 2 (automatic redelivery): the GitHub issue "Redeliver failed
+      GitHub webhook deliveries automatically".
+- [x] Spec open question 3 (a PR too large to review) — stays an error and a Sentry event
+      (2026-10-30); whether it counts against "Review success" is decided in phase 6.
+- [x] WORKFLOW_DESIGN.md §4's claim that GitHub retries failed deliveries — corrected
+      there, in BACKEND_ARCHITECTURE.md and PIPELINE_SPEC.md (2026-10-30).
 
 ## Phase 0: accounts
 

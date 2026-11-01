@@ -84,9 +84,10 @@ Documents disagree here. Do not pick a side in code; ask the team.
 3. **Severity (resolved):** severity AND category are persisted on published findings
    ([docs/PIPELINE_SPEC.md §7.1, D4](docs/PIPELINE_SPEC.md); decision 2026-10-10, this PR);
    the columns land with the pr_review_comments migration, which is deliberately not `0001`.
-4. **Secret storage:** encrypted in the database ([SYSTEM_DESIGN.md §10](SYSTEM_DESIGN.md)) vs
-   systemd `LoadCredential`, never in the environment ([docs/BACKEND_ARCHITECTURE.md § Deployment](docs/BACKEND_ARCHITECTURE.md))
-   vs `LoadCredential` or a `0600` env file ([docs/configuration.md](docs/configuration.md));
-   PR #8 reads LLM keys from env ([docs/llm-gateway.md](docs/llm-gateway.md)).
+4. **Secret storage (resolved):** our own secrets live in GitHub Secrets; `deploy.yml` writes
+   them to a `0600` `.env` on the VPS, and the containers read them from the environment
+   ([docs/observability.md § Configuration and secrets](docs/observability.md); decision 2026-10-30).
+   Not covered: secrets a tenant supplies (BYOK LLM keys, phase 2 in [SYSTEM_DESIGN.md §10](SYSTEM_DESIGN.md)),
+   which cannot go through GitHub Secrets.
 5. **Finding categories:** [SYSTEM_DESIGN.md §5.5](SYSTEM_DESIGN.md) vs the frontend set
    used by PR #8 ([docs/llm-gateway.md § Расхождения](docs/llm-gateway.md)).

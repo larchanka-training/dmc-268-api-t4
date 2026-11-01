@@ -1047,8 +1047,9 @@ must not authenticate anywhere real.
 | Worker dies | Jobs stuck `PROCESSING` | Reaper reclaims on lease expiry — the only recovery path |
 | Disk full | Writes fail | Alert on job-table growth and backup size |
 
-The asymmetry worth remembering: GitHub retries a failed delivery, GitLab
-disables a hook that keeps failing. An outage costs GitHub users latency and
+Neither forge retries a failed delivery on its own (WORKFLOW_DESIGN.md §4).
+GitHub keeps it redeliverable for 3 days; GitLab disables a hook that keeps
+failing. An outage costs GitHub users the review until someone redelivers it, and
 GitLab users the review itself.
 
 ---

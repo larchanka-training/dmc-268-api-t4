@@ -293,7 +293,7 @@ The gaps a check against the task's DoD found (spec § Definition of done, items
 - [x] 58. `docs/devops.md` secrets table: each new name of § Configuration and secrets.
 - [ ] 59. `docs/configuration.md`: `llm_prices`, `llm_daily_budget_usd` (phase 5).
       **Blocked by:** "LLM prices and budget".
-- [ ] 60. `AGENTS.md` open question 4 marked resolved, and the two ⚠️ about it removed
-      from the spec. **Blocked by:** "Secret storage".
+- [x] 60. `AGENTS.md` open question 4 marked resolved, and the two ⚠️ about it removed
+      from the spec.
 - [x] 61. `AGENTS.md` layout table: `adapters/observability/`, `adapters/alerting/`,
       `ops/observability/`.

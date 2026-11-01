@@ -19,9 +19,13 @@ exists so a developer can inspect what a real delivery fetched; it must
 never be set outside a developer machine.
 """
 
+import asyncio
+import contextlib
 import logging
 import os
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 
@@ -34,7 +38,7 @@ from domain.diff import parse_diff, split_into_chunks
 from domain.diff_filter import filter_files
 from domain.errors import LLMInputTooLargeError, classify
 from domain.findings import NewPublishedFinding, published_findings
-from domain.jobs import JobStep
+from domain.jobs import LEASE_SECONDS, JobStep
 from domain.ports import (
     ClaimedJob,
     GitProvider,
@@ -72,6 +76,14 @@ class ReviewStage:
     # pull request already has. Without it every review posts every finding again.
     comments: ReviewCommentStore | None = None
 
+
+#: The lease is the job's `locked_until`: "this worker holds the job until then". When
+#: it passes, the reaper assumes the worker died and gives the job to another one. A
+#: running job pushes `locked_until` 600 s ahead every 60 s, so a slow LLM call is not
+#: mistaken for a dead worker and reviewed twice. The job expires only after 10 minutes
+#: with no successful renewal: the worker died, or could not reach Postgres
+#: (WORKFLOW_DESIGN.md §6).
+LEASE_RENEWAL_SECONDS = LEASE_SECONDS / 10
 
 #: The steps a run records today (docs/observability.md § Review pipeline); the other
 #: JobStep values join as they are built. Their duration series start at 0.
@@ -114,6 +126,7 @@ async def process_claimed_job(
     steps: StepRecorder | None = None,
     logger: logging.Logger | None = None,
     observer: Observer | None = None,
+    lease_renewal_seconds: float = LEASE_RENEWAL_SECONDS,
 ) -> bool:
     """Fetch and parse one claimed pull request diff, review and publish it when a
     review stage is given; record stats or failure, and each step in `steps`.
@@ -143,14 +156,15 @@ async def process_claimed_job(
         metrics.WORKER_IN_FLIGHT.track_inprogress(),
         job_transaction(claimed.payload.trace_context),
     ):
-        return await _process(
-            claimed,
-            vcs,
-            jobs,
-            review=review,
-            observer=observer if observer is not None else StepObserver(steps, claimed, log),
-            log=log,
-        )
+        async with _lease_kept(jobs, claimed, log, every=lease_renewal_seconds):
+            return await _process(
+                claimed,
+                vcs,
+                jobs,
+                review=review,
+                observer=observer if observer is not None else StepObserver(steps, claimed, log),
+                log=log,
+            )
 
 
 def _bound_fields(claimed: ClaimedJob) -> dict[str, object]:
@@ -235,8 +249,8 @@ async def _process(
             )
         summary: str | None = None
         if review is not None:
-            # LLM_CALL can take minutes (two 300 s attempts plus a fallback): renew the
-            # lease before it and again before posting, and stop if it was lost.
+            # The heartbeat renews the lease while the job runs; these two checkpoints,
+            # before the LLM call and before posting, stop the run if it was lost.
             if not await _extend_lease(jobs, claimed):
                 return False
             target = _pull_request_target(claimed, context.head_sha)
@@ -410,6 +424,35 @@ async def _publish_skipped(
         )
         return
     log.info("job.skipped_check_run", extra={**fields, "outcome": "published"})
+
+
+@asynccontextmanager
+async def _lease_kept(
+    jobs: JobRepository, claimed: ClaimedJob, log: logging.Logger, *, every: float
+) -> AsyncIterator[None]:
+    """Renew the lease every ``every`` seconds while the block runs. A renewal never stops
+    the run: a lost lease ends the heartbeat and is acted on at the next checkpoint, as
+    before. A renewal that raises (Postgres away) is logged and tried again next tick."""
+
+    async def renew() -> None:
+        while True:
+            await asyncio.sleep(every)
+            try:
+                if not await _extend_lease(jobs, claimed):
+                    return
+            except Exception as err:
+                log.warning(
+                    "job.lease.renew_failed",
+                    extra={**_job_fields(claimed), "error_type": type(err).__name__},
+                )
+
+    heartbeat = asyncio.create_task(renew())
+    try:
+        yield
+    finally:
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
 
 
 async def _extend_lease(jobs: JobRepository, claimed: ClaimedJob) -> bool:

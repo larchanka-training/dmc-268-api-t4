@@ -217,15 +217,18 @@ per installation run at once.
 
 ## Lease expiry
 
-**Means:** the reaper took back an expired lease in the last hour. A worker died while
-holding a job, or a review outlived its 600 s lease.
+**Means:** the reaper took back an expired lease in the last hour. A running job renews
+its 600 s lease every 60 s, so a slow review alone does not expire it: a worker died while
+holding a job, or could not reach Postgres for ten renewals in a row. The job runs again
+on another attempt, so its LLM call is paid twice.
 
 **First checks:**
 1. *Container restarts* or *OOM kill* for the worker at the same time.
-2. Pipeline dashboard → Review duration and Step duration: a slow LLM provider.
+2. Loki: `{service="worker"} | json | event="job.lease.renew_failed"`: the worker lost
+   Postgres (then see *Postgres connections* on the Infrastructure dashboard).
 3. Loki: `{service="worker"} | json | event="worker.reaper.tick" | reaped > 0`.
 
-**Silence:** `alertname=LeaseExpiry` for a known slow provider period.
+**Silence:** `alertname=LeaseExpiry` while the worker or Postgres is restarted on purpose.
 
 ## Queue table bloat
 

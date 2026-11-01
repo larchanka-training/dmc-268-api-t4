@@ -196,6 +196,7 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `job.skipped_check_run` | info when published; warning when posting failed | The PR is over the input budget: the "skipped" check run says why no review appears | `job_id`, `provider`, `repo`, `pr_number`, `input_tokens` (the estimate), `max_input_tokens`, `outcome` (`published`, `failed`); `error_type` when failed |
 | `job.step_record.failed` | error | Writing a `pr_review_steps` row failed; the job goes on | `job_id`, `step`, `error_type` |
 | `step.finished` | info | A pipeline step ended (the `Observer`, `adapters/observability/observer.py`), with its row, span and `review_step_duration_seconds` | `job_id`, `step`, `outcome` (`OK`, `FAILED`), `duration_ms`; `error_kind` when failed |
+| `job.lease.renew_failed` | warning | The lease heartbeat could not reach Postgres; it tries again next tick (every 60 s), and the reaper takes the job only after ten misses | `job_id`, `provider`, `repo`, `pr_number`, `error_type` |
 | `job.findings.not_kept` | error | Findings were posted but not stored | `job_id`, `provider`, `repo`, `pr_number`, `findings`, `error_type` |
 | `github.token.minted` | info | An installation token was minted | `provider`, `installation_id` |
 | `github.pull_request.fetched` | info | PR detail, commits and diff fetched | `provider`, `installation_id`, `repo`, `pr_number`, `sha`, `commits`, `dropped_commits`, `diff_bytes`, `duration_ms` |
@@ -253,8 +254,9 @@ review:
 - **Caddy's query strings are cut in Alloy.** Caddy's error log carries the request, and
   on `/api/auth/callback` the query holds the OAuth code. `config.alloy` replaces every
   `?query` in a Caddy line with `?redacted` before it leaves the VPS (Caddy itself redacts
-  `Cookie` and `Authorization`); the lab checks it with the API stopped. Caddy writes no
-  access log: one would need the same cut.
+  `Cookie` and `Authorization`); the lab checks it with the API stopped. The copy Docker
+  keeps on the VPS is not cut, so `compose.yml` caps it at 3 × 10 MB (`logging:`). Caddy
+  writes no access log: one would need the same cut.
 - **Our loggers: `event` is the format string, never the formatted message.** For every
   stdlib record not on the third-party list below, the processor takes `record.msg`
   (`"provider=%s reply rejected (%s)"`), not `record.getMessage()`, and drops
@@ -409,7 +411,7 @@ DB sampler and `llm_daily_budget_usd` in one process only.
 | `worker_db_duration_seconds` | histogram | `operation` (`claim`, `extend_lease`, `posted_fingerprints`, `record_findings`, `complete`, `fail`, `get`) | The pipeline's DB stage: the worker's Postgres calls per job, failed ones included. An empty claim counts too. Which statement is slow: `pg_stat_statements` |
 | `review_duration_seconds` | histogram | `status` | **Enqueue → terminal status** per job, so queue wait counts. Buckets include 60, 120, 300, 600 and 900 s, so the latency SLO threshold sits on a bucket edge |
 | `jobs_finished_total` | counter | `status` (`COMPLETED`, `FAILED`, `RETRYING`: one per attempt), `error_kind` (empty when completed) | Forge outage vs bug |
-| `lease_expiries_total` | counter | — | Counted from the reaper's result. A worker died, or a review outlived its 600 s lease: the lease is renewed only before `LLM_CALL` and `POST_FEEDBACK`, and `LLM_CALL` can take 2 × 300 s plus the rule screen and verifier. BACKEND_ARCHITECTURE.md reads non-zero as "workers are dying" only |
+| `lease_expiries_total` | counter | — | Counted from the reaper's result. A running job renews its 600 s lease every 60 s (a heartbeat, WORKFLOW_DESIGN.md §6), so an expiry means a worker died or could not reach Postgres for ten renewals in a row, not a slow LLM call |
 | `llm_requests_total` | counter | `provider`, `model`, `purpose`, `outcome` | Provider failures, fallbacks. One per HTTP request, so a key rotation counts twice. `purpose` is `review`, `correction`, `summary` (the per-file mode's summary call), `rule_screen` or `verify`: one review makes several calls. `outcome` is `ok`, `rate_limited` (429, key cooled down), `key_rejected` (401/403, key disabled) or `error`; TypeSafe's (`provider="typesafe"`) are `ok` or `error` |
 | `llm_tokens_total` | counter | `provider`, `model`, `purpose`, `direction` | The bill, before it arrives |
 | `llm_request_duration_seconds` | histogram | `provider`, `model`, `purpose` | Request to reply, per HTTP request that got one. Failures are only counted (`llm_requests_total`): a 429 takes milliseconds and would pull the latency down, and a timeout is `LLM_TIMEOUT_SECONDS` by definition |
@@ -457,7 +459,7 @@ being down is reported by "Target down" (`pg_up == 0`).
 | `prometheus.exporter.postgres` | Connections vs `max_connections`, locks, database and table size (`pr_review_jobs` growth), dead tuples and last autovacuum on `pr_review_jobs` (a `SKIP LOCKED` queue churns rows and bloats), top statements from `pg_stat_statements` |
 | Caddy | Requests and 5xx at the edge, including the `502`s Caddy returns while the API is down, which the app never sees. Served by a `metrics` site block on an internal port (`:2020`), never by Caddy's admin API, which can rewrite the config; turned on by the global `metrics` option (Caddy 2.11 deprecates `servers { metrics }`) |
 | Alloy self-metrics | WAL size, failed remote writes: the monitoring of the monitoring |
-| Container logs (`loki.source.docker`) | Caddy's and Postgres's stderr, which never reach `./logs`: Caddy's TLS, config and proxy errors (a `502` while the API is down), Postgres's errors, checkpoints and failed connections. Only this compose project's `caddy` and `postgres` (Alloy gets the project name as `COMPOSE_PROJECT`); the api and worker come from their files, so their stdout would arrive twice. Same labels as the app's lines: `service`, and `level` in the app's words (Caddy's `warn` is `warning`, Postgres's `LOG` is `info`, `FATAL` and `PANIC` are `critical`; a `DETAIL` or `STATEMENT` continuation line has none). Caddy's query strings are cut (§ What is never logged). No file fallback: Docker's `json-file` is their only copy on the VPS. No dashboard: Explore, `{service="caddy"}` |
+| Container logs (`loki.source.docker`) | Caddy's and Postgres's stderr, which never reach `./logs`: Caddy's TLS, config and proxy errors (a `502` while the API is down), Postgres's errors, checkpoints and failed connections. Only this compose project's `caddy` and `postgres` (Alloy gets the project name as `COMPOSE_PROJECT`); the api and worker come from their files, so their stdout would arrive twice. Same labels as the app's lines: `service`, and `level` in the app's words (Caddy's `warn` is `warning`, Postgres's `LOG` is `info`, `FATAL` and `PANIC` are `critical`; a `DETAIL` or `STATEMENT` continuation line has none). Caddy's query strings are cut (§ What is never logged). No file fallback: Docker's `json-file` is their only copy on the VPS, Caddy's capped at 3 × 10 MB (§ What is never logged). No dashboard: Explore, `{service="caddy"}` |
 
 `pg_stat_statements` needs `shared_preload_libraries` in the Postgres container command
 and `CREATE EXTENSION` in a migration. The exporter connects as a dedicated role with
@@ -742,9 +744,10 @@ explicit rule of its own: "Telemetry missing" is itself an absent-series rule.
 
 **Every rule carries `runbook_url` and `owner`.** `runbook_url` points to a section of
 [runbooks.md](./runbooks.md) (one section per alert: what it means, first three checks,
-how to silence it); `owner` names the person on duty for that area (`unassigned` until
-the checklist's "Owners" item is decided). Both appear in the Telegram message, so it says what to do, not only what
-broke.
+how to silence it); `owner` names the person on duty for that area. It stays
+`unassigned` for now (decision 2026-10-30): not everyone on the team can reach the
+Grafana stack, and the free tier may not take more members. Both appear in the Telegram
+message, so it says what to do, not only what broke.
 
 | Alert | Condition | Suppressed while | Severity |
 | :--- | :--- | :--- | :--- |
@@ -761,7 +764,7 @@ broke.
 | Monitoring broken | Alloy remote-write failures > 0 for 15 min | — | warning |
 | TLS certificate expiry | Probe sees < 14 days left | — | warning: Caddy renews at 30 days, so this means renewal is failing |
 | Queue backlog | `queue_oldest_claimable_age_seconds > 600 and on() sum(increase(jobs_finished_total[10m])) == 0`: work is waiting **and** nothing is draining. A wait alone is normal: at most 3 jobs per installation run at once (`domain/jobs.py:27`), so one repository opening ten PRs queues the rest for well over 10 min | api down (sampler), worker down | critical |
-| Lease expiry | `increase(lease_expiries_total[1h]) > 0` | worker down | warning: a worker died or a review outlived its lease |
+| Lease expiry | `increase(lease_expiries_total[1h]) > 0` | worker down | warning: a worker died, or lost Postgres for the whole lease |
 | Queue table bloat | dead tuples on `pr_review_jobs` > 10× live rows **and** no autovacuum in 24 h (a quiet table legitimately goes days without one) | postgres down | warning |
 | Periodic task stale | `time() - periodic_task_last_success_timestamp > 2 * periodic_task_interval_seconds + 180`. The 180 s covers the sampler and scrape delay (the value Grafana reads can be ~105 s old); without it the 30 s reaper would fire constantly | api down (sampler), worker down | critical |
 | **No throughput** | `sum(increase(webhook_deliveries_total{outcome="enqueued"}[4h])) == 0`, notified 13:00–19:00 Europe/Berlin Mon–Fri, so the 4 h window lies entirely inside working hours | api down | critical: backstop for the canary, the silent failure from the architecture doc |
@@ -825,7 +828,7 @@ a slow leak does.
 | :--- | :--- | :--- | :--- |
 | Review latency | 95% of `COMPLETED` jobs posted within 10 min of enqueue (provisional) | `review_duration_seconds{status="COMPLETED"}` (label values are the database's) | worker down |
 | Review success | 99% of jobs end `COMPLETED` rather than `FAILED` (`SUPERSEDED` and `SKIPPED` excluded) | `jobs_finished_total` | worker down |
-| API availability | 99.5% of requests, excluding `/health`, are not 5xx | `http_requests_total` | api down |
+| API availability | 99.5% of requests, excluding `/health`, are not 5xx; a `502 forge_unavailable` counts, GitHub outages included (decision 2026-10-30): the user sees an error either way, and our own failures carry the same code (a rejected App token, our rate limit, a missing App configuration). The burn alerts' runbook starts with githubstatus.com | `http_requests_total` | api down |
 | Webhook ingest | 99.9% of signature-valid deliveries handled (`enqueued`, `filtered` or `duplicate`) rather than `rejected` or `error` | `webhook_deliveries_total` | api down |
 
 Why 10 minutes and not 5: glm-5.2 took ~95 s on a small smoke diff
@@ -858,16 +861,14 @@ deliveries since the outage began: the App's *Advanced → Recent deliveries* pa
 `POST /app/hook/deliveries/{id}/attempts` with the App JWT. GitHub lists only the last 3
 days; idempotency (WORKFLOW_DESIGN §4) covers a redelivery of one that did arrive.
 GitLab deliveries lost in an outage are re-triggered by the next push or a command.
-Automating the GitHub sweep is § Open questions, item 2. (⚠️ WORKFLOW_DESIGN.md §4 says
-GitHub retries a failed delivery automatically; GitHub's documentation says it does not.)
+Automating the GitHub sweep is § Open questions, item 2.
 
 ---
 
 ## Configuration and secrets
 
 **Secrets are environment variables on the VPS, passed to the containers** (team decision,
-2026-10-12; ⚠️ [AGENTS.md](../AGENTS.md) open question 4 still lists secret storage as
-open and must be marked resolved to match). They come from GitHub Secrets and are written
+2026-10-12, confirmed 2026-10-30; [AGENTS.md](../AGENTS.md) open question 4 is resolved). They come from GitHub Secrets and are written
 to `/opt/dmc268/.env` (mode `600`) by `deploy.yml`, exactly as today
 ([devops.md](./devops.md), decision 8). The api and worker read the whole `.env` through
 `env_file`, as they do today, so each also holds variables only the other uses; Alloy gets
@@ -1120,11 +1121,11 @@ adds no new category of data leaving the box. It is not part of this plan's DoD.
    on 2026-10-29): the first triggers "New issue" (email and Telegram), a busy day of
    large PRs can trigger "Error burst", and it counts against the "Review success" SLO
    (phase 6). Nothing is broken, though: it is a limit, and the author already learns of
-   it from the "skipped" check run. Proposed: treat it as expected. The job stays
-   `FAILED` and in `jobs_finished_total{error_kind="skip_diff_too_large"}`, but
-   `job.finished` is logged at `warning` without the exception (no Sentry event), and the
-   SLO excludes that error kind. The cost: large PRs no longer show in Sentry, only on the
-   Pipeline dashboard ("Failures by error_kind") and in Loki.
+   it from the "skipped" check run. **Decided 2026-10-30: it stays an error.** The job
+   ends `FAILED`, `job.finished` is logged at `error` with the exception, and each one is
+   a Sentry event, so how often large PRs arrive stays visible: it is the evidence for
+   raising the limits. Still open: whether it counts against "Review success", decided
+   with the SLOs (phase 6).
 4. **Postgres backup: where the off-server copy goes.** Proposed: a daily encrypted
    `pg_dump -Fc`, 7 days kept on the VPS and copied off it; a
    `pg_backup_last_success_timestamp` gauge with a "Backup stale" alert after 26 h; a
@@ -1141,7 +1142,7 @@ adds no new category of data leaving the box. It is not part of this plan's DoD.
 | Duplicate error alerts | Sentry handles error issues (email + Telegram via the relay); Grafana handles rates and everything Sentry cannot see. No Loki-based rules at all |
 | Sentry seats | One, on the free plan: the app admin gets Sentry's email; the team gets Telegram |
 | Prompts in `local` | Logged in `local` only; `staging` and production use `ops.replay --prompt` (hard rule 3) |
-| Secret storage | Environment variables on the VPS, passed to the containers (⚠️ AGENTS.md open question 4 not yet updated) |
+| Secret storage | Environment variables on the VPS, passed to the containers, from GitHub Secrets (confirmed 2026-10-30; AGENTS.md open question 4 resolved). Secrets a tenant supplies (BYOK, phase 2) are not covered |
 
 
 ---
