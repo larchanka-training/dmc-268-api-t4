@@ -66,7 +66,7 @@ VPS у Contabo (Debian 13), /opt/dmc268, docker compose project "dmc268"
 | `GRAFANA_CLOUD_PROM_URL`, `GRAFANA_CLOUD_PROM_USER` | repo variable | api | Prometheus стека Grafana Cloud: URL (базовый, query или push: деплой пишет push) и id пользователя → `.env` для Alloy (решение 22) |
 | `GRAFANA_CLOUD_LOKI_URL`, `GRAFANA_CLOUD_LOKI_USER` | repo variable | api | то же для Loki |
 | `GRAFANA_CLOUD_TOKEN` | repo secret | api | токен access policy Grafana Cloud (metrics write, logs write). В контейнер его получает только Alloy, через интерполяцию compose |
-| `POSTGRES_EXPORTER_PASSWORD` | repo secret | api | пароль read-only роли `dmc268_exporter` (`pg_monitor`) для экспортера Postgres в Alloy; сгенерирован `openssl rand -hex 32`. Роль создаётся один раз вручную (tasks/observability-checklist.md, фаза 3) |
+| `POSTGRES_EXPORTER_PASSWORD` | repo secret | api | пароль read-only роли `dmc268_exporter` (`pg_monitor`) для экспортера Postgres в Alloy; сгенерирован `openssl rand -hex 32`. Роль создаётся один раз вручную (docs/tasks/observability-checklist.md, фаза 3) |
 | `SENTRY_WEBHOOK_SECRET` | repo secret | api | client secret внутренней интеграции Sentry `telegram-relay`: им подписана каждая доставка реле → `.env`. Без него `/api/internal/alerts/sentry` отвечает 404 |
 | `ALERTS_TELEGRAM_BOT_TOKEN`, `ALERTS_TELEGRAM_CHAT_ID` | repo secret | api | бот и чат команды для реле Sentry → `.env`. Без них реле пишет в лог `alert.dropped` вместо отправки. Те же значения один раз вводятся вручную в contact point `telegram` в Grafana |
 | `GRAFANA_URL` | repo variable | api | адрес стека Grafana Cloud (`https://<стек>.grafana.net`): аннотация деплоя в `deploy.yml` и `observability-sync.yml` |

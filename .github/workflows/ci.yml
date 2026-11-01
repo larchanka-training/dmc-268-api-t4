@@ -156,3 +156,8 @@ jobs:
           # rule_files in a test file are relative to the test file.
           docker run --rm -v "$PWD:/alerts:ro" -w /alerts --entrypoint promtool "$image" \
             test rules tests/*.test.yaml
+          # The "No throughput" drill copy, pushed only for the drill.
+          docker run --rm -v "$PWD:/alerts:ro" -w /alerts --entrypoint promtool "$image" \
+            check rules drill/*.rules.yaml
+          docker run --rm -v "$PWD:/alerts:ro" -w /alerts --entrypoint promtool "$image" \
+            test rules drill/tests/*.test.yaml

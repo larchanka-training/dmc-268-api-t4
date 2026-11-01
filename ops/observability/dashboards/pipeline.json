@@ -144,7 +144,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Step duration (mean) by step",
-      "description": "From phase 5.",
+      "description": "Diff (FETCH_DIFF), context (BUILD_CONTEXT), LLM (LLM_CALL), the plan (POSTPROCESS), posting (POST_FEEDBACK). Postgres time: Worker DB calls.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -193,13 +193,122 @@
     {
       "id": 3,
       "type": "timeseries",
+      "title": "LLM latency by provider",
+      "description": "Request to reply, per HTTP request that got one; failures are in LLM requests. typesafe is the rule screen and verifier.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "fillOpacity": 0
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, provider) (rate(llm_request_duration_seconds_bucket[1h])))",
+          "legendFormat": "{{provider}} p50"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, provider) (rate(llm_request_duration_seconds_bucket[1h])))",
+          "legendFormat": "{{provider}} p95"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Worker DB calls p95 by operation",
+      "description": "The worker's Postgres calls per job: claim, lease, findings, outcome. Slow statements: Top statements on Infrastructure.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "fillOpacity": 0
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, operation) (rate(worker_db_duration_seconds_bucket[1h])))",
+          "legendFormat": "{{operation}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
       "title": "Claim latency p95",
       "description": "Claimable to claimed; a retry's backoff does not count.",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 8
+        "y": 16
       },
       "datasource": {
         "type": "prometheus",
@@ -241,7 +350,7 @@
       }
     },
     {
-      "id": 4,
+      "id": 6,
       "type": "timeseries",
       "title": "Failures by error_kind",
       "description": "forge_unavailable and provider_unavailable retry; the rest fail.",
@@ -249,7 +358,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 8
+        "y": 16
       },
       "datasource": {
         "type": "prometheus",
@@ -290,15 +399,15 @@
       }
     },
     {
-      "id": 5,
+      "id": 7,
       "type": "timeseries",
       "title": "LLM requests by provider and outcome",
-      "description": "From phase 5.",
+      "description": "One per HTTP request: a key rotation counts twice.",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 16
+        "y": 24
       },
       "datasource": {
         "type": "prometheus",
@@ -339,15 +448,15 @@
       }
     },
     {
-      "id": 6,
+      "id": 8,
       "type": "timeseries",
       "title": "LLM tokens and cost per model, last 24 h",
-      "description": "From phase 5.",
+      "description": "Tokens as each provider reported them. Cost: no data until the team decides the LLM prices.",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 16
+        "y": 24
       },
       "datasource": {
         "type": "prometheus",
@@ -397,15 +506,15 @@
       }
     },
     {
-      "id": 7,
+      "id": 9,
       "type": "timeseries",
       "title": "Forge rate-limit headroom",
-      "description": "From phase 5. The alert fires under 10% for 10 minutes.",
+      "description": "GitHub's core limit, lowest in the last 5 minutes. The alert fires under 10% for 10 minutes.",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 24
+        "y": 32
       },
       "datasource": {
         "type": "prometheus",
@@ -447,15 +556,15 @@
       }
     },
     {
-      "id": 8,
+      "id": 10,
       "type": "timeseries",
       "title": "Findings posted and secrets redacted, per hour",
-      "description": "From phase 5.",
+      "description": "Findings the forge accepted, by severity. Redacted secrets: no data until the diff is redacted before the LLM call (the REDACT step).",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 24
+        "y": 32
       },
       "datasource": {
         "type": "prometheus",
@@ -505,7 +614,7 @@
       }
     },
     {
-      "id": 9,
+      "id": 11,
       "type": "stat",
       "title": "Since the last canary review",
       "description": "From phase 6. The alert fires after 4 h 15 min.",
@@ -513,7 +622,7 @@
         "h": 6,
         "w": 12,
         "x": 0,
-        "y": 32
+        "y": 40
       },
       "datasource": {
         "type": "prometheus",
@@ -549,7 +658,7 @@
       }
     },
     {
-      "id": 10,
+      "id": 12,
       "type": "timeseries",
       "title": "Jobs in flight",
       "description": "Concurrency used, against WORKER_CONCURRENCY.",
@@ -557,7 +666,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 32
+        "y": 40
       },
       "datasource": {
         "type": "prometheus",

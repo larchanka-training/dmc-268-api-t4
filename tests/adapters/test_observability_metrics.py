@@ -9,6 +9,7 @@ before and after, or uses label values no other test touches.
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -18,9 +19,9 @@ from prometheus_client import CollectorRegistry
 from adapters.jobs.memory import MemoryJobStore
 from adapters.observability import metrics
 from adapters.observability.db_sampler import run_db_sampler
-from domain.ports import QueueSnapshot, ReviewJobStatus
+from domain.errors import ERROR_KINDS
+from domain.ports import PeriodicTaskRun, QueueSnapshot, ReviewJobStatus
 from tests.conftest import FakeIdentityProvider, FixedClock, build_test_app, log_events
-from worker.process import ERROR_KINDS
 
 SNAPSHOT = QueueSnapshot(
     jobs=(
@@ -48,8 +49,10 @@ def count(registry: CollectorRegistry, name: str, **labels: str) -> float:
 def queue_gauges() -> Any:
     """The sampler's gauges are process state: every test starts and ends without them."""
     metrics.QUEUE_GAUGES.snapshot = None
+    metrics.QUEUE_GAUGES.periodic = None
     yield metrics.QUEUE_GAUGES
     metrics.QUEUE_GAUGES.snapshot = None
+    metrics.QUEUE_GAUGES.periodic = None
 
 
 # --- what each process exports ---------------------------------------------------
@@ -251,6 +254,9 @@ class ScriptedSource:
             raise step
         return step
 
+    async def periodic_runs(self) -> tuple[PeriodicTaskRun, ...]:
+        return ()
+
 
 async def test_a_failed_sample_removes_the_queue_gauges(queue_gauges: Any) -> None:
     stop = asyncio.Event()
@@ -379,3 +385,59 @@ def test_a_port_in_use_is_logged_and_the_process_goes_on(
 
     [record] = log_events(caplog, "metrics.unavailable")
     assert (record.port, record.error_type) == (metrics.API_PORT, "OSError")
+
+
+# --- periodic tasks (the DB sampler, phase 5) ---------------------------------------
+
+REAPER_RUN = PeriodicTaskRun("reaper", datetime(2026, 10, 30, 12, 0, tzinfo=UTC), 30.0)
+
+
+def test_the_periodic_gauges_come_from_the_last_sample(queue_gauges: Any) -> None:
+    queue_gauges.periodic = (REAPER_RUN,)
+
+    registry = metrics.API_REGISTRY
+    assert (
+        registry.get_sample_value("periodic_task_last_success_timestamp", {"task": "reaper"})
+        == REAPER_RUN.last_success_at.timestamp()
+    )
+    assert registry.get_sample_value("periodic_task_interval_seconds", {"task": "reaper"}) == 30.0
+    # Independent of the queue's sample.
+    assert registry.get_sample_value("queue_oldest_claimable_age_seconds") is None
+
+
+def test_a_task_without_a_run_has_no_series(queue_gauges: Any) -> None:
+    """0 would read as "last success in 1970"; a missing series is quiet."""
+    queue_gauges.periodic = ()
+
+    assert (
+        metrics.API_REGISTRY.get_sample_value(
+            "periodic_task_last_success_timestamp", {"task": "reaper"}
+        )
+        is None
+    )
+
+
+class PeriodicFailing(ScriptedSource):
+    async def periodic_runs(self) -> tuple[PeriodicTaskRun, ...]:
+        raise RuntimeError("relation periodic_task_runs does not exist")
+
+
+async def test_a_failed_periodic_read_leaves_the_queue_gauges(
+    queue_gauges: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Between a deploy and its migration the table is missing: the queue still reports."""
+    stop = asyncio.Event()
+    snapshot = QueueSnapshot(jobs=(), oldest_claimable_age_seconds=5.0)
+    source = PeriodicFailing(stop, snapshot, snapshot)
+    seen: list[tuple[object, object]] = []
+
+    async def record() -> None:
+        while not stop.is_set():
+            seen.append((queue_gauges.snapshot, queue_gauges.periodic))
+            await asyncio.sleep(0)
+
+    with caplog.at_level(logging.WARNING):
+        await asyncio.gather(run_db_sampler(source, stop, interval=0.001), record())
+
+    assert (snapshot, None) in seen
+    assert [r.getMessage() for r in caplog.records].count("metrics.sampler.failed") == 1

@@ -24,6 +24,8 @@ PROMETHEUS = {"type": "prometheus", "uid": "${prometheus}"}
 GRAFANA = {"type": "grafana", "uid": "-- Grafana --"}
 #: The external probe's check (ops/observability/synthetics/uptime.json).
 SITE_JOB = "dmc268-site"
+#: adapters/llm/jev.py's provider label: the rule screen and verifier, not the review.
+TYPESAFE = "typesafe"
 NOT_HEALTH = 'route!="/health"'
 #: Grafana's rate window, at least four scrapes.
 W = "[$__rate_interval]"
@@ -115,12 +117,26 @@ OVERVIEW = Dashboard(
             description="RETRYING is one attempt; COMPLETED and FAILED are jobs.",
         ),
         Panel(
+            "LLM latency p95",
+            (
+                q(
+                    "histogram_quantile(0.95, sum by (le) "
+                    f'(rate(llm_request_duration_seconds_bucket{{provider!="{TYPESAFE}"}}[1h])))',
+                    "p95",
+                ),
+            ),
+            unit="s",
+            width=8,
+            description="Request to reply, per HTTP request to the review model that got one; "
+            "TypeSafe's rule screen and verifier excluded. By provider on Pipeline.",
+        ),
+        Panel(
             "LLM cost, last 24 h",
             (q("sum(increase(llm_cost_usd_total[1d]))", "USD"),),
             kind="stat",
             unit="currencyUSD",
             width=8,
-            description="From phase 5.",
+            description="No data until the team decides the LLM prices (todo step 48).",
         ),
         Panel(
             "External probe",
@@ -130,7 +146,7 @@ OVERVIEW = Dashboard(
             mappings={0: "down", 1: "up"},
             description="Grafana Synthetic Monitoring, every 2 minutes from three EU locations.",
         ),
-        Panel("Firing alerts", kind="alertlist", width=8),
+        Panel("Firing alerts", kind="alertlist", width=24),
     ),
 )
 
@@ -241,7 +257,35 @@ PIPELINE = Dashboard(
             ),
             unit="s",
             stacked=True,
-            description="From phase 5.",
+            description="Diff (FETCH_DIFF), context (BUILD_CONTEXT), LLM (LLM_CALL), the plan "
+            "(POSTPROCESS), posting (POST_FEEDBACK). Postgres time: Worker DB calls.",
+        ),
+        Panel(
+            "LLM latency by provider",
+            tuple(
+                q(
+                    f"histogram_quantile({quantile}, sum by (le, provider) "
+                    "(rate(llm_request_duration_seconds_bucket[1h])))",
+                    f"{{{{provider}}}} {name}",
+                )
+                for quantile, name in ((0.5, "p50"), (0.95, "p95"))
+            ),
+            unit="s",
+            description="Request to reply, per HTTP request that got one; failures are in LLM "
+            "requests. typesafe is the rule screen and verifier.",
+        ),
+        Panel(
+            "Worker DB calls p95 by operation",
+            (
+                q(
+                    "histogram_quantile(0.95, sum by (le, operation) "
+                    "(rate(worker_db_duration_seconds_bucket[1h])))",
+                    "{{operation}}",
+                ),
+            ),
+            unit="s",
+            description="The worker's Postgres calls per job: claim, lease, findings, outcome. "
+            "Slow statements: Top statements on Infrastructure.",
         ),
         Panel(
             "Claim latency p95",
@@ -276,7 +320,7 @@ PIPELINE = Dashboard(
                 ),
             ),
             stacked=True,
-            description="From phase 5.",
+            description="One per HTTP request: a key rotation counts twice.",
         ),
         Panel(
             "LLM tokens and cost per model, last 24 h",
@@ -284,13 +328,15 @@ PIPELINE = Dashboard(
                 q("sum by (model) (increase(llm_tokens_total[1d]))", "{{model}} tokens"),
                 q("sum by (model) (increase(llm_cost_usd_total[1d]))", "{{model}} USD"),
             ),
-            description="From phase 5.",
+            description="Tokens as each provider reported them. Cost: no data until the team "
+            "decides the LLM prices.",
         ),
         Panel(
             "Forge rate-limit headroom",
             (q("min by (provider) (forge_rate_limit_remaining_ratio)", "{{provider}}"),),
             unit="percentunit",
-            description="From phase 5. The alert fires under 10% for 10 minutes.",
+            description="GitHub's core limit, lowest in the last 5 minutes. The alert fires "
+            "under 10% for 10 minutes.",
         ),
         Panel(
             "Findings posted and secrets redacted, per hour",
@@ -298,7 +344,8 @@ PIPELINE = Dashboard(
                 q("sum by (severity) (increase(findings_posted_total[1h]))", "{{severity}}"),
                 q("sum by (rule) (increase(secrets_redacted_total[1h]))", "redacted {{rule}}"),
             ),
-            description="From phase 5.",
+            description="Findings the forge accepted, by severity. Redacted secrets: no data "
+            "until the diff is redacted before the LLM call (the REDACT step).",
         ),
         Panel(
             "Since the last canary review",

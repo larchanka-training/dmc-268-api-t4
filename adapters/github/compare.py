@@ -15,6 +15,7 @@ import httpx
 from adapters.github.app_auth import GitHubAppAuth
 from adapters.github.client import MAX_DIFF_BYTES
 from adapters.github.config import PROVIDER_NAME, GitHubAppSettings
+from adapters.github.rate_limit import RATE_LIMIT_HOOKS
 from domain.errors import ForgeRateLimitedError, ForgeUnavailableError, InstallationGoneError
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ class GitHubCompareDiffs:
         async with httpx.AsyncClient(
             timeout=self._settings.timeout_seconds,
             transport=self._transport,
+            event_hooks=RATE_LIMIT_HOOKS,
             follow_redirects=True,
         ) as client:
             request = client.build_request("GET", url, headers=headers)

@@ -1,0 +1,20 @@
+# promtool test rules for the drill copy: it fires after 15 quiet minutes.
+rule_files:
+  - ../no_throughput_drill.rules.yaml
+evaluation_interval: 1m
+
+tests:
+  - name: The drill fires after 15 minutes without an enqueued review, not while they arrive
+    interval: 1m
+    input_series:
+      - {series: 'up{job="api", instance="api:9100"}', values: '1x30'}
+      - {series: 'webhook_deliveries_total{job="api", instance="api:9100", provider="github", outcome="enqueued"}', values: '0+1x5 5x25'}
+    alert_rule_test:
+      - {eval_time: 10m, alertname: NoThroughputDrill, exp_alerts: []}
+      - eval_time: 25m
+        alertname: NoThroughputDrill
+        exp_alerts:
+          - exp_labels: {domain: business, severity: warning, owner: unassigned}
+            exp_annotations:
+              summary: "Drill: no review was enqueued in 15 minutes."
+              runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#no-throughput

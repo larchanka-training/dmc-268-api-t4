@@ -168,6 +168,14 @@ jobs:
       - name: Upload compose files
         run: |
           set -euo pipefail
+          # `up` recreates a container only when its compose definition or image changed,
+          # so a new Caddyfile or Alloy config is applied after it (Pull and start).
+          remote=$(ssh deploy-target "cd $APP_DIR && sha256sum Caddyfile alloy/config.alloy 2>/dev/null || true")
+          # Changed unless the server has this file's exact checksum line, so an empty
+          # $remote (no files there yet, or sha256sum printed nothing) counts as changed.
+          changed() { ! grep -qxF "$(sha256sum "deploy/$1" | cut -d' ' -f1)  $1" <<<"$remote"; }
+          if changed Caddyfile; then echo "CADDYFILE_CHANGED=true" >> "$GITHUB_ENV"; fi
+          if changed alloy/config.alloy; then echo "ALLOY_CONFIG_CHANGED=true" >> "$GITHUB_ENV"; fi
           scp -q deploy/compose.yml deploy/Caddyfile "deploy-target:$APP_DIR/"
           ssh deploy-target "mkdir -p $APP_DIR/alloy"
           scp -q deploy/alloy/config.alloy "deploy-target:$APP_DIR/alloy/"
@@ -282,6 +290,22 @@ jobs:
             docker compose config --quiet
             docker compose pull --quiet
             docker compose up --detach --remove-orphans
+            # Caddy reloads without dropping a connection; it may still be starting.
+            if [ '${CADDYFILE_CHANGED:-false}' = true ]; then
+              for attempt in 1 2 3 4 5; do
+                if out=\$(docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1); then
+                  echo 'Caddy reloaded the new Caddyfile'
+                  break
+                fi
+                if [ \"\$attempt\" = 5 ]; then printf '%s\n' \"\$out\" >&2; exit 1; fi
+                sleep 2
+              done
+            fi
+            # A restart, not SIGHUP: a SIGHUP before Alloy's handler is set would kill it.
+            if [ '${ALLOY_CONFIG_CHANGED:-false}' = true ] && docker compose ps --status running --services | grep -qx alloy; then
+              docker compose restart alloy >/dev/null
+              echo 'Alloy restarted with the new config'
+            fi
             docker image prune --force >/dev/null
             docker compose ps --format 'table {{.Service}}\t{{.Status}}'"
 
