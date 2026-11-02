@@ -158,12 +158,14 @@ class StubJobRepository:
     async def claim(self, worker_id: str) -> ClaimedJob | None:
         return await self._inner.claim(worker_id)
 
-    async def complete(self, job_id: str, stats: JobStats, *, worker_id: str) -> bool:
+    async def complete(
+        self, job_id: str, stats: JobStats, *, worker_id: str, summary: str | None = None
+    ) -> bool:
         if self._completed_error is not None:
             raise self._completed_error
         if not self._completed_result:
             return False
-        return await self._inner.complete(job_id, stats, worker_id=worker_id)
+        return await self._inner.complete(job_id, stats, worker_id=worker_id, summary=summary)
 
     async def fail(
         self, job_id: str, error_kind: str, *, retryable: bool, worker_id: str

@@ -123,35 +123,21 @@ def test_no_cursor_means_the_first_page(cursor: str | None) -> None:
 # --- connect URL --------------------------------------------------------
 
 
-def test_an_organisation_goes_to_its_installation_settings() -> None:
-    organization = make_organization("acme", "100", installation_id=42)
-
-    assert connect_url(organization, APP_SLUG) == (
-        "https://github.com/organizations/acme/settings/installations/42"
-    )
-
-
-def test_a_personal_account_goes_to_the_users_own_settings() -> None:
-    organization = make_organization(
-        "octocat", "1", installation_id=7, account_type=AccountType.USER
-    )
-
-    assert connect_url(organization, APP_SLUG) == "https://github.com/settings/installations/7"
-
-
-def test_no_organisation_goes_to_the_apps_install_page() -> None:
-    assert connect_url(None, APP_SLUG) == (f"https://github.com/apps/{APP_SLUG}/installations/new")
+def test_connect_goes_to_the_apps_install_page() -> None:
+    """GitHub asks there which account to install on, so a personal account can
+    be added next to an organisation's."""
+    assert connect_url(APP_SLUG) == f"https://github.com/apps/{APP_SLUG}/installations/new"
 
 
 # --- the settings page both actions share -------------------------------
 
 
-def test_the_settings_url_is_the_same_page_connect_points_at() -> None:
-    """GitHub has one page per installation, not one per repository, so connect
-    and disconnect lead to the same place."""
+def test_the_settings_url_for_an_organisation() -> None:
     organization = make_organization("acme", "100", installation_id=42)
 
-    assert installation_settings_url(organization) == connect_url(organization, APP_SLUG)
+    assert installation_settings_url(organization) == (
+        "https://github.com/organizations/acme/settings/installations/42"
+    )
 
 
 def test_the_settings_url_for_a_personal_account() -> None:

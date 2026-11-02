@@ -92,84 +92,121 @@ Rules for every step:
 
 ## Phase 3: metrics and Alloy
 
-- [ ] 21. Dependency — `prometheus-client`; lock; re-export.
-- [ ] 22. Definitions — `adapters/observability/metrics.py`: every metric of
-      § Application with its labels; each counter and histogram initialised at 0 for
-      every known label combination; timestamp gauges left absent.
-- [ ] 23. Servers — metrics server on `:9100` in the API lifespan and `:9101` in the
+- [x] 21. Dependency — `prometheus-client`; lock; re-export.
+- [x] 22. Definitions — `adapters/observability/metrics.py`: the metrics of § Application
+      that this phase records, with their labels, in one registry per process; each
+      counter and histogram initialised at 0 for every known label combination; the
+      sampled gauges absent until a sample succeeds. Every later metric lands with its
+      instrumentation (phases 4–6): a counter exported at 0 before anything increments it
+      reads as "nothing happened".
+- [x] 23. Servers — metrics server on `:9100` in the API lifespan and `:9101` in the
       worker; nothing on the API's main port.
-- [ ] 24. HTTP metrics — middleware: `http_requests_total` and
+- [x] 24. HTTP metrics — recorded by the access log middleware: `http_requests_total` and
       `http_request_duration_seconds` by route template; the SSE route is not observed
       by the histogram.
-- [ ] 25. Webhook outcomes — `api/webhooks/github.py`: `webhook_deliveries_total` with
+- [x] 25. Webhook outcomes — `api/webhooks/github.py`: `webhook_deliveries_total` with
       `enqueued`, `duplicate`, `filtered`, `unauthorized`, `too_large`, `rejected` (400
       after a valid signature), `error` (5xx).
-- [ ] 26. Job metrics — worker: `jobs_finished_total{status,error_kind}`,
+- [x] 26. Job metrics — worker: `jobs_finished_total{status,error_kind}`,
       `review_duration_seconds{status}` (enqueue → terminal; buckets include
       60/120/300/600/900), `job_claim_latency_seconds` (from `next_attempt_at`),
-      `worker_in_flight`. Label values are the database's (`COMPLETED`).
-- [ ] 27. DB sampler — API lifespan task, every 15 s: `queue_jobs{status}` and
+      `worker_in_flight`. Label values are the database's (`COMPLETED`). `ClaimedJob`
+      carries the store's enqueue, claimable and claim times, so no two clocks are
+      compared.
+- [x] 27. DB sampler — API lifespan task, every 15 s: `queue_jobs{status}` and
       `queue_oldest_claimable_age_seconds` as defined in § Application; a failed query
-      removes its gauges.
-- [ ] 28. Caddy — `deploy/Caddyfile`: global `servers { metrics }` and a `:2020`
-      `metrics` site block; `:2020` not published in compose.
-- [ ] 29. Postgres — compose `command` with `shared_preload_libraries=pg_stat_statements`;
+      removes its gauges. Both job stores implement `queue_snapshot()`.
+- [x] 28. Caddy — `deploy/Caddyfile`: the global `metrics` option (Caddy 2.11 deprecates
+      `servers { metrics }`) and a `:2020` `metrics` site block; `:2020` not published.
+- [x] 29. Postgres — compose `command` with `shared_preload_libraries=pg_stat_statements`;
       `alembic/versions/0003_pg_stat_statements.py` (`CREATE EXTENSION IF NOT EXISTS`);
       both in `docs/db_models_and_migrations.md`. The exporter role is a checklist item.
-- [ ] 30. Alloy — compose `alloy` service: pinned image, no ports, read-only
-      `/var/run/docker.sock`, `/sys`, `/proc` and `/opt/dmc268/logs`, WAL on a named
-      volume, `GRAFANA_CLOUD_*` and `POSTGRES_EXPORTER_PASSWORD` by interpolation only.
-      `deploy/alloy/config.alloy`: scrape `api:9100`, `worker:9101`, `caddy:2020` every
-      60 s; `unix` (cpu, meminfo, filesystem, diskstats, netdev, loadavg); `cadvisor`
-      (`docker_only`, no container labels, relabel allowlist including OOM); `postgres`
-      (top 20 statements); tail `/logs/*.jsonl` to Loki; remote write.
-- [ ] 31. Deploy — `deploy.yml`: copy the Alloy config; write the new variables to
-      `.env`; warn, not fail, when Grafana secrets are missing; the smoke test asserts
-      `/api/metrics` is 404; port check unchanged (22/80/443).
-- [ ] 32. Tests — expected metric names exposed; route label is the template; main port
+- [x] 30. Alloy — compose `alloy` service (profile `monitoring`): pinned image, no ports,
+      usage reporting off (`--disable-reporting`), read-only Docker and containerd
+      sockets, `/sys`, `/proc` and `./logs`, WAL on a named volume, `GRAFANA_CLOUD_*` and
+      `POSTGRES_EXPORTER_PASSWORD` by interpolation only. `deploy/alloy/config.alloy`: scrape `api:9100`, `worker:9101`, `caddy:2020`
+      every 60 s; `unix` (cpu, meminfo, loadavg, filesystem, diskstats, and vmstat's
+      `oom_kill` for the OOM alert; no netdev, which sees only Alloy's network
+      namespace); `cadvisor` (`docker_only`, no container labels, relabel allowlist of
+      CPU, memory, restarts and its `up`); `postgres` (top 20 statements); tail
+      `/logs/*.jsonl` to Loki; remote write. Checked end to end by the lab
+      (`uv run deploy/lab/lab.py test`): every target up, both pushes arrive.
+- [x] 31. Deploy — `deploy.yml`: copy the Alloy config; write the new variables and
+      `COMPOSE_PROFILES=monitoring` to `.env` only when all six exist, else warn; the
+      smoke test asserts `/api/metrics` is 404; port check unchanged (22/80/443).
+      `ci.yml` validates compose with the profile, and the Caddyfile and Alloy config
+      with the images compose runs.
+- [x] 32. Tests — expected metric names exposed; route label is the template; main port
       has no `/metrics`; one webhook outcome per branch; SSE absent from the histogram;
-      sampler clears gauges on a failed query.
-- [ ] 33. Verify — five commands green; stop. Production exit **blocked by:** "Grafana Cloud
+      sampler clears gauges on a failed query; claim times and queue snapshot in the
+      job store conformance suite.
+- [x] 33. Verify — five commands green; stop. Production exit **blocked by:** "Grafana Cloud
       stack", "Postgres exporter role".
 
 ## Phase 4: alerts, dashboards, relay
 
-- [ ] 34. Relay — `api/internal_alerts.py`, `POST /internal/alerts/sentry`: `404`
-      without `SENTRY_WEBHOOK_SECRET`; `Sentry-Hook-Signature` (HMAC-SHA256) else `401`;
-      drops stale (> 30 min), duplicate (issue + event id, 1 h, bounded) and over
-      30/min, each logged `alert.relay_dropped` and counted by reason; message = level,
-      title (redacted, ≤ 200 chars), env, release, count, link; failures `warning` +
-      `alert_relay_failures_total`. Exempt the route from CSRF in `api/deps.py` (server
-      to server, like `/webhooks/`); `before_send` drops any event raised inside it.
-- [ ] 35. Notifier — `adapters/alerting/telegram.py`: `TelegramNotifier` (`sendMessage`)
-      and `NullNotifier` (logs `alert.dropped`) while `TELEGRAM_BOT_TOKEN` is unset;
-      settings for `TELEGRAM_*` and `SENTRY_WEBHOOK_SECRET`.
-- [ ] 36. Relay tests — valid signature forwards; bad or missing `401`; stale and
-      repeated dropped; failing notifier → warning and no Sentry event; notifier against
-      `httpx.MockTransport`.
-- [ ] 37. Alert rules — `ops/observability/alerts/*.rules.yaml`: every row of § Alerts
-      with its exact expression; labels `domain`, `severity`, `owner`; annotation
-      `runbook_url`; dependants carry their root's `unless on()`. Upload format
-      **blocked by:** "Rule routing check"; the files and tests are not.
-- [ ] 38. Rule tests — `ops/observability/alerts/tests/` for `promtool test rules`: per
-      rule fire, not fire, absent series, suppressed by its root; a `ci.yml` job runs
-      promtool from a pinned Prometheus image.
-- [ ] 39. Dashboards — `ops/observability/dashboards/{overview,api,pipeline,infrastructure}.json`
-      with the § Dashboards panels.
-- [ ] 40. Synthetics — `ops/observability/synthetics/uptime.json`: HTTP
-      `https://<site>/api/health`, every 2 min, 3 EU probes, TLS expiry.
-- [ ] 41. Sync — `ops/observability/sync.py`: idempotent push of dashboards, rules and
-      synthetics through the Grafana APIs (`GRAFANA_SA_TOKEN`); tests with
-      `httpx.MockTransport`; `.github/workflows/observability-sync.yml`
-      (`workflow_dispatch`).
-- [ ] 42. Deploy markers — `deploy.yml` after the smoke test: Grafana annotation (tag
-      `deploy`, text `IMAGE_TAG`); `sentry-cli releases new`, `set-commits --auto`,
-      `deploys new`, with `fetch-depth: 0` on that job's checkout; each skipped with a
-      warning when its token is missing.
-- [ ] 43. Runbooks — `docs/runbooks.md`: one section per alert (meaning, first three
-      checks, how to silence); "Target down" (api) and "Site unreachable" end with the
+- [x] 34. Relay — `api/internal_alerts.py`, `POST /internal/alerts/sentry`: `404`
+      without `SENTRY_WEBHOOK_SECRET`; `Sentry-Hook-Signature` (HMAC-SHA256 of the
+      received bytes) else `401`; `413` over 1 MB; a signed delivery that is not
+      `event_alert` gets `204` and `alert.relay_ignored`. `domain/alerts.py`
+      (`RelayGate`) drops stale (> 30 min, from `data.event.timestamp`, else `datetime`),
+      duplicate (issue + event id, 1 h, bounded) and over 30/min, each logged
+      `alert.relay_dropped` and counted in `alert_relay_dropped_total{reason}`. Answers
+      202 and forwards after the response (Sentry allows one second). Message: level,
+      rule, environment, release, title (redacted, ≤ 200 chars), link; Sentry's payload
+      has no event count, so the rule name stands in. Failures `warning` +
+      `alert_relay_failures_total`. CSRF-exempt in `api/deps.py`; `before_send` drops any
+      event from the route and `traces_sampler` skips it. The Bot API's URL holds the
+      token and httpx logs it: new `telegram_bot_token` redaction rule (ruleset 2).
+- [x] 35. Notifier — `adapters/alerting/telegram.py`: `TelegramNotifier` (`sendMessage`,
+      plain text) and `NullNotifier` (logs `alert.dropped`) while `ALERTS_TELEGRAM_BOT_TOKEN`
+      or `ALERTS_TELEGRAM_CHAT_ID` is unset; `AlertNotifier` port in `domain/ports.py`;
+      `adapters/alerting/config.py` for `ALERTS_TELEGRAM_*` and `SENTRY_WEBHOOK_SECRET`, which
+      `deploy.yml` writes to `.env` when set.
+- [x] 36. Relay tests — valid signature forwards; bad or missing `401`; stale (also from
+      `datetime`), repeated and over-limit dropped and counted; failing notifier →
+      warning, counter and no Sentry event or transaction; a crash in the route reaches
+      no Sentry event; the bot token reaches no log line (fails without the redaction
+      rule); notifier against `httpx.MockTransport`.
+- [x] 37. Alert rules — `ops/observability/alerts/{api,worker,db,edge,host,monitoring,
+      business}.rules.yaml`: 24 rules for the 22 rows of § Alerts ("Target down" is
+      three rules, one per process and domain; the SLO burn alerts are step 56). Labels
+      `domain` (the file), `severity`, `owner` (`unassigned` until the checklist's
+      "Owners"); annotations `summary`, `runbook_url`; dependants carry their root's
+      `unless on()`. "API error rate" and "API latency" leave `/health` out. Upload:
+      Grafana's import API, verified against Grafana 13.2 in the lab; the Grafana Cloud
+      check stays **blocked by:** "Rule routing check".
+- [x] 38. Rule tests — `ops/observability/alerts/tests/*.test.yaml` for `promtool test
+      rules`: per rule fire, not fire, absent series, suppressed by its root; `ci.yml`
+      job `alert-rules` runs promtool from the lab's pinned Prometheus image.
+      `tests/ops/test_observability_rules.py` holds the files to the spec's table, the
+      labels and the runbook anchors.
+- [x] 39. Dashboards — `ops/observability/dashboards/{overview,api,pipeline,infrastructure}.json`,
+      generated by `dashboards/build.py` from a compact panel list (a test fails when
+      the JSON is stale); a `prometheus` datasource variable, deploy annotations, the
+      Sentry traces link on API latency (`sentry_url`, set by `SENTRY_ORG_URL`). The SLO
+      budget panel is step 56.
+- [x] 40. Synthetics — `ops/observability/synthetics/uptime.json`: HTTP
+      `https://<site>/api/health`, every 2 min, Frankfurt, London and Paris (names, so
+      `sync.py` resolves the ids), basic metrics, job `dmc268-site`.
+- [x] 41. Sync — `ops/observability/sync.py`: idempotent push of the dashboards (folder
+      DMC-268), rules (import API, removed groups deleted), alerting (contact point
+      `telegram` created once with placeholders and never overwritten, the two mute
+      timings, the policy grouped by `domain`) and the synthetic check (Synthetic
+      Monitoring API: `GRAFANA_SM_URL`, `GRAFANA_SM_TOKEN`); `--only`, `--dry-run`; tests
+      with `httpx.MockTransport`; `.github/workflows/observability-sync.yml`
+      (`workflow_dispatch`). The lab's `up` runs it against its own Grafana.
+- [x] 42. Deploy markers — `deploy.yml` after the last check: Grafana annotation (tag
+      `deploy`, text `IMAGE_TAG`) with `GRAFANA_URL` and `GRAFANA_SA_TOKEN`; `@sentry/cli`
+      3.8.2 `releases new`, `set-commits --auto --ignore-missing`, `finalize`, `deploys
+      new -e production`, with `fetch-depth: 0` on the job's checkout; each skipped with
+      a warning when its token is missing, and neither fails the deploy.
+- [x] 43. Runbooks — `docs/runbooks.md`: one section per alert (meaning, first three
+      checks, how to silence); "Target down" and "Site unreachable" end with the
       redelivery step of § SLOs, "Blind spot".
-- [ ] 44. Verify — five commands green; stop. The drills are checklist items.
+- [x] 44. Verify — five commands green; promtool green; the lab's `test` passes (34
+      checks), and `drill worker-down --alert` sees Grafana fire Target down. The drills
+      in production are checklist items.
 
 ## Phase 5: pipeline instrumentation
 
@@ -218,10 +255,10 @@ Rules for every step:
 
 ## Docs, in the phase that needs them
 
-- [ ] 58. `docs/devops.md` secrets table: each new name of § Configuration and secrets.
+- [x] 58. `docs/devops.md` secrets table: each new name of § Configuration and secrets.
 - [ ] 59. `docs/configuration.md`: `llm_prices`, `llm_daily_budget_usd` (phase 5).
       **Blocked by:** "LLM prices and budget".
 - [ ] 60. `AGENTS.md` open question 4 marked resolved, and the two ⚠️ about it removed
       from the spec. **Blocked by:** "Secret storage".
-- [ ] 61. `AGENTS.md` layout table: `adapters/observability/`, `adapters/alerting/`,
+- [x] 61. `AGENTS.md` layout table: `adapters/observability/`, `adapters/alerting/`,
       `ops/observability/`.

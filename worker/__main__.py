@@ -23,13 +23,14 @@ from adapters.github.factory import build_vcs_client
 from adapters.github.publisher import GitHubReviewPublisher
 from adapters.llm.config import LLMSettings
 from adapters.llm.factory import build_gateway
+from adapters.observability import metrics
 from adapters.observability.config import LoggingSettings, SentrySettings
 from adapters.observability.logging import configure_logging
 from adapters.observability.sentry import init_sentry
 from domain.ports import GitProvider
 from worker.config import WorkerSettings
 from worker.loop import run_worker
-from worker.process import DEBUG_LOG_DIFF_ENV, ReviewStage
+from worker.process import DEBUG_LOG_DIFF_ENV, ERROR_KINDS, ReviewStage
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,10 @@ def main() -> None:
     settings = WorkerSettings.from_env()
     vcs = build_vcs_from_env()
     review = build_review_from_env()
+    # Prometheus on the internal :9101, for Alloy (docs/observability.md § Metrics). The
+    # server thread is a daemon: it ends with the process, after the drain.
+    metrics.init_worker_metrics(ERROR_KINDS)
+    metrics.serve(metrics.WORKER_REGISTRY, metrics.WORKER_PORT)
     asyncio.run(_run_until_signalled(settings, vcs, review))
 
 

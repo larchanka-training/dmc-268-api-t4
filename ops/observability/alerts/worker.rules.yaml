@@ -1,0 +1,54 @@
+# Alert rules, domain worker (docs/observability.md § Alerts).
+groups:
+  - name: worker
+    interval: 1m
+    rules:
+      # Root: the worker answers no scrape.
+      - alert: TargetDown
+        expr: up{job="worker"} == 0
+        for: 2m
+        labels: {domain: worker, severity: critical, owner: unassigned}
+        annotations:
+          summary: The worker answers no scrape.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#target-down
+
+      # Work is waiting and nothing is draining. A wait alone is normal: at most 3
+      # jobs per installation run at once. The gauge comes from the API's DB sampler.
+      - alert: QueueBacklog
+        expr: |
+          queue_oldest_claimable_age_seconds > 600
+          and on() sum(increase(jobs_finished_total[10m])) == 0
+          unless on() (up{job=~"api|worker"} == 0)
+        labels: {domain: worker, severity: critical, owner: unassigned}
+        annotations:
+          summary: A job has waited over 10 minutes and no job finished in 10 minutes.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#queue-backlog
+
+      # Quiet until phase 5 adds the metric.
+      - alert: LeaseExpiry
+        expr: increase(lease_expiries_total[1h]) > 0 unless on() (up{job="worker"} == 0)
+        labels: {domain: worker, severity: warning, owner: unassigned}
+        annotations:
+          summary: The reaper took back an expired lease in the last hour.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#lease-expiry
+
+      # The 180 s covers the sampler and scrape delay. Quiet until phase 5 adds the
+      # metrics (periodic_task_runs).
+      - alert: PeriodicTaskStale
+        expr: |
+          time() - periodic_task_last_success_timestamp
+            > 2 * periodic_task_interval_seconds + 180
+          unless on() (up{job=~"api|worker"} == 0)
+        labels: {domain: worker, severity: critical, owner: unassigned}
+        annotations:
+          summary: A periodic task missed two runs.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#periodic-task-stale
+
+      # Quiet until phase 5 adds the metric.
+      - alert: ForgeRateLimit
+        expr: forge_rate_limit_remaining_ratio < 0.1
+        for: 10m
+        labels: {domain: worker, severity: warning, owner: unassigned}
+        annotations:
+          summary: Under 10% of the forge's rate limit left for 10 minutes.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#forge-rate-limit

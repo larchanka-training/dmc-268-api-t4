@@ -13,6 +13,7 @@ become the issue title and travel on to email and Telegram).
 import logging
 from collections.abc import Callable, Mapping
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import sentry_sdk
 import structlog
@@ -30,6 +31,10 @@ from domain.redaction import redact
 logger = logging.getLogger(__name__)
 
 _HEALTH_PATH = "/health"
+#: The Sentry → Telegram relay's route (api/internal_alerts.py). Nothing from it may
+#: reach Sentry: an event raised there would trigger the relay again, and its trace
+#: would carry the Bot API call, whose URL holds the bot token.
+RELAY_PATH = "/internal/alerts/sentry"
 
 #: Request headers an event may carry; Sentry already drops cookies and
 #: ``Authorization`` without PII, and the webhook signature has no business in it.
@@ -51,7 +56,7 @@ _TAG_FIELDS = ("installation_id", "job_id", "delivery_id", "request_id", "error_
 
 
 def traces_sampler(context: SamplingContext) -> float:
-    """Trace every transaction except the healthcheck and the SSE stream.
+    """Trace every transaction except the healthcheck, the SSE stream and the relay.
 
     The Docker healthcheck alone is 8,640 requests a day. An SSE stream
     (``GET /jobs/{job_id}/events``) stays open until its job ends while polling
@@ -60,7 +65,9 @@ def traces_sampler(context: SamplingContext) -> float:
     scope = context.get("asgi_scope") or {}
     # Behind uvicorn --root-path /api the path carries the prefix (api/deps.py).
     path = str(scope.get("path", "")).removeprefix(str(scope.get("root_path", "")))
-    if path == _HEALTH_PATH or (path.startswith("/jobs/") and path.endswith("/events")):
+    if path in (_HEALTH_PATH, RELAY_PATH) or (
+        path.startswith("/jobs/") and path.endswith("/events")
+    ):
         return 0.0
     return 1.0
 
@@ -70,6 +77,8 @@ def scrub_event(*, production: bool) -> Callable[[Event, Hint], Event | None]:
 
     def scrub(event: Event, hint: Hint) -> Event | None:
         data = cast(dict[str, Any], event)
+        if _from_relay(data):
+            return None
         _scrub_request(data)
         _tag_context(data)
         if production:
@@ -139,6 +148,16 @@ def init_sentry(settings: SentrySettings, *, transport: Transport | None = None)
 
 
 # --- helpers -------------------------------------------------------------------
+
+
+def _from_relay(event: dict[str, Any]) -> bool:
+    """Raised while handling the relay route: by its transaction name, or by the
+    request URL when the event has no transaction."""
+    if str(event.get("transaction", "")).endswith(RELAY_PATH):
+        return True
+    request = event.get("request")
+    url = request.get("url") if isinstance(request, dict) else None
+    return isinstance(url, str) and urlsplit(url).path.endswith(RELAY_PATH)
 
 
 def _scrub_request(event: dict[str, Any]) -> None:

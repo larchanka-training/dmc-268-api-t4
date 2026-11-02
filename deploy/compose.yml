@@ -1,5 +1,6 @@
 # Production stack on the team 4 VPS, deployed to /opt/dmc268 by .github/workflows/deploy.yml.
-# Only Caddy publishes a port; api and postgres are reachable on the compose network only.
+# Only Caddy publishes a port; api and postgres are reachable on the compose network only,
+# and so are the metrics ports (api 9100, worker 9101, caddy 2020) that Alloy scrapes.
 name: dmc268
 
 services:
@@ -46,6 +47,9 @@ services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
+    # pg_stat_statements for the exporter's top statements (docs/observability.md § System);
+    # the extension itself is migration 0003. Changing this restarts Postgres on deploy.
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
@@ -78,7 +82,45 @@ services:
       - caddy_data:/data
       - caddy_config:/config
 
+  # Grafana Alloy (docs/observability.md § Metrics, § System): scrapes api, worker and
+  # caddy, runs the host, container and Postgres exporters, tails ./logs and pushes both
+  # to Grafana Cloud. The monitoring profile starts it; deploy.yml turns the profile on
+  # only when the Grafana settings exist, so a deploy without them still works.
+  alloy:
+    image: grafana/alloy:v1.21.2
+    profiles: [monitoring]
+    restart: unless-stopped
+    # The image's default arguments plus --disable-reporting: Alloy would otherwise send
+    # anonymous usage statistics to Grafana. Check the default on an image upgrade
+    # (docker image inspect --format '{{json .Config.Cmd}}').
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+      - --disable-reporting
+    # Its own credentials only, by interpolation: never the whole .env (devops decision 11).
+    environment:
+      GRAFANA_CLOUD_PROM_URL: ${GRAFANA_CLOUD_PROM_URL:-}
+      GRAFANA_CLOUD_PROM_USER: ${GRAFANA_CLOUD_PROM_USER:-}
+      GRAFANA_CLOUD_LOKI_URL: ${GRAFANA_CLOUD_LOKI_URL:-}
+      GRAFANA_CLOUD_LOKI_USER: ${GRAFANA_CLOUD_LOKI_USER:-}
+      GRAFANA_CLOUD_TOKEN: ${GRAFANA_CLOUD_TOKEN:-}
+      POSTGRES_EXPORTER_PASSWORD: ${POSTGRES_EXPORTER_PASSWORD:-}
+    # No ports: its UI listens on the container's loopback. Every mount is read-only but
+    # the WAL. Reading the Docker and containerd sockets is root-equivalent, a deliberate
+    # cost like devops decision 14; cadvisor needs both to see the containers.
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # The WAL and the log tail positions, kept across restarts and deploys.
+      - alloy_data:/var/lib/alloy/data
+      - ./logs:/logs:ro
+      - /proc:/host/proc:ro
+      - /sys:/sys:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /run/containerd/containerd.sock:/run/containerd/containerd.sock:ro
+
 volumes:
   pgdata:
   caddy_data:
   caddy_config:
+  alloy_data:

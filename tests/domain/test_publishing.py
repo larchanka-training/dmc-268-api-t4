@@ -25,6 +25,7 @@ from domain.publishing import (
     at_least,
     build_plan,
     build_skipped_plan,
+    comment_message,
     fingerprint,
     fingerprint_in,
 )
@@ -531,3 +532,43 @@ def test_the_skipped_plan_says_why_and_posts_no_review() -> None:
         "\n"
         "Split the pull request into smaller ones to get an AI review."
     )
+
+
+@pytest.mark.parametrize(
+    "suggestion",
+    [
+        None,
+        # Matches the diff: posted as a ```suggestion block.
+        FindingSuggestion(
+            before=('    query += f" ORDER BY {sort}"',),
+            after=('    query += f" ORDER BY {COLUMNS[sort]}"',),
+        ),
+        # Does not match: posted as a plain diff.
+        FindingSuggestion(before=("something else",), after=("better", "and more")),
+    ],
+)
+def test_the_console_message_is_the_finding_text_without_markdown_around_it(
+    suggestion: FindingSuggestion | None,
+) -> None:
+    message = "Interpolating `sort` is SQL injection.\n\n```python\nquery += sort\n```"
+    plan = build_plan(
+        [finding(message=message, suggestion=suggestion)], model_summary="", lines=lines()
+    )
+
+    assert comment_message(plan.comments[0].body, suggestion) == message
+
+
+def test_a_body_without_the_rendered_shape_is_returned_as_it_is() -> None:
+    assert comment_message("plain text", None) == "plain text"
+    body = build_plan([finding()], model_summary="", lines=lines()).comments[0].body
+    # The stored suggestion no longer matches what the body carries.
+    other = FindingSuggestion(before=("a",), after=("b",))
+    assert comment_message(body, other) == body
+
+
+def test_the_plain_summary_has_the_verdict_and_the_model_summary_without_markdown() -> None:
+    plan = build_plan([finding()], model_summary="  Adds sorting.  ", lines=lines())
+
+    assert plan.plain_summary == "💬 Issues worth a look\n\nAdds sorting."
+    clean = build_plan([], model_summary="", lines=lines())
+    assert clean.plain_summary == "✅ No issues at or above the configured severity"

@@ -109,11 +109,50 @@ jobs:
         run: |
           printf 'IMAGE_TAG=ci\nPOSTGRES_USER=dmc\nPOSTGRES_PASSWORD=dummy\nPOSTGRES_DB=dmc268\nSITE_ADDRESS=localhost\nSERVER_IP=127.0.0.1\n' > .env
           docker compose -f compose.yml config --quiet
+          # And as deploy.yml runs it when the Grafana settings exist: with Alloy.
+          export COMPOSE_PROFILES=monitoring
+          docker compose -f compose.yml config --quiet
           echo "compose.yml is valid; published ports:"
           docker compose -f compose.yml config --format json | python3 -c "import json,sys; c=json.load(sys.stdin); print({n: [p.get('published') for p in s.get('ports', [])] for n, s in c['services'].items()})"
+          # Only Caddy publishes ports (devops decision 10); metrics stay on the compose network.
+          docker compose -f compose.yml config --format json | python3 -c "import json,sys; c=json.load(sys.stdin); bad=[n for n, s in c['services'].items() if s.get('ports') and n != 'caddy']; sys.exit(f'publishes ports: {bad}' if bad else 0)"
+
+      - name: Validate Caddy and Alloy configs
+        working-directory: deploy
+        run: |
+          # The images compose runs, so the check matches production.
+          images=$(COMPOSE_PROFILES=monitoring docker compose -f compose.yml config --format json | python3 -c "import json,sys; s=json.load(sys.stdin)['services']; print(s['caddy']['image'], s['alloy']['image'])")
+          read -r caddy_image alloy_image <<<"$images"
+          docker run --rm -e SITE_ADDRESS=localhost -e SERVER_IP=127.0.0.1 \
+            -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" "$caddy_image" \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          docker run --rm -v "$PWD/alloy/config.alloy:/etc/alloy/config.alloy:ro" "$alloy_image" \
+            validate /etc/alloy/config.alloy
 
       - name: Validate local compose file
         run: |
           docker compose -f docker-compose.yml config --quiet
+          # The observability lab (deploy/lab/README.md).
+          docker compose -f deploy/lab/compose.yml config --quiet
           echo "docker-compose.yml is valid; published ports:"
           docker compose -f docker-compose.yml config --format json | python3 -c "import json,sys; c=json.load(sys.stdin); print({n: [p.get('published') for p in s.get('ports', [])] for n, s in c['services'].items()})"
+
+  alert-rules:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every rule fires, stays quiet, ignores an absent series and yields to its root
+      # (docs/observability.md § Alerts, "Rules are tested in CI").
+      - name: promtool check and test
+        working-directory: ops/observability/alerts
+        run: |
+          # The lab's Prometheus, so the rules are tested by the version the lab runs.
+          image=$(grep -oE 'prom/prometheus:v[0-9.]+' ../../../deploy/lab/compose.yml)
+          echo "promtool from $image"
+          docker run --rm -v "$PWD:/alerts:ro" -w /alerts --entrypoint promtool "$image" \
+            check rules *.rules.yaml
+          # rule_files in a test file are relative to the test file.
+          docker run --rm -v "$PWD:/alerts:ro" -w /alerts --entrypoint promtool "$image" \
+            test rules tests/*.test.yaml

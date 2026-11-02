@@ -1,0 +1,21 @@
+{
+  "job": "dmc268-site",
+  "target": "https://${SITE_ADDRESS}/api/health",
+  "frequency": 120000,
+  "timeout": 10000,
+  "enabled": true,
+  "basicMetricsOnly": true,
+  "alertSensitivity": "none",
+  "labels": [{"name": "service", "value": "dmc268"}],
+  "probes": ["Frankfurt", "London", "Paris"],
+  "settings": {
+    "http": {
+      "method": "GET",
+      "ipVersion": "V4",
+      "validStatusCodes": [200],
+      "noFollowRedirects": true,
+      "failIfNotSSL": true,
+      "failIfSSL": false
+    }
+  }
+}

@@ -1,0 +1,200 @@
+# Observability lab: the whole metrics and logs pipeline on a laptop (deploy/lab/README.md).
+#
+# The app as in the repo's docker-compose.yml, with production's Caddyfile, Alloy config
+# and Postgres setting. Local Prometheus, Loki and Grafana stand in for Grafana Cloud, and
+# sentry_stub.py for Sentry: no real credential, and no data goes to Grafana Cloud,
+# Sentry, GitHub or an LLM provider (LAB_SENTRY_DSN sends to a real Sentry project).
+#
+#   uv run deploy/lab/lab.py test
+#
+# The alloy, caddy and postgres images are production's (deploy/compose.yml); lab.py
+# refuses to start when they differ.
+name: dmc268-lab
+
+x-app: &app
+  build: ../..
+  environment:
+    # Not "local": production's JSON lines on stdout too.
+    ENV: lab
+    APP_ORIGIN: http://localhost:8000
+    GITHUB_CLIENT_ID: local
+    GITHUB_CLIENT_SECRET: local
+    GITHUB_CALLBACK_URL: http://localhost:8000/auth/github/callback
+    GITHUB_APP_ID: "1"
+    GITHUB_APP_SLUG: local
+    GITHUB_APP_PRIVATE_KEY_PATH: /tmp/dev-app.pem
+    GITHUB_WEBHOOK_SECRET: local-webhook-secret
+    # Every GitHub call is refused, so a job ends as forge_unavailable (RETRYING, then
+    # FAILED) and no model is ever called.
+    GITHUB_API_BASE_URL: http://127.0.0.1:9
+    DATABASE_URL: postgresql+asyncpg://dmc:dmc@postgres:5432/dmc268
+    # The worker refuses to start without them.
+    LLM_PRIMARY_API_KEYS: sk-lab-not-a-key
+    LLM_PRIMARY_MODEL: lab-model
+    LOG_DIR: /logs
+    # Sentry: the stand-in below (sentry_stub.py), or a real project with LAB_SENTRY_DSN
+    # (its events carry environment "lab" and release "lab").
+    SENTRY_DSN: ${LAB_SENTRY_DSN:-http://lab@sentry:9000/1}
+    IMAGE_TAG: lab
+    # The Sentry → Telegram relay; no bot is configured, so alerts end as alert.dropped.
+    SENTRY_WEBHOOK_SECRET: lab-sentry-webhook-secret
+  # A throwaway App key, as in docker-compose.yml.
+  entrypoint:
+    - python
+    - -c
+    - |
+      import os, sys
+      from cryptography.hazmat.primitives import serialization
+      from cryptography.hazmat.primitives.asymmetric import rsa
+      key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+      with open("/tmp/dev-app.pem", "wb") as f:
+          f.write(key.private_bytes(serialization.Encoding.PEM,
+                                    serialization.PrivateFormat.PKCS8,
+                                    serialization.NoEncryption()))
+      os.execvp(sys.argv[1], sys.argv[1:])
+  volumes:
+    - logs:/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+    logs-init:
+      condition: service_completed_successfully
+
+services:
+  # Every port is published on localhost only, the metrics ones included, so the checks
+  # (and you) can read them; production publishes none of them.
+  api:
+    <<: *app
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:9100:9100"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "worker"]
+    ports:
+      - "127.0.0.1:9101:9101"
+
+  # The log volume owned by the image user 10001, as ops/bootstrap.sh does on the VPS
+  # (any image with chown would do; this one is pulled anyway).
+  logs-init:
+    image: postgres:17-alpine
+    entrypoint: ["chown", "10001:10001", "/logs"]
+    volumes:
+      - logs:/logs
+
+  postgres:
+    image: postgres:17-alpine
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
+    environment:
+      POSTGRES_USER: dmc
+      POSTGRES_PASSWORD: dmc
+      POSTGRES_DB: dmc268
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dmc -d dmc268"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  caddy:
+    image: caddy:2
+    environment:
+      # Caddy signs "localhost" with its own CA, so clients skip verification.
+      SITE_ADDRESS: localhost
+      SERVER_IP: 127.0.0.1
+    ports:
+      - "127.0.0.1:8443:443"
+    volumes:
+      - ../Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - api
+
+  # Production's service, config and arguments, plus its UI on a port.
+  alloy:
+    image: grafana/alloy:v1.21.2
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --disable-reporting
+    ports:
+      - "127.0.0.1:12345:12345"
+    environment:
+      GRAFANA_CLOUD_PROM_URL: http://prometheus:9090/api/v1/write
+      GRAFANA_CLOUD_PROM_USER: lab
+      GRAFANA_CLOUD_LOKI_URL: http://loki:3100/loki/api/v1/push
+      GRAFANA_CLOUD_LOKI_USER: lab
+      GRAFANA_CLOUD_TOKEN: lab
+      # lab.py creates the dmc268_exporter role with it.
+      POSTGRES_EXPORTER_PASSWORD: exporter-lab
+    volumes:
+      - ../alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - logs:/logs:ro
+      - /proc:/host/proc:ro
+      - /sys:/sys:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /run/containerd/containerd.sock:/run/containerd/containerd.sock:ro
+
+  # --- stand-ins for Sentry and Grafana Cloud ---------------------------------------
+
+  # Keeps what the app's Sentry SDK sends; lab.py reads it on :9900 (GET /items).
+  sentry:
+    image: python:3.13-slim
+    command: ["python", "/stub/sentry_stub.py"]
+    volumes:
+      - ./sentry_stub.py:/stub/sentry_stub.py:ro
+    ports:
+      - "127.0.0.1:9900:9000"
+
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    command:
+      - --config.file=/etc/prometheus/lab.yml
+      # Accepts Alloy's remote write, as Grafana Cloud's Prometheus does.
+      - --web.enable-remote-write-receiver
+    configs:
+      - source: prometheus
+        target: /etc/prometheus/lab.yml
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  loki:
+    image: grafana/loki:3.7.9
+    command: ["-config.file=/etc/loki/local-config.yaml", "-reporting.enabled=false"]
+
+  grafana:
+    image: grafana/grafana:13.2.4
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+    configs:
+      - source: datasources
+        target: /etc/grafana/provisioning/datasources/lab.yml
+    ports:
+      - "127.0.0.1:3000:3000"
+
+configs:
+  # No scrape jobs: everything arrives from Alloy.
+  prometheus:
+    content: |
+      global: {}
+  datasources:
+    content: |
+      apiVersion: 1
+      datasources:
+        - {name: Prometheus, type: prometheus, uid: prom, url: "http://prometheus:9090", isDefault: true}
+        - {name: Loki, type: loki, uid: loki, url: "http://loki:3100"}
+
+volumes:
+  logs:

@@ -1,4 +1,5 @@
-"""The API's access log: one JSON line per request (docs/observability.md § Logs).
+"""The API's access log, one JSON line per request (docs/observability.md § Logs),
+and the HTTP metrics recorded from the same route, status and timing (§ Metrics).
 
 It replaces uvicorn's access log, which configure_logging silences. That log
 printed the full path, and on the OAuth callback the path carries the
@@ -17,6 +18,7 @@ from collections.abc import Awaitable, Callable
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 
+from adapters.observability import metrics
 from adapters.observability.logging import bind_context
 
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -49,7 +51,7 @@ def install_access_log(app: FastAPI) -> None:
                 response.headers[REQUEST_ID_HEADER] = request_id
                 return response
             finally:
-                _log_request(request, status, started)
+                _record_request(request, status, started)
 
 
 def _request_id(header: str | None) -> str:
@@ -58,9 +60,11 @@ def _request_id(header: str | None) -> str:
     return uuid.uuid4().hex
 
 
-def _log_request(request: Request, status: int, started: float) -> None:
+def _record_request(request: Request, status: int, started: float) -> None:
+    seconds = time.monotonic() - started
     # The router sets the matched route on the scope; its path is the template.
     route = getattr(request.scope.get("route"), "path", None) or UNMATCHED_ROUTE
+    metrics.observe_http(route, request.method, status, seconds)
     logger.log(
         logging.DEBUG if route == _HEALTH_ROUTE else logging.INFO,
         "http.request",
@@ -68,6 +72,6 @@ def _log_request(request: Request, status: int, started: float) -> None:
             "http.method": request.method,
             "http.route": route,
             "http.status": status,
-            "duration_ms": round((time.monotonic() - started) * 1000),
+            "duration_ms": round(seconds * 1000),
         },
     )

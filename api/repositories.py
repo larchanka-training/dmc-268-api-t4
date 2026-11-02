@@ -43,11 +43,13 @@ async def read_connect_url(
     request: Request,
     session: Annotated[Session, Depends(current_session)],
 ) -> dict[str, str]:
-    """Members get the URL too: GitHub refuses non-owners on its side, and the
-    console already disables the button for them. Reading it changes nothing, so
-    it stays a GET and needs no CSRF header."""
+    """The app's install page, the same for everyone: GitHub asks there which
+    account to install on, so a member of an organisation can still add their
+    personal repositories. Reading it changes nothing, so it stays a GET and
+    needs no CSRF header. The session is required only to keep the endpoint
+    behind sign-in like the rest of /repositories."""
     service = services(request)
-    return {"url": connect_url(session.current_organization, service.app_slug)}
+    return {"url": connect_url(service.app_slug)}
 
 
 @router.get("/repositories/{repository_id}/disconnect-url")
@@ -63,12 +65,15 @@ async def read_disconnect_url(
     The URL itself is the installation's settings page: GitHub has no
     per-repository removal URL.
     """
-    organization = session.current_organization
-    if organization is None:
-        # Nothing is connected, so no repository can be.
-        raise ApiError(404, "not_found")
     service = services(request)
-    if await service.repositories.find(session, repository_id) is None:
+    repository = await service.repositories.find(session, repository_id)
+    if repository is None:
+        raise ApiError(404, "not_found")
+    organization = next(
+        (item for item in session.organizations if item.id == repository.organization_id),
+        None,
+    )
+    if organization is None:
         raise ApiError(404, "not_found")
     return {"url": installation_settings_url(organization)}
 
@@ -91,6 +96,7 @@ def _repository_json(repository: Repository) -> dict[str, Any]:
         "html_url": repository.html_url,
         "connected_at": _iso(repository.connected_at),
         "last_run_at": _iso(repository.last_run_at),
+        "organization_id": repository.organization_id,
     }
 
 

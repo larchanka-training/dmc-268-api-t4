@@ -57,6 +57,17 @@ def client_for(
     return test_client, gateway
 
 
+def client_for_installations(
+    clock: FixedClock,
+    *,
+    organizations: tuple[object, ...],
+    by_installation: dict[int, tuple[object, ...]],
+) -> tuple[TestClient, FakeInstallationGateway]:
+    client, gateway = client_for(clock, organizations=organizations)
+    gateway.by_installation = by_installation  # type: ignore[assignment]
+    return client, gateway
+
+
 def many(count: int) -> tuple[object, ...]:
     return tuple(make_repository("acme", f"repo-{index:02d}") for index in range(count))
 
@@ -104,8 +115,10 @@ def test_a_repository_has_the_agreed_shape(auth_clock: FixedClock) -> None:
         "html_url",
         "connected_at",
         "last_run_at",
+        "organization_id",
     }
     assert item["owner"] == "acme"
+    assert item["organization_id"] == "100"
     assert item["private"] is True
     # Both null for now: spec 002 §3, and review jobs do not exist yet.
     assert item["connected_at"] is None
@@ -183,27 +196,60 @@ def test_the_list_is_no_store(auth_clock: FixedClock) -> None:
     assert client.get("/repositories").headers["cache-control"] == "no-store"
 
 
-# --- connect URL --------------------------------------------------------
-
-
-def test_connect_url_points_at_an_organisations_installation(auth_clock: FixedClock) -> None:
-    client, _ = client_for(auth_clock)
-
-    body = client.get("/repositories/connect-url").json()
-
-    assert body == {"url": "https://github.com/organizations/acme/settings/installations/42"}
-
-
-def test_connect_url_points_at_a_personal_installation(auth_clock: FixedClock) -> None:
+def test_personal_and_organisation_repositories_are_listed_together(
+    auth_clock: FixedClock,
+) -> None:
     personal = make_organization("octocat", "1", installation_id=7, account_type=AccountType.USER)
-    client, _ = client_for(auth_clock, organizations=(personal,))
+    client, gateway = client_for_installations(
+        auth_clock,
+        organizations=(ORG, personal),
+        by_installation={
+            42: (make_repository("acme", "payments"),),
+            7: (make_repository("octocat", "dotfiles"),),
+        },
+    )
 
-    body = client.get("/repositories/connect-url").json()
+    items = client.get("/repositories").json()["items"]
+
+    assert [(item["owner"], item["organization_id"]) for item in items] == [
+        ("acme", "100"),
+        ("octocat", "1"),
+    ]
+    assert sorted(gateway.calls) == [7, 42]
+
+
+def test_disconnect_url_follows_the_repositorys_own_installation(
+    auth_clock: FixedClock,
+) -> None:
+    personal = make_organization("octocat", "1", installation_id=7, account_type=AccountType.USER)
+    repository = make_repository("octocat", "dotfiles")
+    client, _ = client_for_installations(
+        auth_clock,
+        organizations=(ORG, personal),
+        by_installation={42: (make_repository("acme", "payments"),), 7: (repository,)},
+    )
+
+    body = client.get(f"/repositories/{repository.id}/disconnect-url").json()
 
     assert body == {"url": "https://github.com/settings/installations/7"}
 
 
-def test_connect_url_points_at_the_install_page_without_an_organisation(
+# --- connect URL --------------------------------------------------------
+
+
+def test_connect_url_is_the_install_page_for_an_organisation_owner(
+    auth_clock: FixedClock,
+) -> None:
+    """Not the installation's settings: from there a personal account could
+    never be added."""
+    client, _ = client_for(auth_clock)
+
+    body = client.get("/repositories/connect-url").json()
+
+    assert body == {"url": f"https://github.com/apps/{APP_SLUG}/installations/new"}
+
+
+def test_connect_url_is_the_install_page_without_an_organisation(
     auth_clock: FixedClock,
 ) -> None:
     client, _ = client_for(auth_clock, organizations=())
@@ -236,17 +282,6 @@ def test_disconnect_url_points_at_the_installation_settings(auth_clock: FixedClo
     body = client.get(f"/repositories/{repository.id}/disconnect-url").json()
 
     assert body == {"url": "https://github.com/organizations/acme/settings/installations/42"}
-
-
-def test_disconnect_url_is_the_same_page_as_connect_url(auth_clock: FixedClock) -> None:
-    """GitHub has no per-repository removal URL; the 404 is what this endpoint adds."""
-    repository = make_repository("acme", "payments")
-    client, _ = client_for(auth_clock, repositories=(repository,))
-
-    disconnect = client.get(f"/repositories/{repository.id}/disconnect-url").json()
-    connect = client.get("/repositories/connect-url").json()
-
-    assert disconnect == connect
 
 
 def test_disconnect_url_for_a_personal_installation(auth_clock: FixedClock) -> None:

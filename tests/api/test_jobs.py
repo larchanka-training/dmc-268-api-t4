@@ -12,6 +12,7 @@ from adapters.memory.review_comments import MemoryReviewCommentStore
 from domain.jobs import JobStep, StepRecord, StepStatus
 from domain.models import FindingSuggestion, Severity
 from domain.ports import JobStats, Profile
+from domain.tenancy import AccountType, Organization
 from tests.api.test_repositories import sign_in
 from tests.conftest import (
     TEST_ORIGIN,
@@ -28,9 +29,12 @@ ORG = make_organization("acme", "100", installation_id=42)
 
 
 def client_for(
-    clock: FixedClock, store: MemoryJobStore, findings: MemoryReviewCommentStore | None = None
+    clock: FixedClock,
+    store: MemoryJobStore,
+    findings: MemoryReviewCommentStore | None = None,
+    organizations: tuple[Organization, ...] = (ORG,),
 ) -> TestClient:
-    identity = FakeIdentityProvider(Profile(user=make_user(), organizations=(ORG,)))
+    identity = FakeIdentityProvider(Profile(user=make_user(), organizations=organizations))
     app = build_test_app(clock, identity, jobs=store, findings=findings)
     client = TestClient(app, base_url=TEST_ORIGIN)
     sign_in(client)
@@ -105,6 +109,22 @@ async def test_other_installations_jobs_are_hidden(auth_clock: FixedClock) -> No
 
     assert client.get("/jobs").json()["items"] == []
     assert client.get(f"/jobs/{hidden}").status_code == 404
+
+
+async def test_personal_and_organisation_jobs_are_listed_together(
+    auth_clock: FixedClock,
+) -> None:
+    personal = make_organization("octocat", "1", installation_id=7, account_type=AccountType.USER)
+    store = MemoryJobStore(clock=auth_clock)
+    organisation_job = await seed(
+        auth_clock, store, installation_id=42, delivery_id="d-1", repo_id=1
+    )
+    personal_job = await seed(auth_clock, store, installation_id=7, delivery_id="d-2", repo_id=2)
+    client = client_for(auth_clock, store, organizations=(ORG, personal))
+
+    items = client.get("/jobs").json()["items"]
+
+    assert {item["id"] for item in items} == {organisation_job, personal_job}
 
 
 async def test_one_job_has_its_steps_and_bad_input_is_rejected(auth_clock: FixedClock) -> None:

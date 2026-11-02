@@ -49,7 +49,10 @@ same command again — `upgrade head` is idempotent.
 `docker-compose.yml` is the local stack: it builds from this tree, binds the API and
 PostgreSQL to localhost, and fills in throwaway GitHub settings. `deploy/compose.yml`
 is the VPS stack: it runs a published image, leaves the API and PostgreSQL on the
-compose network, and publishes only Caddy on ports 80 and 443.
+compose network, and publishes only Caddy on ports 80 and 443. `deploy/lab/` runs the
+observability pipeline (Alloy, Prometheus, Loki, Grafana) locally, checks it end to end
+with one command, and rehearses failures (`drill worker-down`, `db-down`, ...):
+[deploy/lab/README.md](deploy/lab/README.md).
 
 On the host, with a real `.env`:
 

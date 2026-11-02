@@ -45,6 +45,8 @@ markupsafe==3.0.4
     # via mako
 opentelemetry-api==1.45.0
     # via fastapi
+prometheus-client==0.26.0
+    # via dmc-268-api-t4
 pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
     # via cffi
 pydantic==2.13.5

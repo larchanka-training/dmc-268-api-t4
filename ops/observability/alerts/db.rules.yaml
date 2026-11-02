@@ -1,0 +1,26 @@
+# Alert rules, domain db (docs/observability.md § Alerts).
+groups:
+  - name: db
+    interval: 1m
+    rules:
+      # Root: the exporter cannot reach Postgres (its own target stays up).
+      - alert: TargetDown
+        expr: pg_up == 0
+        for: 2m
+        labels: {domain: db, severity: critical, owner: unassigned}
+        annotations:
+          summary: Postgres does not answer the exporter.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#target-down
+
+      # A quiet table legitimately goes days without an autovacuum, so both halves.
+      # A table never vacuumed has last_autovacuum 0, which counts as "not in 24 h".
+      - alert: QueueTableBloat
+        expr: |
+          pg_stat_user_tables_n_dead_tup{relname="pr_review_jobs"}
+            > 10 * pg_stat_user_tables_n_live_tup{relname="pr_review_jobs"}
+          and time() - pg_stat_user_tables_last_autovacuum{relname="pr_review_jobs"} > 86400
+          unless on() (pg_up == 0)
+        labels: {domain: db, severity: warning, owner: unassigned}
+        annotations:
+          summary: pr_review_jobs has 10 times more dead rows than live ones and no autovacuum in 24 hours.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#queue-table-bloat

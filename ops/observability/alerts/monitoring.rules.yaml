@@ -1,0 +1,32 @@
+# Alert rules, domain monitoring (docs/observability.md § Alerts).
+groups:
+  - name: monitoring
+    interval: 1m
+    rules:
+      # Root: Alloy, or the whole VPS, stopped sending.
+      - alert: TelemetryMissing
+        expr: absent_over_time(up{job="api"}[5m])
+        labels: {domain: monitoring, severity: critical, owner: unassigned}
+        annotations:
+          summary: No sample from the VPS for 5 minutes.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#telemetry-missing
+
+      # Grafana Cloud refused part of what Alloy sends (the series limit, say); a
+      # complete stop is "Telemetry missing".
+      - alert: MonitoringBroken
+        expr: |
+          rate(prometheus_remote_storage_samples_failed_total[5m]) > 0
+          or rate(loki_write_dropped_entries_total[5m]) > 0
+        for: 15m
+        labels: {domain: monitoring, severity: warning, owner: unassigned}
+        annotations:
+          summary: Alloy's pushes to Grafana Cloud have failed for 15 minutes.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#monitoring-broken
+
+      # Sentry alerts are not reaching Telegram; the admin's email still works.
+      - alert: RelayFailing
+        expr: increase(alert_relay_failures_total[15m]) > 0 unless on() (up{job="api"} == 0)
+        labels: {domain: monitoring, severity: warning, owner: unassigned}
+        annotations:
+          summary: The Sentry relay failed to post to Telegram.
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#relay-failing

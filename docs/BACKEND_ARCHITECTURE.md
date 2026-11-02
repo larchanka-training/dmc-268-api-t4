@@ -770,9 +770,9 @@ repository that cannot be called without a tenant scope cannot forget it.
 | `GET` | `/account` | The caller's own account. No id in the path, so there is no object to enumerate |
 | `GET` | `/installations` | Health and status per forge integration |
 | `DELETE` | `/installations/{id}` | Revokes and purges the credential |
-| `GET` | `/repositories` | Cursor-paginated, 10 per page, sorted by `owner/name`. Read **live from the forge** and cached for a minute, which is what keeps "no `repositories` table" true. `400 bad_cursor`, `502 forge_unavailable` |
-| `GET` | `/repositories/connect-url` | Where to send the user to connect one: the installation's settings page, or the App's install page when it is installed nowhere |
-| `GET` | `/repositories/{id}/disconnect-url` | Where to remove that repository from the installation, or `404 not_found`. The URL is the same settings page `connect-url` returns — GitHub has no per-repository removal URL, so the 404 is what this endpoint adds |
+| `GET` | `/repositories` | Every installation the user can see (personal and organisation), merged; each item carries `organization_id`. Cursor-paginated, 10 per page, sorted by `owner/name`. Read **live from the forge** and cached for a minute, which is what keeps "no `repositories` table" true. `400 bad_cursor`, `502 forge_unavailable` |
+| `GET` | `/repositories/connect-url` | Where to send the user to connect one: always the App's install page, where GitHub asks which account (personal or organisation) to install on |
+| `GET` | `/repositories/{id}/disconnect-url` | Where to remove that repository: the settings page of the installation it came through, or `404 not_found`. GitHub has no per-repository removal URL, so the 404 is what this endpoint adds |
 | `GET` | `/github/setup` | The App's **Setup URL**, reached by GitHub's redirect rather than by the SPA. No session required |
 | `GET` | `/jobs` | Cursor-paginated; filters on repo, status, date |
 | `GET` | `/jobs/{id}` | Includes findings and error detail |

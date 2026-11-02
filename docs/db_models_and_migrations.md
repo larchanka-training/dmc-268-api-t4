@@ -1009,6 +1009,14 @@ UPDATE pr_review_jobs
   teammate's local database: Alembic records the revision id, not the file's
   contents, so an edited `0001` leaves an already-migrated database silently
   diverged. After the first real deploy, `0001` is frozen.
+* **`pg_stat_statements` (`0003`).** The Postgres exporter's top statements
+  ([observability.md § System](./observability.md)) need the library preloaded,
+  which `deploy/compose.yml` does (`postgres -c
+  shared_preload_libraries=pg_stat_statements`), and the extension, which `0003`
+  creates. `CREATE EXTENSION` succeeds without the preload, so the two land in
+  either order; the view returns rows once both have. The exporter's read-only role
+  `dmc268_exporter` (`pg_monitor`) is not a migration: its password is a deploy
+  secret, so it is created once by hand (tasks/observability-checklist.md, phase 3).
 * **Table growth.** `pr_review_jobs` is append-mostly and unbounded. The partial
   indexes keep queue operations flat, but the table itself needs a retention policy
   — monthly partitioning on `created_at`, or a purge of terminal rows older than N

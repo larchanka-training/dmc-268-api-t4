@@ -1,8 +1,9 @@
 """App factory. Production wiring builds the real adapters; tests pass fakes."""
 
+import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 
 import httpx
@@ -10,6 +11,8 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from adapters.alerting.config import AlertingSettings
+from adapters.alerting.telegram import build_notifier
 from adapters.clock import SystemClock
 from adapters.db.config import DBSettings
 from adapters.db.job_events import PostgresJobEventsSource
@@ -17,7 +20,8 @@ from adapters.db.repository import PostgresJobStore
 from adapters.db.review_comments import PostgresReviewCommentStore
 from adapters.db.session import build_engine
 from adapters.github.app_auth import GitHubAppAuth
-from adapters.github.config import GitHubAppSettings
+from adapters.github.compare import GitHubCompareDiffs
+from adapters.github.config import PROVIDER_NAME, GitHubAppSettings
 from adapters.github.contents import GitHubRepositoryContents
 from adapters.github.factory import build_vcs_client
 from adapters.github.installation import GitHubInstallationGateway
@@ -29,7 +33,9 @@ from adapters.memory.auth import InMemorySessionStore, InMemorySignInAttemptStor
 from adapters.memory.job_events import InMemoryJobEventsSource
 from adapters.memory.repositories import InMemoryRepositoriesCache
 from adapters.memory.review_comments import MemoryReviewCommentStore
+from adapters.observability import metrics
 from adapters.observability.config import SentrySettings
+from adapters.observability.db_sampler import run_db_sampler
 from adapters.observability.sentry import init_sentry
 from api.access_log import install_access_log
 from api.auth import router as auth_router
@@ -42,16 +48,20 @@ from api.deps import (
     enforce_csrf,
 )
 from api.github_setup import router as github_setup_router
+from api.internal_alerts import AlertRelay
+from api.internal_alerts import router as internal_alerts_router
 from api.jobs import router as jobs_router
 from api.repositories import router as repositories_router
 from api.webhooks.github import GitHubWebhookDeps
 from api.webhooks.github import router as github_webhook_router
+from domain.finding_context import FindingContextService
 from domain.ports import (
     Clock,
     GitProvider,
     IdentityProvider,
     JobEventsSource,
     JobStore,
+    QueueStats,
     ReviewCommentStore,
     SessionStore,
     SignInAttemptStore,
@@ -64,24 +74,54 @@ Next = Callable[[Request], Awaitable[Response]]
 logger = logging.getLogger(__name__)
 
 
-def _engine_lifespan(
+def _lifespan(
     engine: AsyncEngine | None,
+    *,
+    metrics_port: int | None = None,
+    queue_stats: QueueStats | None = None,
 ) -> Callable[[FastAPI], AbstractAsyncContextManager[None]] | None:
-    """A FastAPI lifespan that disposes the app's engine on shutdown.
+    """A FastAPI lifespan for what the process runs besides requests: the metrics
+    server on its internal port and the DB sampler (docs/observability.md § Metrics),
+    then the engine, disposed on shutdown.
 
-    None — the memory dev mode, which builds no engine — keeps FastAPI's
-    default lifespan. Each process owns its engine
-    (adapters/db/session.py), so disposing it here is the whole cleanup.
+    None when there is none of them (tests) keeps FastAPI's default lifespan. Each
+    process owns its engine (adapters/db/session.py), so disposing it here is the
+    whole database cleanup.
     """
-    if engine is None:
+    if engine is None and metrics_port is None and queue_stats is None:
         return None
 
     @asynccontextmanager
-    async def dispose_engine(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        await engine.dispose()
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        stop_server = (
+            None if metrics_port is None else metrics.serve(metrics.API_REGISTRY, metrics_port)
+        )
+        stop_sampler = asyncio.Event()
+        sampler = (
+            None
+            if queue_stats is None
+            else asyncio.create_task(run_db_sampler(queue_stats, stop_sampler), name="db-sampler")
+        )
+        try:
+            yield
+        finally:
+            stop_sampler.set()
+            if sampler is not None:
+                await sampler
+            if stop_server is not None:
+                stop_server()
+            if engine is not None:
+                await engine.dispose()
 
-    return dispose_engine
+    return lifespan
+
+
+def _route_methods(routes: Iterable[object]) -> Iterator[tuple[str, Iterable[str]]]:
+    """Each route's template and methods, for the HTTP series started at 0."""
+    for route in routes:
+        path, methods = getattr(route, "path", None), getattr(route, "methods", None)
+        if isinstance(path, str) and methods:
+            yield path, methods
 
 
 def create_app(
@@ -100,8 +140,16 @@ def create_app(
     job_events: JobEventsSource | None = None,
     findings: ReviewCommentStore | None = None,
     job_rules: JobRulesService | None = None,
+    finding_context: FindingContextService | None = None,
+    metrics_port: int | None = None,
+    queue_stats: QueueStats | None = None,
+    alert_relay: AlertRelay | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="DMC-268 API", version="0.1.0", lifespan=_engine_lifespan(engine))
+    app = FastAPI(
+        title="DMC-268 API",
+        version="0.1.0",
+        lifespan=_lifespan(engine, metrics_port=metrics_port, queue_stats=queue_stats),
+    )
     app.state.services = Services(
         settings=settings,
         identity=identity_provider,
@@ -114,6 +162,7 @@ def create_app(
         jobs=jobs,
         findings=findings if findings is not None else MemoryReviewCommentStore(jobs),
         job_rules=job_rules,
+        finding_context=finding_context,
     )
     app.state.webhooks = GitHubWebhookDeps(
         jobs=jobs,
@@ -121,6 +170,8 @@ def create_app(
         webhook_secret=webhook_secret,
         dispatch_inline=dispatch_inline,
     )
+    # None (no SENTRY_WEBHOOK_SECRET): the relay route answers 404.
+    app.state.alert_relay = alert_relay
 
     @app.exception_handler(ApiError)
     async def handle_api_error(_: Request, error: Exception) -> JSONResponse:
@@ -146,6 +197,9 @@ def create_app(
         return {"status": "ok"}
 
     _include_routes(app)
+    # The Sentry relay is internal, not part of the versioned public API.
+    app.include_router(internal_alerts_router)
+    metrics.init_api_metrics(_route_methods(app.routes), webhook_providers=(PROVIDER_NAME,))
     return app
 
 
@@ -183,10 +237,12 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     # Before the app exists, so the SDK's FastAPI integration instruments it.
     init_sentry(SentrySettings.from_env())
     clock = SystemClock()
+    alerting = AlertingSettings.from_env()
     settings = AppSettings.from_env()
     app_settings = GitHubAppSettings.from_env()
     app_auth = GitHubAppAuth(app_settings, clock, transport=transport)
     jobs: JobStore
+    queue_stats: QueueStats
     dispatch_inline: bool
     engine: AsyncEngine | None = None
     if "DATABASE_URL" in os.environ:
@@ -195,15 +251,19 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         # raises here, at startup — a silent fallback to memory would drop
         # real deliveries on the floor.
         engine = build_engine(DBSettings.from_env())
-        jobs = PostgresJobStore(engine)
+        jobs = queue_stats = PostgresJobStore(engine)
         dispatch_inline = False
     else:
         # No DATABASE_URL: dev mode keeps the in-memory queue (the
         # PostgreSQL path exists — tasks/plan-pg-queue.md) and the API
         # claims inline; no worker process is used.
         logger.info("queue.in_memory")
-        jobs = MemoryJobStore(clock=clock)
+        jobs = queue_stats = MemoryJobStore(clock=clock)
         dispatch_inline = True
+    findings: ReviewCommentStore = (
+        MemoryReviewCommentStore(jobs) if engine is None else PostgresReviewCommentStore(engine)
+    )
+    contents = GitHubRepositoryContents(app_settings, app_auth, transport=transport)
     return create_app(
         settings=settings,
         identity_provider=GitHubIdentityProvider(
@@ -228,10 +288,23 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         job_events=(
             InMemoryJobEventsSource() if engine is None else PostgresJobEventsSource(engine)
         ),
-        findings=None if engine is None else PostgresReviewCommentStore(engine),
-        job_rules=JobRulesService(
+        findings=findings,
+        job_rules=JobRulesService(jobs=jobs, contents=contents, parser=MarkdownRulesParser()),
+        finding_context=FindingContextService(
             jobs=jobs,
-            contents=GitHubRepositoryContents(app_settings, app_auth, transport=transport),
-            parser=MarkdownRulesParser(),
+            findings=findings,
+            diffs=GitHubCompareDiffs(app_settings, app_auth, transport=transport),
+            contents=contents,
+        ),
+        metrics_port=metrics.API_PORT,
+        queue_stats=queue_stats,
+        alert_relay=(
+            AlertRelay(
+                secret=alerting.sentry_webhook_secret,
+                notifier=build_notifier(alerting, transport=transport),
+                clock=clock,
+            )
+            if alerting.relay_enabled
+            else None
         ),
     )

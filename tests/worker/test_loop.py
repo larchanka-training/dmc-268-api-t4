@@ -70,8 +70,10 @@ class SignallingStore:
         self.claim_attempts += 1
         return await self._inner.claim(worker_id)
 
-    async def complete(self, job_id: str, stats: JobStats, *, worker_id: str) -> bool:
-        done = await self._inner.complete(job_id, stats, worker_id=worker_id)
+    async def complete(
+        self, job_id: str, stats: JobStats, *, worker_id: str, summary: str | None = None
+    ) -> bool:
+        done = await self._inner.complete(job_id, stats, worker_id=worker_id, summary=summary)
         if done:
             self.completed_count += 1
             self.completed.set()
@@ -254,8 +256,10 @@ class EventRecordingStore(SignallingStore):
         super().__init__(inner)
         self.events = events
 
-    async def complete(self, job_id: str, stats: JobStats, *, worker_id: str) -> bool:
-        done = await super().complete(job_id, stats, worker_id=worker_id)
+    async def complete(
+        self, job_id: str, stats: JobStats, *, worker_id: str, summary: str | None = None
+    ) -> bool:
+        done = await super().complete(job_id, stats, worker_id=worker_id, summary=summary)
         if done:
             self.events.append(f"complete:{job_id}")
         return done

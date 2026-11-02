@@ -27,7 +27,15 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from domain.diff import FileDiff
-from domain.models import RISK_ORDER, DiffSide, Finding, FindingPosition, RiskLevel, Severity
+from domain.models import (
+    RISK_ORDER,
+    DiffSide,
+    Finding,
+    FindingPosition,
+    FindingSuggestion,
+    RiskLevel,
+    Severity,
+)
 
 # Most severe first: Severity is declared in that order in domain/models.py.
 SEVERITY_ORDER: tuple[Severity, ...] = tuple(Severity)
@@ -221,6 +229,9 @@ class PublishPlan:
     conclusion: CheckConclusion
     stats: PublishStats
     risk: RiskLevel = RiskLevel.LOW
+    # The verdict and the model's summary as plain text, for the console: `summary` is
+    # Markdown for the check run and carries counts the console draws itself.
+    plain_summary: str = ""
 
     @property
     def needs_review(self) -> bool:
@@ -362,6 +373,7 @@ def build_plan(
         conclusion=conclusion,
         stats=stats,
         risk=risk,
+        plain_summary=render_plain_summary(verdict, model_summary, redact=redact),
     )
 
 
@@ -485,6 +497,45 @@ def render_comment(
             )
     parts.extend(["", FINGERPRINT_MARKER.format(fingerprint=digest)])
     return "\n".join(parts)
+
+
+def comment_message(body: str, suggestion: FindingSuggestion | None) -> str:
+    """The finding's own text inside a body `render_comment` produced.
+
+    Drops the severity heading, the suggestion block and the fingerprint marker, which
+    the console draws from structured fields. The block's length follows from
+    `suggestion`, so fences inside the message itself are kept. A body that does not
+    have the rendered shape is returned as it is.
+    """
+    lines = body.split("\n")
+    if len(lines) < 4 or not _FINGERPRINT_MARKER_RE.fullmatch(lines[-1]) or lines[-2] != "":
+        return body
+    end = len(lines) - 2
+    if suggestion is not None:
+        as_suggestion = len(suggestion.after) + 2
+        as_diff = len(suggestion.before) + len(suggestion.after) + 3
+        if end - as_suggestion >= 3 and lines[end - as_suggestion] == "```suggestion":
+            end -= as_suggestion + 1
+        elif end - as_diff >= 3 and lines[end - as_diff] == "Suggested change:":
+            end -= as_diff + 1
+        else:
+            return body
+        if lines[end] != "":
+            return body
+    if not lines[0].startswith("**") or lines[1] != "":
+        return body
+    return "\n".join(lines[2:end])
+
+
+def render_plain_summary(
+    verdict: Verdict, model_summary: str, *, redact: Redactor = _no_redaction
+) -> str:
+    """The verdict and the model's summary, without Markdown: what the console shows."""
+    text = redact(model_summary.strip())
+    label = _VERDICT_LABEL.get(verdict)
+    if label is None:
+        return text
+    return label if not text else f"{label}\n\n{text}"
 
 
 def _risk_line(risk: RiskLevel, model_risk: RiskLevel | None) -> str:

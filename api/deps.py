@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from api.config import AppSettings
 from domain.auth import Session, hash_session_id
+from domain.finding_context import FindingContextService
 from domain.ports import (
     Clock,
     IdentityProvider,
@@ -28,8 +29,10 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 _REQUESTED_WITH = "fetch"
 #: Version prefix of every API route; the proxy adds /api in front (issue #43).
 API_PREFIX = "/v1"
-#: Both the versioned and the legacy root path, while the GitHub App moves over.
-_WEBHOOK_PREFIXES = (f"{API_PREFIX}/webhooks/", "/webhooks/")
+#: Server-to-server routes: forge webhooks (versioned, and at the root while the
+#: GitHub App moves over) and the Sentry alert relay. Each verifies its own
+#: signature in the route.
+_SERVER_TO_SERVER_PREFIXES = (f"{API_PREFIX}/webhooks/", "/webhooks/", "/internal/alerts/")
 
 
 class ApiError(Exception):
@@ -65,6 +68,8 @@ class Services:
     findings: ReviewCommentStore
     # None only in tests that do not wire the forge; the rules route answers 502.
     job_rules: JobRulesService | None = None
+    # Same: without the forge the context routes answer 502.
+    finding_context: FindingContextService | None = None
 
 
 def services(request: Request) -> Services:
@@ -155,15 +160,15 @@ async def optional_session(request: Request) -> Session | None:
 
 def enforce_csrf(request: Request) -> JSONResponse | None:
     """Unsafe methods need X-Requested-With: fetch and our own Origin."""
-    # Webhook deliveries are forge-to-server POSTs: they carry no cookies
-    # and no Origin or X-Requested-With headers, so the checks below would
-    # reject every legitimate delivery. Their authentication is the
-    # delivery signature, verified in the route
-    # (docs/WORKFLOW_DESIGN.md §2 Step 2).
+    # Webhook deliveries are forge-to-server POSTs, and the Sentry relay's are
+    # Sentry-to-server: they carry no cookies and no Origin or X-Requested-With
+    # headers, so the checks below would reject every legitimate delivery. Their
+    # authentication is the delivery signature, verified in the route
+    # (docs/WORKFLOW_DESIGN.md §2 Step 2; docs/observability.md § Alerts).
     # Behind uvicorn --root-path /api the request path carries the prefix
     # (/api/v1/webhooks/github), so match on the path the router sees.
     route_path = request.scope["path"].removeprefix(request.scope.get("root_path", ""))
-    if route_path.startswith(_WEBHOOK_PREFIXES):
+    if route_path.startswith(_SERVER_TO_SERVER_PREFIXES):
         return None
     if request.method in _SAFE_METHODS:
         return None

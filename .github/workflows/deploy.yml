@@ -56,6 +56,10 @@ jobs:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The whole history: the Sentry release step's set-commits --auto reads the
+          # commits since the previous release from this checkout.
+          fetch-depth: 0
 
       - name: Check inputs
         env:
@@ -73,6 +77,12 @@ jobs:
           HAS_GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY != '' }}
           HAS_GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET != '' }}
           HAS_SENTRY_DSN: ${{ secrets.SENTRY_DSN != '' }}
+          HAS_GRAFANA_PROM_URL: ${{ vars.GRAFANA_CLOUD_PROM_URL != '' }}
+          HAS_GRAFANA_PROM_USER: ${{ vars.GRAFANA_CLOUD_PROM_USER != '' }}
+          HAS_GRAFANA_LOKI_URL: ${{ vars.GRAFANA_CLOUD_LOKI_URL != '' }}
+          HAS_GRAFANA_LOKI_USER: ${{ vars.GRAFANA_CLOUD_LOKI_USER != '' }}
+          HAS_GRAFANA_TOKEN: ${{ secrets.GRAFANA_CLOUD_TOKEN != '' }}
+          HAS_POSTGRES_EXPORTER_PASSWORD: ${{ secrets.POSTGRES_EXPORTER_PASSWORD != '' }}
         run: |
           set -euo pipefail
           # The site name embeds the server IP: mask it before anything can print it.
@@ -110,6 +120,21 @@ jobs:
           if [ "$HAS_LLM_MODEL" != true ]; then
             echo "::warning::vars.LLM_PRIMARY_MODEL is not set: .env gets no LLM_PRIMARY_MODEL (Eurouter model not chosen)"
           fi
+          # Alloy runs with all six or not at all; the app works either way
+          # (docs/observability.md § Configuration and secrets).
+          monitoring_missing=()
+          [ "$HAS_GRAFANA_PROM_URL" = true ] || monitoring_missing+=(vars.GRAFANA_CLOUD_PROM_URL)
+          [ "$HAS_GRAFANA_PROM_USER" = true ] || monitoring_missing+=(vars.GRAFANA_CLOUD_PROM_USER)
+          [ "$HAS_GRAFANA_LOKI_URL" = true ] || monitoring_missing+=(vars.GRAFANA_CLOUD_LOKI_URL)
+          [ "$HAS_GRAFANA_LOKI_USER" = true ] || monitoring_missing+=(vars.GRAFANA_CLOUD_LOKI_USER)
+          [ "$HAS_GRAFANA_TOKEN" = true ] || monitoring_missing+=(secrets.GRAFANA_CLOUD_TOKEN)
+          [ "$HAS_POSTGRES_EXPORTER_PASSWORD" = true ] || monitoring_missing+=(secrets.POSTGRES_EXPORTER_PASSWORD)
+          if [ "${#monitoring_missing[@]}" -gt 0 ]; then
+            echo "::warning::Alloy not started, missing ${monitoring_missing[*]}: no metrics or logs reach Grafana Cloud"
+            echo "MONITORING=off" >> "$GITHUB_ENV"
+          else
+            echo "MONITORING=on" >> "$GITHUB_ENV"
+          fi
 
       - name: Set up SSH
         env:
@@ -141,7 +166,11 @@ jobs:
           fi
 
       - name: Upload compose files
-        run: scp -q deploy/compose.yml deploy/Caddyfile "deploy-target:$APP_DIR/"
+        run: |
+          set -euo pipefail
+          scp -q deploy/compose.yml deploy/Caddyfile "deploy-target:$APP_DIR/"
+          ssh deploy-target "mkdir -p $APP_DIR/alloy"
+          scp -q deploy/alloy/config.alloy "deploy-target:$APP_DIR/alloy/"
 
       - name: Write runtime .env
         env:
@@ -157,9 +186,25 @@ jobs:
           GITHUB_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
           GITHUB_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          GRAFANA_CLOUD_PROM_URL: ${{ vars.GRAFANA_CLOUD_PROM_URL }}
+          GRAFANA_CLOUD_PROM_USER: ${{ vars.GRAFANA_CLOUD_PROM_USER }}
+          GRAFANA_CLOUD_LOKI_URL: ${{ vars.GRAFANA_CLOUD_LOKI_URL }}
+          GRAFANA_CLOUD_LOKI_USER: ${{ vars.GRAFANA_CLOUD_LOKI_USER }}
+          GRAFANA_CLOUD_TOKEN: ${{ secrets.GRAFANA_CLOUD_TOKEN }}
+          POSTGRES_EXPORTER_PASSWORD: ${{ secrets.POSTGRES_EXPORTER_PASSWORD }}
+          SENTRY_WEBHOOK_SECRET: ${{ secrets.SENTRY_WEBHOOK_SECRET }}
+          ALERTS_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERTS_TELEGRAM_BOT_TOKEN }}
+          ALERTS_TELEGRAM_CHAT_ID: ${{ secrets.ALERTS_TELEGRAM_CHAT_ID }}
         run: |
           set -euo pipefail
           env_line() { printf '%s=%s\n' "$1" "$(printf '%s' "$2" | tr -d '\r\n')"; }
+          # Grafana Cloud shows a stack's base URL, its query URL or its push URL;
+          # Alloy needs the push one, whichever the variable holds.
+          prom_push=${GRAFANA_CLOUD_PROM_URL%/}
+          prom_push=${prom_push%/api/prom/push}
+          prom_push="${prom_push%/api/prom}/api/prom/push"
+          loki_push=${GRAFANA_CLOUD_LOKI_URL%/}
+          loki_push="${loki_push%/loki/api/v1/push}/loki/api/v1/push"
           # DATABASE_URL embeds the password in the URL, so the password
           # must be percent-encoded (a raw '@', '/' or ':' in it would
           # corrupt the DSN the api and worker read from this .env).
@@ -190,6 +235,21 @@ jobs:
             env_line SENTRY_DSN                  "$SENTRY_DSN"
             if [ -n "$LLM_PRIMARY_MODEL" ]; then env_line LLM_PRIMARY_MODEL "$LLM_PRIMARY_MODEL"; fi
             if [ -n "$LLM_PRIMARY_PROVIDER_ORDER" ]; then env_line LLM_PRIMARY_PROVIDER_ORDER "$LLM_PRIMARY_PROVIDER_ORDER"; fi
+            # The Sentry → Telegram relay (docs/observability.md § Alerts): no secret, no
+            # route (404); no bot token or chat id, alerts are logged as alert.dropped.
+            if [ -n "$SENTRY_WEBHOOK_SECRET" ]; then env_line SENTRY_WEBHOOK_SECRET "$SENTRY_WEBHOOK_SECRET"; fi
+            if [ -n "$ALERTS_TELEGRAM_BOT_TOKEN" ]; then env_line ALERTS_TELEGRAM_BOT_TOKEN "$ALERTS_TELEGRAM_BOT_TOKEN"; fi
+            if [ -n "$ALERTS_TELEGRAM_CHAT_ID" ]; then env_line ALERTS_TELEGRAM_CHAT_ID "$ALERTS_TELEGRAM_CHAT_ID"; fi
+            if [ "$MONITORING" = on ]; then
+              # compose reads COMPOSE_PROFILES from this file: the alloy service starts.
+              env_line COMPOSE_PROFILES           monitoring
+              env_line GRAFANA_CLOUD_PROM_URL     "$prom_push"
+              env_line GRAFANA_CLOUD_PROM_USER    "$GRAFANA_CLOUD_PROM_USER"
+              env_line GRAFANA_CLOUD_LOKI_URL     "$loki_push"
+              env_line GRAFANA_CLOUD_LOKI_USER    "$GRAFANA_CLOUD_LOKI_USER"
+              env_line GRAFANA_CLOUD_TOKEN        "$GRAFANA_CLOUD_TOKEN"
+              env_line POSTGRES_EXPORTER_PASSWORD "$POSTGRES_EXPORTER_PASSWORD"
+            fi
           } | ssh deploy-target "umask 077 && cat > $APP_DIR/.env.new && mv $APP_DIR/.env.new $APP_DIR/.env"
 
       - name: Write the App private key
@@ -282,12 +342,17 @@ jobs:
             fail "http://<IP> does not redirect to the site name (status ${ip_redirect%% *})"
           fi
           echo "http://<IP> redirects to the site name"
+          # Metrics are served on internal ports only; the public site must not have them.
+          metrics_status=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$base/api/metrics")
+          [ "$metrics_status" = 404 ] || fail "/api/metrics answers $metrics_status, not 404"
+          echo "/api/metrics is 404"
           certificate=$(echo | openssl s_client -connect "$SITE_ADDRESS:443" -servername "$SITE_ADDRESS" 2>/dev/null \
             | openssl x509 -noout -issuer -enddate | tr '\n' ' ')
           echo "certificate: $certificate"
           {
             echo "- \`GET /api/health\` over HTTPS from the runner (certificate verified): \`$body\`"
             echo "- http redirects to https: \`$code\`"
+            echo "- \`/api/metrics\`: \`404\`"
             echo "- certificate: \`$certificate\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -307,6 +372,50 @@ jobs:
             echo "**Unexpected exposed ports:** $(echo $unexpected)" >> "$GITHUB_STEP_SUMMARY"
             echo "::error::unexpected exposed ports: $(echo $unexpected)"
             exit 1
+          fi
+
+      # Deploy markers (docs/observability.md § Dashboards): an annotation on every Grafana
+      # dashboard, and a Sentry release with its commits and a production deploy. Each is
+      # skipped with a warning when its token is missing; neither fails the deploy.
+      - name: Grafana deploy annotation
+        env:
+          GRAFANA_URL: ${{ vars.GRAFANA_URL }}
+          GRAFANA_SA_TOKEN: ${{ secrets.GRAFANA_SA_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "$GRAFANA_URL" ] || [ -z "$GRAFANA_SA_TOKEN" ]; then
+            echo "::warning::no deploy annotation: vars.GRAFANA_URL or secrets.GRAFANA_SA_TOKEN is not set"
+            exit 0
+          fi
+          body=$(printf '{"tags":["deploy"],"text":"%s"}' "$IMAGE_TAG")
+          if curl -fsS --max-time 15 -o /dev/null -X POST "${GRAFANA_URL%/}/api/annotations" \
+              -H "Authorization: Bearer $GRAFANA_SA_TOKEN" -H "Content-Type: application/json" \
+              -d "$body"; then
+            echo "- Grafana deploy annotation: \`$IMAGE_TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::the Grafana deploy annotation failed"
+          fi
+
+      - name: Sentry release and deploy
+        env:
+          # An Organization Token: it names its organisation and region itself.
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_PROJECT: dmc268-backend
+        run: |
+          set -uo pipefail
+          if [ -z "$SENTRY_AUTH_TOKEN" ]; then
+            echo "::warning::no Sentry release: secrets.SENTRY_AUTH_TOKEN is not set"
+            exit 0
+          fi
+          cli() { npx --yes @sentry/cli@3.8.2 "$@"; }
+          # The release is IMAGE_TAG, as the SDK reports it (adapters/observability/config.py).
+          if cli releases new -p "$SENTRY_PROJECT" "$IMAGE_TAG" \
+              && cli releases set-commits "$IMAGE_TAG" --auto --ignore-missing \
+              && cli releases finalize "$IMAGE_TAG" \
+              && cli deploys new --release "$IMAGE_TAG" -e production; then
+            echo "- Sentry release and production deploy: \`$IMAGE_TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::the Sentry release or deploy failed"
           fi
 
       - name: Stop SSH agent

@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 from adapters.github.config import PROVIDER_NAME
 from adapters.github.payload import parse_pull_request_event, reviewable_action
 from adapters.github.signature import SIGNATURE_HEADER, verify_webhook_signature
+from adapters.observability import metrics
 from adapters.observability.logging import bind_fields
 from api.deps import ApiError
 from domain.errors import WebhookPayloadError, WebhookSignatureError
@@ -116,10 +117,26 @@ async def _process_review(deps: GitHubWebhookDeps) -> None:
         await process_claimed_job(claimed, deps.vcs, deps.jobs)
 
 
+#: The outcome of a delivery the route answers with an ApiError; any other status,
+#: and any other exception, is ``error`` (docs/observability.md § Application).
+_ERROR_OUTCOMES = {401: "unauthorized", 413: "too_large", 400: "rejected"}
+
+
 @router.post("/webhooks/github")
 async def receive_github_webhook(request: Request) -> Response:
-    deps = webhook_deps(request)
+    # One webhook_deliveries_total outcome per delivery, whichever way it ends.
+    outcome = "error"
+    try:
+        response, outcome = await _receive(request, webhook_deps(request))
+        return response
+    except ApiError as error:
+        outcome = _ERROR_OUTCOMES.get(error.status_code, "error")
+        raise
+    finally:
+        metrics.count_webhook(PROVIDER_NAME, outcome)
 
+
+async def _receive(request: Request, deps: GitHubWebhookDeps) -> tuple[Response, str]:
     # Step 2 point 1: the raw bytes, capped before parsing. A declared
     # Content-Length over the cap is rejected before the body is read at
     # all; the post-read check below is the backstop for chunked or
@@ -161,7 +178,7 @@ async def receive_github_webhook(request: Request) -> Response:
             "webhook.ignored",
             extra={**fields, "gh_event": gh_event, "action": get_action(payload)},
         )
-        return Response(status_code=204)
+        return Response(status_code=204), "filtered"
 
     if reviewable_action(payload) is None:
         # Step 2 point 5: a non-reviewable action is not an error; it simply
@@ -170,7 +187,7 @@ async def receive_github_webhook(request: Request) -> Response:
             "webhook.ignored",
             extra={**fields, "gh_event": PULL_REQUEST_EVENT, "action": get_action(payload)},
         )
-        return Response(status_code=204)
+        return Response(status_code=204), "filtered"
 
     try:
         event = parse_pull_request_event(payload)
@@ -230,7 +247,7 @@ async def receive_github_webhook(request: Request) -> Response:
                 "pr_number": event.pr_number,
             },
         )
-        return JSONResponse({"status": "duplicate"}, status_code=202)
+        return JSONResponse({"status": "duplicate"}, status_code=202), "duplicate"
     # The delivery id meets the job id here, so one delivery can be followed to its
     # review (docs/BACKEND_ARCHITECTURE.md § Observability).
     logger.info(
@@ -250,4 +267,4 @@ async def receive_github_webhook(request: Request) -> Response:
         task = asyncio.create_task(_process_review(deps))
         BACKGROUND_TASKS.add(task)
         task.add_done_callback(BACKGROUND_TASKS.discard)
-    return JSONResponse({"job_id": job_id, "status": "queued"}, status_code=202)
+    return JSONResponse({"job_id": job_id, "status": "queued"}, status_code=202), "enqueued"
