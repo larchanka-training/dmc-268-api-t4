@@ -1,13 +1,24 @@
 # Production stack on the team 4 VPS, deployed to /opt/dmc268 by .github/workflows/deploy.yml.
 # Only Caddy publishes a port; api and postgres are reachable on the compose network only,
 # and so are the metrics ports (api 9100, worker 9101, caddy 2020) that Alloy scrapes.
+#
+# This VPS is production (docs/devops.md, decision 25).
 name: dmc268
+
+# Every service logs through Docker's json-file driver; without a cap its logs grow until
+# the disk is full (docs/devops.md, «Алерты»: переполнение диска).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
 
 services:
   api:
     image: ghcr.io/larchanka-training/dmc-268-api-t4:${IMAGE_TAG:?IMAGE_TAG must be set in .env}
     env_file: .env
     restart: unless-stopped
+    logging: *logging
     # DATABASE_URL comes from the same .env the postgres service reads —
     # written by the deploy workflow with the password percent-encoded —
     # so no new secrets are needed; the queue is the PostgreSQL one
@@ -23,6 +34,7 @@ services:
       # JSON log files, rotated daily (LOG_DIR=/logs, written by deploy.yml);
       # created by ops/bootstrap.sh, owned by the image user 10001.
       - ./logs:/logs
+    networks: [edge, db]
     depends_on:
       postgres:
         condition: service_healthy
@@ -34,12 +46,27 @@ services:
     image: ghcr.io/larchanka-training/dmc-268-api-t4:${IMAGE_TAG:?IMAGE_TAG must be set in .env}
     env_file: .env
     restart: unless-stopped
+    logging: *logging
+    # Horizontal scaling: N worker containers, each with WORKER_CONCURRENCY claim slots (from .env).
+    # SKIP LOCKED makes N claimers safe and periodic tasks take an advisory lock
+    # (worker/periodic.py), so no code change is needed. Every replica opens up to
+    # POOL_SIZE (7) + 1 LISTEN connections; keep WORKER_REPLICAS × 8 + api well under
+    # PostgreSQL's max_connections (100).
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}
     # Grace must exceed the longest review / the 10-minute lease; Docker's 10s default would SIGKILL mid-drain (docs/BACKEND_ARCHITECTURE.md § Deployment).
     stop_grace_period: 10m
     command: ["python", "-m", "worker"]
+    # ЗАГЛУШКА(С4): у воркера нет healthcheck. ЖДЁМ бэкенд (владелец воркера, инженер 5):
+    # heartbeat — например, файл, который каждая итерация цикла обновляет, или строка в БД.
+    # До этого «воркер жив» видно только по метрикам и алертам DevOps спринта 3
+    # (docs/observability.md: Target down, Queue backlog, Periodic task stale). Когда
+    # heartbeat появится, добавить сюда healthcheck и убрать комментарий.
     volumes:
       - ./github-app.pem:/opt/dmc268/github-app.pem:ro
       - ./logs:/logs
+    # edge for egress to GitHub and the LLM provider; db for PostgreSQL.
+    networks: [edge, db]
     depends_on:
       postgres:
         condition: service_healthy
@@ -47,24 +74,112 @@ services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
-    # pg_stat_statements for the exporter's top statements (docs/observability.md § System);
-    # the extension itself is migration 0003. Changing this restarts Postgres on deploy.
-    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
+    logging: *logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set in .env}
+    # pg_stat_statements for the exporter's top statements (docs/observability.md § System);
+    # the extension itself is migration 0003. Streaming replication to postgres-replica: our
+    # pg_hba.conf adds the replication line (the image writes its own only on the first start,
+    # and pgdata already exists), and the slot may keep at most 2 GB of WAL, so a dead replica
+    # cannot fill the disk. Changing this restarts Postgres on deploy.
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+      - -c
+      - max_slot_wal_keep_size=2GB
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./ops/replica/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    # Only the internal db network: PostgreSQL has no route to the internet and Caddy
+    # cannot reach it.
+    networks: [db]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 10s
       timeout: 5s
       retries: 5
 
+  # Streaming standby of postgres, read-only (ops/replica/standby.sh, docs/devops.md
+  # «Реплика PostgreSQL»). The first start copies the primary with pg_basebackup.
+  # ЗАГЛУШКА(С4): реплика на том же VPS (решение 27.10: пока так). ЖДЁМ второй сервер от
+  # владельца: сервис переезжает туда, см. комментарий в ops/replica/standby.sh.
+  postgres-replica:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    logging: *logging
+    entrypoint: ["/bin/sh", "/opt/replica/standby.sh"]
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      # For the healthcheck below.
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set in .env}
+    volumes:
+      - ./ops/replica/standby.sh:/opt/replica/standby.sh:ro
+      - pgreplica:/var/lib/postgresql/data
+    networks: [db]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # The first pg_basebackup copies the whole database.
+      start_period: 10m
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Daily pg_dump into the pgbackups volume, 7 kept (ops/backup/pg-backup.sh, docs/devops.md
+  # «Бэкапы PostgreSQL»). Same image as the server, so pg_dump matches its version. Gets only
+  # the database credentials by interpolation, not the whole .env (decision 11).
+  backup:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    logging: *logging
+    entrypoint: ["/bin/sh", "/opt/backup/pg-backup.sh"]
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      PGDATABASE: ${POSTGRES_DB:?POSTGRES_DB must be set in .env}
+      BACKUP_KEEP: "7"
+    volumes:
+      - ./ops/backup/pg-backup.sh:/opt/backup/pg-backup.sh:ro
+      # ЗАГЛУШКА(С4): бэкапы лежат на этом же VPS (решение 27.10: пока проще). От потери
+      # сервера не защищают. ЖДЁМ хранилище вне VPS: кто заводит S3-бакет и кладёт ключи в
+      # GitHub Secrets; затем шифрование и отправка в ops/backup/pg-backup.sh.
+      - pgbackups:/backups
+    networks: [db]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Status page at https://status.<SITE_ADDRESS> (deploy/gatus.yml, docs/devops.md
+  # «Страница статуса»). Checks the site from outside and api, postgres and the replica from
+  # inside. ЗАГЛУШКА(С4): на том же VPS (решение 27.10), см. комментарий в deploy/gatus.yml.
+  gatus:
+    image: ghcr.io/twin/gatus:v5.12.1
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?SITE_ADDRESS must be set in .env}
+      GATUS_CONFIG_PATH: /config/config.yaml
+    volumes:
+      - ./gatus.yml:/config/config.yaml:ro
+      - gatus_data:/data
+    # edge for the external checks and Caddy; db for the PostgreSQL checks.
+    networks: [edge, db]
+
   caddy:
     image: caddy:2
     restart: unless-stopped
+    logging: *logging
     depends_on:
       - api
     environment:
@@ -74,6 +189,13 @@ services:
     ports:
       - "80:80"
       - "443:443/tcp"
+    # Read-only GET on the admin API, which listens on 127.0.0.1:2019 inside the container only.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./frontend:/srv:ro
@@ -81,6 +203,7 @@ services:
       # on every deploy and, soon, the Let's Encrypt rate limit.
       - caddy_data:/data
       - caddy_config:/config
+    networks: [edge]
 
   # Grafana Alloy (docs/observability.md § Metrics, § System): scrapes api, worker and
   # caddy, runs the host, container and Postgres exporters, tails ./logs and pushes both
@@ -90,6 +213,7 @@ services:
     image: grafana/alloy:v1.21.2
     profiles: [monitoring]
     restart: unless-stopped
+    logging: *logging
     # The image's default arguments plus --disable-reporting: Alloy would otherwise send
     # anonymous usage statistics to Grafana. Check the default on an image upgrade
     # (docker image inspect --format '{{json .Config.Cmd}}').
@@ -118,9 +242,22 @@ services:
       - /sys:/sys:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /run/containerd/containerd.sock:/run/containerd/containerd.sock:ro
+    # edge to push to Grafana Cloud and scrape api, worker and caddy; db for the Postgres
+    # exporter.
+    networks: [edge, db]
+
+networks:
+  # Bridge with egress: Caddy, the API and the worker (GitHub, LLM provider).
+  edge:
+  # No route outside the host: PostgreSQL and the processes that talk to it.
+  db:
+    internal: true
 
 volumes:
   pgdata:
+  pgbackups:
+  pgreplica:
+  gatus_data:
   caddy_data:
   caddy_config:
   alloy_data:

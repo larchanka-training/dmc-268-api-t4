@@ -22,6 +22,13 @@
 	}
 }
 
+# Status page (Gatus, deploy/gatus.yml). sslip.io resolves any name ending in the IP, so the
+# subdomain needs no DNS record; Caddy gets a separate certificate for it.
+status.{$SITE_ADDRESS} {
+	encode gzip
+	reverse_proxy gatus:8080
+}
+
 # The bare server IP has no certificate: send old http://<IP> links to the site name
 # instead of Caddy's default redirect to https://<IP>, which fails in the browser.
 http://{$SERVER_IP} {
