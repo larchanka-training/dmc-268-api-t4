@@ -27,9 +27,16 @@ CHECK_SECONDS=${CHECK_SECONDS:-3600}
 
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) backup: $*"; }
 
+dumps_newest_first() {
+  # Finished dumps, one path per line, newest first. find instead of an ls glob: no
+  # literal "*.dump" when the directory is empty, and no word splitting on odd names.
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.dump' -exec stat -c '%Y %n' {} + \
+    | sort -rn | cut -d' ' -f2-
+}
+
 newest_age_seconds() {
   # Prints the age of the newest finished dump, or nothing when there is none.
-  newest=$(ls -1t "$BACKUP_DIR"/*.dump 2>/dev/null | head -n 1 || true)
+  newest=$(dumps_newest_first | head -n 1)
   [ -n "$newest" ] || return 0
   echo $(( $(date +%s) - $(stat -c %Y "$newest") ))
 }
@@ -50,7 +57,7 @@ backup_once() {
   mv "$partial" "$BACKUP_DIR/$name"
   log "written $name ($(du -h "$BACKUP_DIR/$name" | cut -f1))"
   # Keep the newest BACKUP_KEEP dumps.
-  ls -1t "$BACKUP_DIR"/*.dump | tail -n +"$((BACKUP_KEEP + 1))" | while read -r old; do
+  dumps_newest_first | tail -n +"$((BACKUP_KEEP + 1))" | while IFS= read -r old; do
     rm -f "$old"
     log "removed $(basename "$old")"
   done
