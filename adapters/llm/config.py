@@ -17,7 +17,8 @@ DEFAULT_TEMPERATURE = 0.0
 # tokens), and a cut reply fails parsing twice, so the review failed outright (issue #55).
 DEFAULT_MAX_TOKENS = 16384
 # Hard input budget, as recommended for qwen3-coder: a bigger prompt is refused before any
-# provider is called. Fitting context into the budget is the context builder's job.
+# provider is called. Context is fitted first by source-text cost, then against the rendered
+# prompt so its labels and line numbers cannot displace the diff.
 #: docs/CONTEXT_AND_VERIFICATION_SPEC.md §1.4 [C4]: context may use at most this
 #: fraction of the input token budget; the diff is never displaced by it.
 CONTEXT_TOKEN_BUDGET_FRACTION = 0.4

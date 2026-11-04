@@ -90,8 +90,13 @@ class RealIndex:
         return self._inner.called_from(path, source, lines)
 
 
-def stage_for(contents, budget: int = 10_000) -> ContextStage:
-    return ContextStage(contents=contents, symbols=RealIndex(), context_budget_tokens=budget)
+def stage_for(contents, budget: int = 10_000, max_input_tokens: int = 32_000) -> ContextStage:
+    return ContextStage(
+        contents=contents,
+        symbols=RealIndex(),
+        context_budget_tokens=budget,
+        max_input_tokens=max_input_tokens,
+    )
 
 
 async def run_job(
@@ -99,6 +104,7 @@ async def run_job(
     contents: FakeRepositoryContents,
     *,
     budget: int = 10_000,
+    max_input_tokens: int = 32_000,
     steps: InMemoryStepRecorder | None = None,
 ):
     store = MemoryJobStore(clock=clock)
@@ -111,7 +117,7 @@ async def run_job(
         FakeGitProvider(GOOD_DIFF),
         store,
         review=ReviewStage(gateway=gateway, publisher=publisher),
-        context_stage=stage_for(contents, budget),
+        context_stage=stage_for(contents, budget, max_input_tokens),
         steps=steps,
     )
     job = await store.get(job_id)
@@ -154,6 +160,49 @@ async def test_rules_and_ast_context_reach_the_gateway(auth_clock: FixedClock) -
     assert metrics["context_fetches"] == 1
     assert metrics["tier1_symbols"] >= 1
     assert metrics["context_cut"] == "none"
+
+
+async def test_build_context_metrics_include_prompt_budget_trimming(
+    auth_clock: FixedClock,
+) -> None:
+    source = "\n".join(
+        [
+            "def helper(x):",
+            "    return x + 1",
+            "",
+            "def run(a):",
+            '    payload = "' + "E" * 15_000 + '"',
+            "    return helper(a)",
+        ]
+    )
+    contents = FakeRepositoryContents(
+        {
+            (REPO, RULES_PATH, BASE_SHA): RULES_MD,
+            (REPO, "app/x.py", HEAD_SHA): source.encode(),
+        }
+    )
+    steps = InMemoryStepRecorder()
+
+    completed, job, gateway, _publisher = await run_job(
+        auth_clock,
+        contents,
+        budget=10_000,
+        max_input_tokens=10_000,
+        steps=steps,
+    )
+
+    assert completed is True
+    (request,) = gateway.requests
+    assert request.diff_text == GOOD_DIFF
+    assert request.context == ()
+    [record] = [
+        record for record in steps.records(job.job_id) if record["step"] is JobStep.BUILD_CONTEXT
+    ]
+    metrics = record["metrics"]
+    assert metrics is not None
+    assert metrics["context_files"] == 0
+    assert metrics["context_tokens"] == 0
+    assert metrics["context_cut"] == "tier1"
 
 
 async def test_absent_rules_and_source_still_complete_the_review(auth_clock: FixedClock) -> None:

@@ -11,6 +11,7 @@ from adapters.llm.config import (
     DEFAULT_REVIEW_SCOPE,
     ReviewScope,
 )
+from adapters.llm.context_budget import fit_context_to_prompt
 from adapters.llm.prompt import (
     ChatMessage,
     FileReview,
@@ -200,11 +201,16 @@ class FallbackLLMGateway:
         screen = await self._screen_rules(rule_set.rules)
         _log_rules(rule_set, screen)
         rules = screen.rules
-        parts = self._split(request)
-        estimated = max(
-            estimate_tokens(build_messages(part, rules, version=self._prompt_version))
-            for part in parts
+        context_fit = fit_context_to_prompt(
+            request,
+            rules,
+            max_input_tokens=self._max_input_tokens,
+            prompt_version=self._prompt_version,
+            review_scope=self._review_scope,
         )
+        request = context_fit.request
+        parts = self._split(request)
+        estimated = context_fit.estimated_tokens
         if estimated > self._max_input_tokens:
             too_large = LLMInputTooLargeError(estimated, self._max_input_tokens)
             logger.warning(

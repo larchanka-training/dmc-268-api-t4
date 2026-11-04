@@ -70,6 +70,9 @@ def build_context_stage_from_env() -> ContextStage:
         contents=contents,
         symbols=TreeSitterSymbolIndex(),
         context_budget_tokens=int(llm.max_input_tokens * CONTEXT_TOKEN_BUDGET_FRACTION),
+        max_input_tokens=llm.max_input_tokens,
+        prompt_version=llm.prompt_version,
+        review_scope=llm.review_scope,
     )
 
 

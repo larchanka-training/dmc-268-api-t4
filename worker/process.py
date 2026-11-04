@@ -26,13 +26,21 @@ from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 
+from adapters.llm.config import (
+    DEFAULT_MAX_INPUT_TOKENS,
+    DEFAULT_PROMPT_VERSION,
+    DEFAULT_REVIEW_SCOPE,
+    ReviewScope,
+)
+from adapters.llm.context_budget import fit_context_to_prompt
 from adapters.llm.prompt import estimate_text_tokens
-from adapters.llm.rules import parse_rules
+from adapters.llm.rules import Rule, parse_rules
 from adapters.observability import metrics
 from adapters.observability.config import DEFAULT_ENV, read_env
 from adapters.observability.logging import bind_context
 from domain.context import (
     MAX_SOURCE_BYTES,
+    ContextCut,
     build_context,
     select_context_files,
 )
@@ -53,6 +61,7 @@ from domain.findings import NewPublishedFinding, published_findings
 from domain.jobs import JobStep, StepStatus
 from domain.ports import (
     ClaimedJob,
+    ContextBlockKind,
     FileContext,
     GitProvider,
     JobRepository,
@@ -107,6 +116,10 @@ class ContextStage:
     symbols: SymbolIndex
     #: At most this many tokens of context (CONTEXT_AND_VERIFICATION_SPEC §1.4).
     context_budget_tokens: int
+    #: The prompt budget and variant used to account for serialized-context overhead.
+    max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS
+    prompt_version: str = DEFAULT_PROMPT_VERSION
+    review_scope: ReviewScope = DEFAULT_REVIEW_SCOPE
 
 
 #: Dev-only escape hatch: when "1", the fetched diff text is logged verbatim
@@ -359,7 +372,14 @@ async def _process(
                 if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                     return False
                 await progress.begin(JobStep.BUILD_CONTEXT)
-                loaded = await _build_context(payload, filtered.kept, context_stage)
+                base_request = ReviewRequest(
+                    diff_text=context.diff_text,
+                    pr_title=context.title,
+                    pr_description=context.description,
+                )
+                loaded = await _build_context(
+                    payload, filtered.kept, context_stage, base_request=base_request
+                )
                 rules_markdown = loaded.rules_markdown
                 contexts = loaded.contexts
                 rules_audit = loaded.rules_audit
@@ -536,6 +556,8 @@ async def _build_context(
     payload: NewReviewJob,
     kept: Sequence[FileDiff],
     stage: ContextStage,
+    *,
+    base_request: ReviewRequest,
 ) -> LoadedContext:
     """The enriched context of one review (review-context spec).
 
@@ -568,8 +590,10 @@ async def _build_context(
             rules_markdown = decoded
 
     rules_audit: RulesAudit | None = None
+    parsed_rules: tuple[Rule, ...] = ()
     if rules_markdown is not None:
         parsed = parse_rules(rules_markdown)
+        parsed_rules = parsed.rules
         rules_audit = RulesAudit(
             ref=payload.base_sha,
             status="applied",
@@ -609,15 +633,35 @@ async def _build_context(
         token_budget=stage.context_budget_tokens,
         estimate=estimate_text_tokens,
     )
+    context_fit = fit_context_to_prompt(
+        replace(base_request, rules_markdown=rules_markdown, context=contexts),
+        parsed_rules,
+        max_input_tokens=stage.max_input_tokens,
+        prompt_version=stage.prompt_version,
+        review_scope=stage.review_scope,
+    )
+    contexts = context_fit.request.context
     step_metrics: dict[str, int | str] = {
-        "context_files": metrics.context_files,
+        "context_files": len(contexts),
         "context_fetches": fetches,
-        "tier1_symbols": metrics.tier1_symbols,
-        "tier2_symbols": metrics.tier2_symbols,
-        "fallback_files": metrics.fallback_files,
+        "tier1_symbols": sum(
+            block.kind is ContextBlockKind.ENCLOSING
+            for context in contexts
+            for block in context.blocks
+        ),
+        "tier2_symbols": sum(
+            block.kind is ContextBlockKind.CALLED
+            for context in contexts
+            for block in context.blocks
+        ),
+        "fallback_files": sum(
+            bool(context.blocks)
+            and all(block.kind is ContextBlockKind.WINDOW for block in context.blocks)
+            for context in contexts
+        ),
         "parse_errors": metrics.parse_errors,
-        "context_tokens": metrics.context_tokens,
-        "context_cut": metrics.context_cut.value,
+        "context_tokens": context_fit.context_tokens,
+        "context_cut": _more_severe_context_cut(metrics.context_cut, context_fit.context_cut).value,
     }
     return LoadedContext(
         rules_markdown=rules_markdown,
@@ -625,6 +669,16 @@ async def _build_context(
         metrics=step_metrics,
         rules_audit=rules_audit,
     )
+
+
+def _more_severe_context_cut(first: ContextCut, second: ContextCut) -> ContextCut:
+    priority = {
+        ContextCut.NONE: 0,
+        ContextCut.TIER2: 1,
+        ContextCut.TIER1: 2,
+        ContextCut.FALLBACK: 3,
+    }
+    return max((first, second), key=priority.__getitem__)
 
 
 async def _publish_skipped(

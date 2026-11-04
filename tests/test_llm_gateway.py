@@ -7,6 +7,7 @@ import pytest
 from adapters.llm.config import LLMSettings, ProviderSettings
 from adapters.llm.factory import build_gateway
 from adapters.llm.gateway import FallbackLLMGateway
+from adapters.llm.prompt import build_messages, estimate_tokens
 from adapters.llm.rule_screen import JevRuleScreen
 from adapters.llm.rules import Rule
 from domain.errors import (
@@ -163,6 +164,86 @@ async def test_input_within_budget_is_reviewed() -> None:
     )
 
     assert len(result.findings) == 1
+
+
+async def test_optional_context_is_cut_before_a_valid_diff_is_rejected() -> None:
+    diff = "D" * 9000
+    request = ReviewRequest(
+        diff_text=diff,
+        pr_title="t",
+        pr_description="d",
+        context=(
+            FileContext(
+                path="app/users.py",
+                blocks=(
+                    ContextBlock(
+                        kind=ContextBlockKind.ENCLOSING,
+                        name="changed",
+                        start_line=1,
+                        end_line=1,
+                        text="E" * 600,
+                    ),
+                    ContextBlock(
+                        kind=ContextBlockKind.CALLED,
+                        name="called",
+                        start_line=2,
+                        end_line=2,
+                        text="C" * 5000,
+                    ),
+                ),
+            ),
+        ),
+    )
+    base = ReviewRequest(diff_text=diff, pr_title="t", pr_description="d")
+    limit = 5000
+    assert estimate_tokens(build_messages(base)) < limit
+    transport = RecordingTransport(replies(chat_response(review_json())))
+
+    result = await FallbackLLMGateway([make_provider(transport)], max_input_tokens=limit).review(
+        request
+    )
+
+    assert len(result.findings) == 0
+    [outbound] = transport.requests
+    messages = json.loads(outbound.content)["messages"]
+    user_message = messages[1]["content"]
+    assert "D" * 100 in user_message
+    assert "E" * 100 in user_message
+    assert "C" * 100 not in user_message
+    assert estimate_tokens(messages) <= limit
+
+
+async def test_context_cannot_exceed_its_share_when_full_prompt_has_room() -> None:
+    request = ReviewRequest(
+        diff_text="small diff",
+        pr_title="t",
+        pr_description="d",
+        context=(
+            FileContext(
+                path="app/users.py",
+                blocks=(
+                    ContextBlock(
+                        kind=ContextBlockKind.ENCLOSING,
+                        name="large",
+                        start_line=1,
+                        end_line=1,
+                        text="E" * 42_000,
+                    ),
+                ),
+            ),
+        ),
+    )
+    limit = 32_000
+    transport = RecordingTransport(replies(chat_response(review_json())))
+
+    await FallbackLLMGateway([make_provider(transport)], max_input_tokens=limit).review(request)
+
+    [outbound] = transport.requests
+    messages = json.loads(outbound.content)["messages"]
+    user_message = messages[1]["content"]
+    assert "small diff" in user_message
+    assert "E" * 100 not in user_message
+    assert estimate_tokens(messages) <= limit
 
 
 async def test_source_context_secret_is_redacted_in_provider_request() -> None:
