@@ -22,8 +22,7 @@ never be set outside a developer machine.
 import logging
 import os
 import time
-from collections.abc import Awaitable, Sequence
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 

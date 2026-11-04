@@ -27,8 +27,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from domain.diff import FileDiff
-from domain.models import RISK_ORDER, DiffSide, Finding, FindingPosition, RiskLevel, Severity
-from domain.repository_rules import RULES_PATH
 from domain.models import (
     RISK_ORDER,
     DiffSide,
@@ -38,6 +36,7 @@ from domain.models import (
     RiskLevel,
     Severity,
 )
+from domain.repository_rules import RULES_PATH
 
 # Most severe first: Severity is declared in that order in domain/models.py.
 SEVERITY_ORDER: tuple[Severity, ...] = tuple(Severity)

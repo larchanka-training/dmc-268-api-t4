@@ -238,4 +238,4 @@ def test_reupgrade_head_is_repeatable(migrated_url: str) -> None:
     assert "pr_review_comments" in tables
     assert "pg_stat_statements" in asyncio.run(_extensions(migrated_url))
     versions = asyncio.run(_fetch_all(migrated_url, "SELECT version_num FROM alembic_version"))
-    assert versions[0][0] == "0002"
+    assert versions[0][0] == "0003"

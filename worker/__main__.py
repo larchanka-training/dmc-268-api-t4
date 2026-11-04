@@ -33,8 +33,7 @@ from adapters.observability.sentry import init_sentry
 from domain.ports import GitProvider
 from worker.config import WorkerSettings
 from worker.loop import run_worker
-from worker.process import DEBUG_LOG_DIFF_ENV, ContextStage, ReviewStage
-from worker.process import DEBUG_LOG_DIFF_ENV, ERROR_KINDS, ReviewStage
+from worker.process import DEBUG_LOG_DIFF_ENV, ERROR_KINDS, ContextStage, ReviewStage
 
 logger = logging.getLogger(__name__)
 
