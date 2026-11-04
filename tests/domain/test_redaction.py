@@ -3,7 +3,7 @@ and a report of what fired. Fixture values are fakes built to match the formats.
 
 import pytest
 
-from domain.redaction import RULESET_VERSION, redact
+from domain.redaction import RULESET_VERSION, redact, redact_preserving_lines
 
 GITHUB_TOKEN = "ghp_" + "A1b2C3d4E5" * 4  # 40 characters after the prefix
 PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nIBAAKC\n-----END RSA PRIVATE KEY-----"
@@ -55,6 +55,18 @@ def test_a_private_key_cut_off_before_its_end_line_is_still_redacted() -> None:
     redacted, _ = redact("-----BEGIN PRIVATE KEY-----\nMIIEvQ")
 
     assert "MIIEvQ" not in redacted
+
+
+def test_redact_preserving_lines_keeps_source_line_numbers() -> None:
+    source = f"before\n{PEM}\nafter\n"
+
+    redacted, report = redact_preserving_lines(source)
+
+    assert "MIIEow" not in redacted
+    assert "[REDACTED:private_key]" in redacted
+    assert redacted.count("\n") == source.count("\n")
+    assert redacted.splitlines()[-2:] == ["", "after"]
+    assert dict(report.counts)["private_key"] == 1
 
 
 def test_the_report_counts_matches_and_carries_the_ruleset_version() -> None:

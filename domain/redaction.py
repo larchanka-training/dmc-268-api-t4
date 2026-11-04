@@ -84,12 +84,45 @@ RULES: tuple[RedactionRule, ...] = (
 
 def redact(text: str, rules: tuple[RedactionRule, ...] = RULES) -> tuple[str, RedactionReport]:
     """Replace every match with ``[REDACTED:<rule>]``; report what fired."""
+    return _redact(text, rules, preserve_lines=False)
+
+
+def redact_preserving_lines(
+    text: str, rules: tuple[RedactionRule, ...] = RULES
+) -> tuple[str, RedactionReport]:
+    """Redact secrets without changing the number of source lines.
+
+    Multiline secrets, notably PEM keys, are replaced by one marker followed by
+    enough newlines to keep later source line numbers stable.
+    """
+    return _redact(text, rules, preserve_lines=True)
+
+
+def _redact(
+    text: str, rules: tuple[RedactionRule, ...], *, preserve_lines: bool
+) -> tuple[str, RedactionReport]:
     counts: list[tuple[str, int]] = []
     for rule in rules:
-        text, matches = rule.pattern.subn(_replacement(rule), text)
+        text, matches = rule.pattern.subn(_replacement_with_line_policy(rule, preserve_lines), text)
         if matches:
             counts.append((rule.name, matches))
     return text, RedactionReport(RULESET_VERSION, tuple(counts))
+
+
+def _replacement_with_line_policy(
+    rule: RedactionRule, preserve_lines: bool
+) -> Callable[[re.Match[str]], str]:
+    replacement = _replacement(rule)
+
+    def replace(match: re.Match[str]) -> str:
+        redacted = replacement(match) if callable(replacement) else replacement
+        if preserve_lines:
+            removed_newlines = match.group(0).count("\n") - redacted.count("\n")
+            if removed_newlines > 0:
+                redacted += "\n" * removed_newlines
+        return redacted
+
+    return replace
 
 
 def _replacement(rule: RedactionRule) -> Callable[[re.Match[str]], str] | str:

@@ -1,3 +1,4 @@
+import json
 import logging
 
 import httpx
@@ -6,13 +7,15 @@ import pytest
 from adapters.llm.config import LLMSettings, ProviderSettings
 from adapters.llm.factory import build_gateway
 from adapters.llm.gateway import FallbackLLMGateway
+from adapters.llm.rule_screen import JevRuleScreen
+from adapters.llm.rules import Rule
 from domain.errors import (
     AllProvidersFailedError,
     LLMInputTooLargeError,
     LLMOutputError,
     ProviderUnavailableError,
 )
-from domain.ports import ReviewRequest
+from domain.ports import ContextBlock, ContextBlockKind, FileContext, ReviewRequest
 from tests.conftest import (
     FAKE_KEY_A,
     FAKE_KEY_B,
@@ -160,3 +163,59 @@ async def test_input_within_budget_is_reviewed() -> None:
     )
 
     assert len(result.findings) == 1
+
+
+async def test_source_context_secret_is_redacted_in_provider_request() -> None:
+    token = "ghp_" + "A" * 30
+    rule_token = "ghp_" + "C" * 30
+    request = ReviewRequest(
+        diff_text="diff --git a/x b/x",
+        pr_title="t",
+        pr_description="d",
+        rules_markdown=f"# Security\n- Do not expose {rule_token}.",
+        context=(
+            FileContext(
+                path="app/users.py",
+                blocks=(
+                    ContextBlock(
+                        kind=ContextBlockKind.ENCLOSING,
+                        name="load_user",
+                        start_line=40,
+                        end_line=42,
+                        text=f'def load_user():\n    token = "{token}"\n    return token',
+                    ),
+                ),
+            ),
+        ),
+    )
+    transport = RecordingTransport(replies(chat_response(review_json())))
+
+    await FallbackLLMGateway([make_provider(transport)]).review(request)
+
+    [outbound] = transport.requests
+    messages = json.loads(outbound.content)["messages"]
+    user_message = messages[1]["content"]
+    assert token not in user_message
+    assert rule_token not in user_message
+    assert "[REDACTED:github_token]" in user_message
+    assert "  42 |     return token" in user_message
+
+
+async def test_rule_secret_is_redacted_in_typesafe_request() -> None:
+    token = "ghp_" + "B" * 30
+    transport = RecordingTransport(
+        replies(
+            httpx.Response(
+                200,
+                json={"model": "test", "answers": {"rule_1": {"noul": 0.0}}},
+            )
+        )
+    )
+    screen = JevRuleScreen(api_key="test-key", transport=transport)
+
+    await screen.screen((Rule(id="R1", section="Security", text=f"Avoid {token}."),))
+
+    [outbound] = transport.requests
+    state = json.loads(outbound.content)["state"]
+    assert token not in state
+    assert "[REDACTED:github_token]" in state

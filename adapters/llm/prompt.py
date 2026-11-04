@@ -9,6 +9,7 @@ from adapters.llm.config import DEFAULT_PROMPT_VERSION
 from adapters.llm.rules import Rule
 from domain.models import Finding
 from domain.ports import ContextBlockKind, FileContext, ReviewRequest
+from domain.redaction import redact, redact_preserving_lines
 
 PROMPT_VERSION = DEFAULT_PROMPT_VERSION
 UNTRUSTED_START = "<<<UNTRUSTED_DIFF>>>"
@@ -105,16 +106,19 @@ def number_diff(diff_text: str) -> str:
 
 def rules_block(rules: Sequence[Rule]) -> str:
     lines = [
-        f"{rule.id} [{escape_markers(rule.section)}] {escape_markers(rule.text)}" for rule in rules
+        f"{rule.id} [{escape_markers(redact(rule.section)[0])}] "
+        f"{escape_markers(redact(rule.text)[0])}"
+        for rule in rules
     ]
     return "\n".join([RULES_START, *lines, RULES_END])
 
 
 def _numbered_source(start_line: int, text: str) -> str:
     """Head-revision lines with their real file numbers, so the model reads, not counts."""
+    safe_text, _ = redact_preserving_lines(text)
     return "\n".join(
         f"{start_line + offset:>4} | {escape_markers(line)}"
-        for offset, line in enumerate(text.split("\n"))
+        for offset, line in enumerate(safe_text.split("\n"))
     )
 
 
@@ -123,14 +127,14 @@ def context_block(contexts: Sequence[FileContext]) -> str:
     signatures and fallback windows, line-numbered and marker-escaped."""
     lines: list[str] = [CONTEXT_START]
     for file_context in contexts:
-        lines.append(f"File: {escape_markers(file_context.path)} (head)")
+        lines.append(f"File: {escape_markers(redact(file_context.path)[0])} (head)")
         for block in file_context.blocks:
             if block.kind is ContextBlockKind.WINDOW:
                 lines.append(f"Window: lines {block.start_line}-{block.end_line}")
             else:
                 label = "Enclosing" if block.kind is ContextBlockKind.ENCLOSING else "Called"
                 lines.append(
-                    f"{label}: {escape_markers(block.name)}, "
+                    f"{label}: {escape_markers(redact(block.name)[0])}, "
                     f"lines {block.start_line}-{block.end_line}"
                 )
             lines.append(_numbered_source(block.start_line, block.text))
