@@ -3,6 +3,9 @@
 CPU-only: no network, no I/O — the index parses the strings it is given.
 """
 
+import subprocess
+import sys
+
 import pytest
 
 from adapters.context.tree_sitter_index import TreeSitterSymbolIndex
@@ -118,6 +121,30 @@ def test_python_parse_error_at_the_line_raises(index: TreeSitterSymbolIndex) -> 
     broken = "def ok():\n    return 1\n\ndef broken(:\n    pass\n"
     with pytest.raises(SymbolParseError):
         index.enclosing("app/z.py", broken, [4])
+
+
+def test_python_large_function_collection_preserves_end_point_row() -> None:
+    child_code = """
+from adapters.context.tree_sitter_index import TreeSitterSymbolIndex
+
+source = "def target():\\n" + "".join(f"    value_{i} = {i}\\n" for i in range(300))
+spans = TreeSitterSymbolIndex().enclosing("large.py", source, [301])
+assert len(spans) == 1, f"expected one enclosing function, got {spans!r}"
+span = spans[0]
+assert (span.name, span.kind) == ("target", "function"), f"unexpected symbol: {span!r}"
+assert (span.start_line, span.end_line) == (1, 301), f"unexpected span: {span!r}"
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", child_code],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"child exited with status {result.returncode}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
 
 
 # --- TypeScript / JavaScript ----------------------------------------------------

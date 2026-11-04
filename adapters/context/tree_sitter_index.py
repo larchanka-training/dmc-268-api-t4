@@ -100,7 +100,8 @@ def _header_end(body: Node | None, own_start_row: int, fallback_end: int) -> int
     """
     if body is None:
         return fallback_end
-    return max(own_start_row, body.start_point.row - 1)
+    start_point = body.start_point
+    return max(own_start_row, start_point.row - 1)
 
 
 class TreeSitterSymbolIndex:
@@ -142,10 +143,12 @@ class TreeSitterSymbolIndex:
         stack: list[Node] = [tree.root_node]
         while stack:
             node = stack.pop()
-            if node.type in ("call", "call_expression") and node.start_point.row in rows:
-                name = _callee_name(node)
-                if name is not None and name in definitions:
-                    called.add(name)
+            if node.type in ("call", "call_expression"):
+                start_point = node.start_point
+                if start_point.row in rows:
+                    name = _callee_name(node)
+                    if name is not None and name in definitions:
+                        called.add(name)
             stack.extend(node.named_children)
         ordered = sorted(called, key=lambda name: definitions[name].start_row)
         return tuple(definitions[name].to_span() for name in ordered)
@@ -186,8 +189,11 @@ def _raise_on_errors_at(tree: Tree, rows: frozenset[int]) -> None:
     while stack:
         node = stack.pop()
         error_at_lines = node.is_error or node.is_missing
-        if error_at_lines and node.start_point.row <= highest and node.end_point.row >= lowest:
-            raise SymbolParseError("syntax errors at the requested lines")
+        if error_at_lines:
+            start_point = node.start_point
+            end_point = node.end_point
+            if start_point.row <= highest and end_point.row >= lowest:
+                raise SymbolParseError("syntax errors at the requested lines")
         stack.extend(node.children)
 
 
@@ -221,7 +227,8 @@ def _python_docstring_end(body: Node) -> int | None:
     if first is not None and first.type == "expression_statement":
         inner = next((child for child in first.named_children if child.is_named), None)
         if inner is not None and inner.type == "string":
-            return first.end_point.row
+            end_point = first.end_point
+            return end_point.row
     return None
 
 
@@ -235,18 +242,26 @@ def _collect_python(
 ) -> None:
     if node.type == "decorated_definition":
         # The span starts at the first decorator, not at the def.
+        start_point = node.start_point
+        node_start_row = start_point.row
         inner = node.named_children[-1] if node.named_children else None
         if inner is not None:
             _collect_python(
-                inner, source_lines, in_class=in_class, out=out, start_row=node.start_point.row
+                inner, source_lines, in_class=in_class, out=out, start_row=node_start_row
             )
         return
     if node.type == "function_definition":
+        # Keep these wrappers alive through child traversal. Reading temporary
+        # Point.row values can invalidate tree-sitter nodes in some bindings.
+        start_point = node.start_point
+        end_point = node.end_point
+        node_start_row = start_point.row
+        node_end_row = end_point.row
         name = _text(node.child_by_field_name("name"))
         body = node.child_by_field_name("body")
         if name is not None and body is not None:
-            start = start_row if start_row is not None else node.start_point.row
-            signature_end = _header_end(body, node.start_point.row, node.end_point.row)
+            start = start_row if start_row is not None else node_start_row
+            signature_end = _header_end(body, node_start_row, node_end_row)
             docstring_end = _python_docstring_end(body)
             if docstring_end is not None:
                 signature_end = docstring_end
@@ -255,7 +270,7 @@ def _collect_python(
                     name=name,
                     kind="method" if in_class else "function",
                     start_row=start,
-                    end_row=node.end_point.row,
+                    end_row=node_end_row,
                     signature_end_row=signature_end,
                 )
             )
@@ -263,15 +278,19 @@ def _collect_python(
             _collect_python(child, source_lines, in_class=in_class, out=out)
         return
     if node.type == "class_definition":
+        start_point = node.start_point
+        end_point = node.end_point
+        node_start_row = start_point.row
+        node_end_row = end_point.row
         name = _text(node.child_by_field_name("name"))
         body = node.child_by_field_name("body")
         if name is not None and body is not None:
-            start = start_row if start_row is not None else node.start_point.row
-            signature_end = _header_end(body, node.start_point.row, node.end_point.row)
+            start = start_row if start_row is not None else node_start_row
+            signature_end = _header_end(body, node_start_row, node_end_row)
             docstring_end = _python_docstring_end(body)
             if docstring_end is not None:
                 signature_end = docstring_end
-            out.append(_RawSymbol(name, "class", start, node.end_point.row, signature_end))
+            out.append(_RawSymbol(name, "class", start, node_end_row, signature_end))
         for child in node.named_children:
             _collect_python(child, source_lines, in_class=True, out=out)
         return
