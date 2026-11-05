@@ -1,0 +1,329 @@
+"""TreeSitterSymbolIndex against inline fixtures, one block per language ([C2]).
+
+CPU-only: no network, no I/O — the index parses the strings it is given.
+"""
+
+import subprocess
+import sys
+
+import pytest
+
+from adapters.context.tree_sitter_index import TreeSitterSymbolIndex
+from domain.errors import SymbolParseError
+
+PY_SOURCE = "\n".join(
+    [
+        "import os",  # 1
+        "",  # 2
+        "",  # 3
+        "@app.route('/x')",  # 4  <- span starts at the decorator
+        "class Handler:",  # 5
+        "    '''Handle things.'''",  # 6
+        "",  # 7
+        "    def run(self, value):",  # 8
+        "        '''Run it.'''",  # 9  <- inside the signature
+        "        return helper(value) + os.getpid()",  # 10
+        "",  # 11
+        "",  # 12
+        "def helper(x):",  # 13
+        "    '''Help.'''",  # 14
+        "    return x + 1",  # 15
+    ]
+)
+
+TS_SOURCE = "\n".join(
+    [
+        "/** Runs the thing. */",  # 1  <- jsdoc extends the span upward
+        "export const run = (x: number) => helper(x);",  # 2
+        "",  # 3
+        "function helper(x: number) {",  # 4
+        "  return x + 1;",  # 5
+        "}",  # 6
+        "",  # 7
+        "class Svc {",  # 8
+        "  constructor(private a: number) {}",  # 9
+        "  get value(): number {",  # 10
+        "    return this.a;",  # 11
+        "  }",  # 12
+        "}",  # 13
+        "",  # 14
+        "interface Repo {",  # 15
+        "  find(id: string): Svc;",  # 16
+        "}",  # 17
+    ]
+)
+
+GO_SOURCE = "\n".join(
+    [
+        "package main",  # 1
+        "",  # 2
+        "// Add sums things up.",  # 3  <- doc comment extends the span
+        "func Add(x int) int {",  # 4
+        "\treturn x + 1",  # 5
+        "}",  # 6
+        "",  # 7
+        "func (s *Svc) Run() int {",  # 8
+        "\treturn s.other()",  # 9
+        "}",  # 10
+        "",  # 11
+        "type Svc struct {",  # 12
+        "\tName string",  # 13
+        "}",  # 14
+    ]
+)
+
+
+@pytest.fixture(scope="module")
+def index() -> TreeSitterSymbolIndex:
+    return TreeSitterSymbolIndex()
+
+
+# --- Python -------------------------------------------------------------------
+
+
+def test_python_enclosing_is_the_innermost_method(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("app/x.py", PY_SOURCE, [10])
+    assert (span.name, span.kind) == ("run", "method")
+    assert (span.start_line, span.end_line) == (8, 10)
+    # The signature covers the header and the docstring.
+    assert span.signature_end_line == 9
+
+
+def test_python_decorated_class_starts_at_the_decorator(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("app/x.py", PY_SOURCE, [6])
+    assert (span.name, span.kind) == ("Handler", "class")
+    assert span.start_line == 4  # the decorator row, not the `class` row
+
+
+def test_python_enclosing_picks_the_innermost_not_the_class(index: TreeSitterSymbolIndex) -> None:
+    symbols = index.enclosing("app/x.py", PY_SOURCE, [6])
+    assert [symbol.name for symbol in symbols] == ["Handler"]
+    assert symbols[0].kind == "class"
+    assert symbols[0].signature_end_line == 6  # the class docstring
+
+
+def test_python_called_from_finds_the_same_file_function(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.called_from("app/x.py", PY_SOURCE, [10])
+    assert (span.name, span.kind) == ("helper", "function")
+    assert span.start_line == 13
+    assert span.signature_end_line == 14  # def + docstring, body not included
+    assert span.end_line == 15
+
+
+def test_python_attribute_call_resolves_the_method_name(index: TreeSitterSymbolIndex) -> None:
+    source = "class A:\n    def m(self):\n        return 1\n\n\ndef caller():\n    return A().m()\n"
+    spans = index.called_from("app/y.py", source, [7])
+    # The class constructor and the method are both same-file symbols on the line.
+    assert {span.name for span in spans} == {"A", "m"}
+
+
+def test_python_parse_error_at_the_line_raises(index: TreeSitterSymbolIndex) -> None:
+    broken = "def ok():\n    return 1\n\ndef broken(:\n    pass\n"
+    with pytest.raises(SymbolParseError):
+        index.enclosing("app/z.py", broken, [4])
+
+
+def test_python_large_function_collection_preserves_end_point_row() -> None:
+    child_code = """
+from adapters.context.tree_sitter_index import TreeSitterSymbolIndex
+
+source = "def target():\\n" + "".join(f"    value_{i} = {i}\\n" for i in range(300))
+spans = TreeSitterSymbolIndex().enclosing("large.py", source, [301])
+assert len(spans) == 1, f"expected one enclosing function, got {spans!r}"
+span = spans[0]
+assert (span.name, span.kind) == ("target", "function"), f"unexpected symbol: {span!r}"
+assert (span.start_line, span.end_line) == (1, 301), f"unexpected span: {span!r}"
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", child_code],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"child exited with status {result.returncode}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+
+# --- TypeScript / JavaScript ----------------------------------------------------
+
+
+def test_ts_arrow_assignment_is_a_function_with_jsdoc(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("app/x.ts", TS_SOURCE, [2])
+    assert (span.name, span.kind) == ("run", "function")
+    assert span.start_line == 1  # the jsdoc line
+    assert span.end_line == 2
+
+
+def test_ts_class_and_methods(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("app/x.ts", TS_SOURCE, [11])
+    assert (span.name, span.kind) == ("value", "method")
+    assert span.start_line == 10
+    assert span.signature_end_line == 10  # header row, body starts after
+
+
+def test_ts_interface_counts_as_class(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("app/x.ts", TS_SOURCE, [16])
+    assert (span.name, span.kind) == ("find", "method")
+
+
+def test_ts_member_call_resolves_the_property(index: TreeSitterSymbolIndex) -> None:
+    source = (
+        "class Svc {\n  other(): number {\n    return 1\n  }\n}"
+        "\nconst s = new Svc()\nconst n = s.other()\n"
+    )
+    (span,) = index.called_from("app/w.ts", source, [7])
+    assert span.name == "other"
+    assert span.kind == "method"
+
+
+def test_js_function_and_call(index: TreeSitterSymbolIndex) -> None:
+    source = "function helper(x) {\n  return x\n}\nconst out = helper(1)\n"
+    # Module level: the call line sits in no symbol, so nothing encloses it.
+    assert index.enclosing("app/m.js", source, [4]) == ()
+    (called,) = index.called_from("app/m.js", source, [4])
+    assert called.name == "helper"
+    assert called.signature_end_line == 1  # header only, body not in tier 2
+
+
+# --- Go --------------------------------------------------------------------------
+
+
+def test_go_function_with_doc_comment(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("app/x.go", GO_SOURCE, [5])
+    assert (span.name, span.kind) == ("Add", "function")
+    assert span.start_line == 3  # the doc comment
+    assert span.end_line == 6
+    assert span.signature_end_line == 4
+
+
+def test_go_method_and_selector_call(index: TreeSitterSymbolIndex) -> None:
+    source = (
+        "package main\n"
+        "\n"
+        "type Svc struct{}\n"
+        "\n"
+        "func (s *Svc) Other() int {\n"
+        "\treturn 1\n"
+        "}\n"
+        "\n"
+        "func Run(s *Svc) int {\n"
+        "\treturn s.Other()\n"
+        "}\n"
+    )
+    (span,) = index.enclosing("app/y.go", source, [6])
+    assert (span.name, span.kind) == ("Other", "method")
+    (called,) = index.called_from("app/y.go", source, [10])
+    assert called.name == "Other"
+    assert called.kind == "method"
+
+
+def test_go_struct_counts_as_class(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("app/x.go", GO_SOURCE, [13])
+    assert (span.name, span.kind) == ("Svc", "class")
+    assert (span.start_line, span.end_line) == (12, 14)
+
+
+# --- dispatch ----------------------------------------------------------------------
+
+
+def test_unsupported_extension_is_not_supported(index: TreeSitterSymbolIndex) -> None:
+    assert index.supports("app/x.rb") is False
+    assert index.supports("app/x.py") is True
+    assert index.supports("app/x.tsx") is True
+    assert index.supports("app/x.java") is True
+    assert index.supports("app/x.rs") is True
+    assert index.supports("README") is False
+
+
+# --- Java --------------------------------------------------------------------------
+
+
+JAVA_SOURCE = "\n".join(
+    [
+        "/** Handles things. */",  # 1  <- javadoc extends the span upward
+        '@SuppressWarnings("x")',  # 2
+        "public final class Handler {",  # 3
+        "",  # 4
+        "    /** Runs it. */",  # 5
+        "    public int run(int value) {",  # 6
+        "        return helper(value);",  # 7
+        "    }",  # 8
+        "",  # 9
+        "    Handler(int value) {",  # 10
+        "        this.value = value;",  # 11
+        "    }",  # 12
+        "",  # 13
+        "    int helper(int x) {",  # 14
+        "        return x + 1;",  # 15
+        "    }",  # 16
+        "}",  # 17
+    ]
+)
+
+
+def test_java_method_and_javadoc_span(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("Handler.java", JAVA_SOURCE, [7])
+    assert (span.name, span.kind) == ("run", "method")
+    assert span.start_line == 5  # the javadoc, not the annotation-free line
+    assert span.end_line == 8
+    assert span.signature_end_line == 6
+
+
+def test_java_constructor_is_a_method_and_calls_resolve(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("Handler.java", JAVA_SOURCE, [11])
+    assert (span.name, span.kind) == ("Handler", "method")
+    (called,) = index.called_from("Handler.java", JAVA_SOURCE, [7])
+    assert (called.name, called.kind) == ("helper", "method")
+
+
+# --- Rust --------------------------------------------------------------------------
+
+
+RUST_SOURCE = "\n".join(
+    [
+        "/// Adds one.",  # 1  <- doc comment
+        "#[inline]",  # 2  <- attribute
+        "pub fn add(a: u32) -> u32 {",  # 3
+        "    a + 1",  # 4
+        "}",  # 5
+        "",  # 6
+        "pub struct Calc {",  # 7
+        "    pub n: u32,",  # 8
+        "}",  # 9
+        "",  # 10
+        "impl Calc {",  # 11
+        "    /// Doubles.",  # 12
+        "    fn double(&self) -> u32 {",  # 13
+        "        helper(self.n)",  # 14
+        "    }",  # 15
+        "}",  # 16
+        "",  # 17
+        "fn helper(x: u32) -> u32 {",  # 18
+        "    x * 2",  # 19
+        "}",  # 20
+    ]
+)
+
+
+def test_rust_struct_counts_as_class(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("calc.rs", RUST_SOURCE, [8])
+    assert (span.name, span.kind) == ("Calc", "class")
+    assert (span.start_line, span.end_line) == (7, 9)
+
+
+def test_rust_function_span_starts_at_doc_and_attribute(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("calc.rs", RUST_SOURCE, [4])
+    assert (span.name, span.kind) == ("add", "function")
+    assert span.start_line == 1  # the /// doc, above the #[inline] attribute
+    assert span.end_line == 5
+    assert span.signature_end_line == 3
+
+
+def test_rust_method_inside_impl_and_same_file_call(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("calc.rs", RUST_SOURCE, [14])
+    assert (span.name, span.kind) == ("double", "method")
+    (called,) = index.called_from("calc.rs", RUST_SOURCE, [14])
+    assert (called.name, called.kind) == ("helper", "function")

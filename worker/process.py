@@ -22,18 +22,35 @@ never be set outside a developer machine.
 import logging
 import os
 import time
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 
+from adapters.llm.config import (
+    DEFAULT_MAX_INPUT_TOKENS,
+    DEFAULT_PROMPT_VERSION,
+    DEFAULT_REVIEW_SCOPE,
+    ReviewScope,
+)
+from adapters.llm.context_budget import ContextBudgetFit, fit_context_to_prompt
+from adapters.llm.prompt import estimate_text_tokens
+from adapters.llm.rules import Rule, parse_rules
 from adapters.observability import metrics
 from adapters.observability.config import DEFAULT_ENV, read_env
 from adapters.observability.logging import bind_context
-from domain.diff import parse_diff, split_into_chunks
+from domain.context import (
+    MAX_SOURCE_BYTES,
+    ContextCut,
+    ContextMetrics,
+    build_context,
+    select_context_files,
+)
+from domain.diff import FileDiff, parse_diff, split_into_chunks
 from domain.diff_filter import filter_files
 from domain.errors import (
     AllProvidersFailedError,
     DiffFormatError,
+    ForgePermissionError,
     ForgeUnavailableError,
     InstallationGoneError,
     LLMInputTooLargeError,
@@ -45,24 +62,30 @@ from domain.findings import NewPublishedFinding, published_findings
 from domain.jobs import JobStep, StepStatus
 from domain.ports import (
     ClaimedJob,
+    FileContext,
     GitProvider,
     JobRepository,
     JobStats,
     LLMGateway,
+    NewReviewJob,
     PullRequestTarget,
+    RepositoryContents,
     ReviewCommentStore,
     ReviewJobStatus,
     ReviewPublisher,
     ReviewRequest,
     StepRecorder,
+    SymbolIndex,
 )
 from domain.publishing import (
     DEFAULT_POLICY,
     CommentableLines,
     PublishPolicy,
+    RulesAudit,
     build_plan,
     build_skipped_plan,
 )
+from domain.repository_rules import RULES_MAX_BYTES, RULES_PATH, RulesStatus, decode_rules_file
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +101,25 @@ class ReviewStage:
     # Where published findings are kept, and what tells a re-review which ones the
     # pull request already has. Without it every review posts every finding again.
     comments: ReviewCommentStore | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ContextStage:
+    """What builds the enriched review context (review-context spec).
+
+    Optional: without it the job runs on the diff alone, exactly as before.
+    ``contents`` should arrive wrapped in the in-process TTL cache; rule text and
+    source fetched here are untrusted data — they reach the prompt and nothing
+    else, never a log line or a store (AGENTS.md hard rules 2-3)."""
+
+    contents: RepositoryContents
+    symbols: SymbolIndex
+    #: At most this many tokens of context (CONTEXT_AND_VERIFICATION_SPEC §1.4).
+    context_budget_tokens: int
+    #: The prompt budget and variant used to account for serialized-context overhead.
+    max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS
+    prompt_version: str = DEFAULT_PROMPT_VERSION
+    review_scope: ReviewScope = DEFAULT_REVIEW_SCOPE
 
 
 #: Dev-only escape hatch: when "1", the fetched diff text is logged verbatim
@@ -130,7 +172,12 @@ class _Steps:
                 ),
             )
 
-    async def end(self, status: StepStatus, error_kind: str | None = None) -> None:
+    async def end(
+        self,
+        status: StepStatus,
+        error_kind: str | None = None,
+        metrics: dict[str, int | str] | None = None,
+    ) -> None:
         step, self._current = self._current, None
         if step is None or self._recorder is None:
             return
@@ -143,6 +190,7 @@ class _Steps:
                 status,
                 worker_id=self._claimed.worker_id,
                 error_kind=error_kind,
+                metrics=metrics,
             ),
         )
 
@@ -205,11 +253,16 @@ async def process_claimed_job(
     jobs: JobRepository,
     *,
     review: ReviewStage | None = None,
+    context_stage: ContextStage | None = None,
     steps: StepRecorder | None = None,
     logger: logging.Logger | None = None,
 ) -> bool:
     """Fetch and parse one claimed pull request diff, review and publish it when a
     review stage is given; record stats or failure, and each step in `steps`.
+
+    With a `context_stage` the `BUILD_CONTEXT` step also loads repository rules
+    from the pull request's base revision and AST context around the changed
+    lines (review-context spec); without one the job runs on the diff alone.
 
     Returns True only when the job reached COMPLETED. Returns False when the
     lease was lost mid-flight (a superseding delivery or the reaper owns the
@@ -227,7 +280,15 @@ async def process_claimed_job(
     if claimed.claimable_at is not None and claimed.claimed_at is not None:
         metrics.observe_claim_latency((claimed.claimed_at - claimed.claimable_at).total_seconds())
     with bind_context(**_bound_fields(claimed)), metrics.WORKER_IN_FLIGHT.track_inprogress():
-        return await _process(claimed, vcs, jobs, review=review, steps=steps, logger=logger)
+        return await _process(
+            claimed,
+            vcs,
+            jobs,
+            review=review,
+            context_stage=context_stage,
+            steps=steps,
+            logger=logger,
+        )
 
 
 def _bound_fields(claimed: ClaimedJob) -> dict[str, object]:
@@ -248,6 +309,7 @@ async def _process(
     jobs: JobRepository,
     *,
     review: ReviewStage | None,
+    context_stage: ContextStage | None,
     steps: StepRecorder | None,
     logger: logging.Logger | None,
 ) -> bool:
@@ -300,6 +362,48 @@ async def _process(
         )
         summary: str | None = None
         if review is not None:
+            # BUILD_CONTEXT does forge round-trips of its own (rules at the base
+            # SHA, up to 30 source files at the head SHA): renew the lease before
+            # them, as before the LLM stage that follows.
+            rules_audit: RulesAudit | None = None
+            loaded: LoadedContext | None = None
+            if context_stage is not None:
+                if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
+                    return False
+                await progress.begin(JobStep.BUILD_CONTEXT)
+                base_request = ReviewRequest(
+                    diff_text=context.diff_text,
+                    pr_title=context.title,
+                    pr_description=context.description,
+                )
+                loaded = await _build_context(
+                    payload,
+                    filtered.kept,
+                    context_stage,
+                    base_request=base_request,
+                    job_id=job_id,
+                    log=log,
+                )
+                rules_audit = loaded.rules_audit
+                context_metrics = loaded.metrics
+                await progress.end(StepStatus.OK, metrics=context_metrics)
+                log.info(
+                    "job.context.built",
+                    extra={
+                        "job_id": job_id,
+                        "repo": payload.repo_full_name,
+                        "pr_number": payload.pr_number,
+                        "rules_loaded": loaded.rules_markdown is not None,
+                        "context_files": context_metrics["context_files"],
+                        "context_fetches": context_metrics["context_fetches"],
+                        "tier1_symbols": context_metrics["tier1_symbols"],
+                        "tier2_symbols": context_metrics["tier2_symbols"],
+                        "fallback_files": context_metrics["fallback_files"],
+                        "parse_errors": context_metrics["parse_errors"],
+                        "context_tokens": context_metrics["context_tokens"],
+                        "context_cut": context_metrics["context_cut"],
+                    },
+                )
             # LLM_CALL can take minutes (two 300 s attempts plus a fallback): renew the
             # lease before it and again before posting, and stop if it was lost.
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
@@ -307,13 +411,18 @@ async def _process(
             await progress.begin(JobStep.LLM_CALL)
             target = _pull_request_target(claimed, context.head_sha)
             try:
-                result = await review.gateway.review(
-                    ReviewRequest(
-                        diff_text=context.diff_text,
-                        pr_title=context.title,
-                        pr_description=context.description,
+                # With a context stage, the gateway gets the request exactly as
+                # the worker fitted it, fit included — one trim, not two.
+                if loaded is not None and loaded.fit is not None:
+                    result = await review.gateway.review(loaded.fit.request, fit=loaded.fit)
+                else:
+                    result = await review.gateway.review(
+                        ReviewRequest(
+                            diff_text=context.diff_text,
+                            pr_title=context.title,
+                            pr_description=context.description,
+                        )
                     )
-                )
             except LLMInputTooLargeError as too_large:
                 # The job still fails as skip_diff_too_large below; the check run only
                 # tells the author why nothing else appears.
@@ -341,6 +450,7 @@ async def _process(
                 model_risk=result.risk,
                 checklist=result.checklist,
                 dismissed_by_verifier=result.rejected_by_verifier,
+                rules_audit=rules_audit,
             )
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                 return False
@@ -432,6 +542,149 @@ def _pull_request_target(claimed: ClaimedJob, head_sha: str) -> PullRequestTarge
         repo=repo,
         number=payload.pr_number,
         head_sha=head_sha,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedContext:
+    """What `BUILD_CONTEXT` produced for one job: the rules markdown (None when
+    there are none), the per-file AST context, the step metrics (counters only)
+    and the rules audit for the Check Run line ([R11])."""
+
+    rules_markdown: str | None
+    contexts: tuple[FileContext, ...]
+    metrics: dict[str, int | str]
+    rules_audit: RulesAudit | None
+    #: The prompt fit the gateway must reuse, so the request sent and the
+    #: metrics logged describe the same trim (no second fit in the gateway).
+    fit: ContextBudgetFit | None = None
+
+
+async def _build_context(
+    payload: NewReviewJob,
+    kept: Sequence[FileDiff],
+    stage: ContextStage,
+    *,
+    base_request: ReviewRequest,
+    job_id: str,
+    log: logging.Logger,
+) -> LoadedContext:
+    """The enriched context of one review (review-context spec).
+
+    Rules come from the pull request's base SHA — the maintainers' revision, not
+    the PR author's — and source files from the head SHA. Every rejection of the
+    rules file means "review without rules", never a failure; a permission
+    refusal on one source file skips only that file — the files already fetched
+    keep their context. Transient forge errors propagate to the job's retry
+    path.
+
+    Counters only in the metrics and the audit — never rule text or source
+    (AGENTS.md hard rule 3).
+    """
+    rules_markdown: str | None = None
+    audit_status: str | None = None
+    try:
+        raw_rules = await stage.contents.read_file(
+            payload.installation_id,
+            payload.repo_full_name,
+            RULES_PATH,
+            payload.base_sha,
+            max_bytes=RULES_MAX_BYTES,
+        )
+    except ForgePermissionError:
+        raw_rules = None  # ignored:forbidden — the review runs without rules
+    if raw_rules is not None:
+        decoded = decode_rules_file(raw_rules)
+        if isinstance(decoded, RulesStatus):
+            audit_status = decoded.value
+        else:
+            rules_markdown = decoded
+
+    rules_audit: RulesAudit | None = None
+    parsed_rules: tuple[Rule, ...] = ()
+    if rules_markdown is not None:
+        parsed = parse_rules(rules_markdown)
+        parsed_rules = parsed.rules
+        rules_audit = RulesAudit(
+            ref=payload.base_sha,
+            status="applied",
+            rules=len(parsed.rules),
+            dropped_suspicious=parsed.dropped_suspicious,
+            dropped_over_limit=parsed.dropped_over_limit,
+        )
+    elif audit_status is not None:
+        rules_audit = RulesAudit(ref=payload.base_sha, status=audit_status)
+
+    selected = select_context_files(kept)
+    sources: dict[str, str] = {}
+    fetches = 0
+    refused = 0
+    for diff in selected:
+        try:
+            raw = await stage.contents.read_file(
+                payload.installation_id,
+                payload.repo_full_name,
+                diff.new_path,
+                payload.head_sha,
+                max_bytes=MAX_SOURCE_BYTES,
+            )
+        except ForgePermissionError:
+            # A refusal on a late file must not discard what earlier files
+            # already paid for: skip this one, keep the rest.
+            refused += 1
+            continue
+        fetches += 1
+        if raw is None or len(raw) > MAX_SOURCE_BYTES:
+            continue
+        try:
+            sources[diff.new_path] = raw.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            continue
+    if refused:
+        log.warning(
+            "job.context.sources_skipped",
+            extra={"job_id": job_id, "skipped_sources": refused},
+        )
+
+    contexts, metrics = build_context(
+        selected,
+        sources,
+        stage.symbols,
+        token_budget=stage.context_budget_tokens,
+        estimate=estimate_text_tokens,
+    )
+    context_fit = fit_context_to_prompt(
+        replace(base_request, rules_markdown=rules_markdown, context=contexts),
+        parsed_rules,
+        max_input_tokens=stage.max_input_tokens,
+        prompt_version=stage.prompt_version,
+        review_scope=stage.review_scope,
+    )
+    # Recount the blocks that survived the trim through the same tally
+    # `build_context` used; only the fetch counter and the fit's serialized
+    # token count and cut are the worker's own numbers.
+    trimmed = ContextMetrics.from_contexts(
+        context_fit.request.context,
+        parse_errors=metrics.parse_errors,
+        context_tokens=context_fit.context_tokens,
+        context_cut=ContextCut.more_severe(metrics.context_cut, context_fit.context_cut),
+    )
+    step_metrics: dict[str, int | str] = {
+        "context_files": trimmed.context_files,
+        "context_fetches": fetches,
+        "tier1_symbols": trimmed.tier1_symbols,
+        "tier2_symbols": trimmed.tier2_symbols,
+        "fallback_files": trimmed.fallback_files,
+        "parse_errors": trimmed.parse_errors,
+        "context_tokens": trimmed.context_tokens,
+        "context_cut": trimmed.context_cut.value,
+    }
+    return LoadedContext(
+        rules_markdown=rules_markdown,
+        contexts=context_fit.request.context,
+        metrics=step_metrics,
+        rules_audit=rules_audit,
+        fit=context_fit,
     )
 
 

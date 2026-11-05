@@ -12,6 +12,7 @@ from pathlib import Path
 from adapters.llm.config import LLMSettings
 from domain.errors import LLMConfigurationError
 from evals.bundle import build_bundle
+from evals.context import ContextManifestError, load_context_manifest
 from evals.loader import DatasetError, load_dataset
 from evals.models import Case
 from evals.report import render_summary, results_json
@@ -35,6 +36,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     run.add_argument("--only", action="append", default=[], metavar="ID", help="run this case only")
     run.add_argument("--summary", type=Path, help="write the Markdown summary here")
     run.add_argument("--results", type=Path, help="write the keys-only JSON results here")
+    run.add_argument(
+        "--context-manifest",
+        type=Path,
+        help="JSON map from case IDs to local head checkout and/or rules file paths",
+    )
     run.add_argument(
         "--bundle",
         action="store_true",
@@ -60,13 +66,14 @@ async def _run_all(runner: LiveRunner, cases: list[Case]) -> list[RunRecord]:
     return records
 
 
-def describe(settings: LLMSettings, *, bundle: bool) -> str:
+def describe(settings: LLMSettings, *, bundle: bool, context: bool = False) -> str:
     """The factors a run varies, so every summary says what it measured."""
     reflection = settings.reflection
     verifier = f"on, keep >= {reflection.keep_threshold}" if reflection.is_active else "off"
     return (
         f"prompt {settings.prompt_version}, scope {settings.review_scope}, verifier {verifier}, "
-        f"max_tokens {settings.max_tokens}, dataset {'bundle' if bundle else 'cases'}"
+        f"max_tokens {settings.max_tokens}, dataset {'bundle' if bundle else 'cases'}, "
+        f"context {'enabled' if context else 'disabled'}"
     )
 
 
@@ -75,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     cases = _load(args.dataset)
     if cases is None:
         return EXIT_BAD_INPUT
+    dataset_case_ids = {case.id for case in cases}
     if args.command == "validate":
         print(f"{len(cases)} cases valid")
         return 0
@@ -85,10 +93,24 @@ def main(argv: list[str] | None = None) -> int:
             print(f"unknown case id(s): {', '.join(unknown)}", file=sys.stderr)
             return EXIT_BAD_INPUT
         cases = [case for case in cases if case.id in args.only]
+    context_sources = None
+    if args.context_manifest:
+        try:
+            context_sources = load_context_manifest(args.context_manifest, dataset_case_ids)
+        except ContextManifestError as exc:
+            print(f"context manifest error: {exc}", file=sys.stderr)
+            return EXIT_BAD_INPUT
+        if args.bundle:
+            print("context manifest cannot be combined with --bundle", file=sys.stderr)
+            return EXIT_BAD_INPUT
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     try:
         settings = LLMSettings.from_env()
-        runner = LiveRunner(settings)
+        runner = (
+            LiveRunner(settings)
+            if context_sources is None
+            else LiveRunner(settings, context_sources=context_sources)
+        )
     except LLMConfigurationError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return EXIT_BAD_INPUT
@@ -100,7 +122,10 @@ def main(argv: list[str] | None = None) -> int:
             fixture.write_text(diff_text, encoding="utf-8")
             cases = [dataclasses.replace(bundle, fixture=fixture)]
         records = asyncio.run(_run_all(runner, cases))
-    summary = render_summary(records, config=describe(settings, bundle=args.bundle))
+    summary = render_summary(
+        records,
+        config=describe(settings, bundle=args.bundle, context=args.context_manifest is not None),
+    )
     print(summary)
     if args.summary:
         args.summary.write_text(summary, encoding="utf-8")

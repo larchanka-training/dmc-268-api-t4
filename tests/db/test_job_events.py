@@ -120,6 +120,82 @@ async def test_a_worker_without_the_lease_writes_no_steps(engine: AsyncEngine) -
     assert snapshot is not None and snapshot.steps == ()
 
 
+async def test_build_context_metrics_round_trip_through_the_step_row(
+    engine: AsyncEngine,
+) -> None:
+    store = PostgresJobStore(engine)
+    job_id = await store.enqueue(make_payload())
+    assert job_id is not None
+    claimed = await store.claim("w-1")
+    assert claimed is not None and claimed.job_id == job_id
+
+    recorder = PostgresStepRecorder(engine)
+    await recorder.start(job_id, 0, JobStep.BUILD_CONTEXT, worker_id="w-1")
+    await recorder.finish(
+        job_id,
+        0,
+        JobStep.BUILD_CONTEXT,
+        StepStatus.OK,
+        worker_id="w-1",
+        metrics={
+            "context_files": 2,
+            "context_fetches": 3,
+            "tier1_symbols": 4,
+            "tier2_symbols": 1,
+            "fallback_files": 0,
+            "parse_errors": 0,
+            "context_tokens": 812,
+            "context_cut": "none",
+        },
+    )
+
+    # Metrics live on the step row, not in the SSE stream: read the table.
+    from sqlalchemy import text as sql_text
+
+    async with engine.connect() as conn:
+        row = (
+            await conn.execute(
+                sql_text(
+                    "SELECT metrics FROM pr_review_steps"
+                    " WHERE job_id = :id AND step = 'BUILD_CONTEXT'"
+                ),
+                {"id": job_id},
+            )
+        ).first()
+    assert row is not None and row.metrics is not None
+    assert row.metrics["context_tokens"] == 812
+    assert row.metrics["context_cut"] == "none"
+
+
+def test_finish_rejects_metrics_off_the_allowlist_without_touching_the_db() -> None:
+    # Validation happens before any statement runs, so no engine is needed:
+    # an unknown key (or a bad context_cut) never reaches the table.
+    recorder = PostgresStepRecorder(engine=None)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="unknown step metric keys"):
+        asyncio.run(
+            recorder.finish(
+                "0" * 32,
+                0,
+                JobStep.BUILD_CONTEXT,
+                StepStatus.OK,
+                worker_id="w-1",
+                metrics={"context_files": 1, "rule_text": "never content"},
+            )
+        )
+    with pytest.raises(ValueError, match="context_cut"):
+        asyncio.run(
+            recorder.finish(
+                "0" * 32,
+                0,
+                JobStep.BUILD_CONTEXT,
+                StepStatus.OK,
+                worker_id="w-1",
+                metrics={"context_cut": "everything"},
+            )
+        )
+
+
 async def test_a_waiting_stream_sees_a_step_recorded_meanwhile(engine: AsyncEngine) -> None:
     store = PostgresJobStore(engine)
     job_id = await store.enqueue(make_payload())

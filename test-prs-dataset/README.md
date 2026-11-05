@@ -15,10 +15,18 @@ One directory per case, named by its id:
 test-prs-dataset/<id>/
   case.yaml     # what the case is and what the review must find
   change.diff   # unified git diff, the only input the model sees besides title/description
+  checkout/     # synthetic post-change Python sources for AST context
+.review/rules.md  # shared generic review guidance
+test-prs-dataset/eval-context.json # maps every case id to checkout and rules
 ```
 
 `sec-sql-sort-injection` points `fixture:` at `tests/fixtures/sql_injection.diff`, which the
 prompt unit tests also use.
+
+The checked-in `checkout/` trees are synthetic head-revision source for context-aware runs;
+changed lines retain their diff line numbers. Where an existing-file diff omits surrounding
+syntax needed to make a standalone source file parse, the checkout uses minimal synthetic
+scaffolding. These sources are context fixtures, not complete or executable repositories.
 
 ## `case.yaml`
 
@@ -72,7 +80,12 @@ few for a number you can trust, so treat the hold-out line as a warning light, n
 ```bash
 uv run python -m evals validate                      # no network, no keys
 uv run python -m evals run --only sec-sql-sort-injection   # live: needs the LLM_PRIMARY_* variables
+uv run --env-file .env python -m evals run --context-manifest test-prs-dataset/eval-context.json
 ```
+
+`validate` and the context-fixture tests are offline. `run` is a live LLM evaluation: it
+needs configured credentials and sends the synthetic diff, source context and generic rules
+to the configured model. The fixtures are synthetic only; they do not represent customer code.
 
 The full live run is the manual `LLM eval` workflow. It prints schema-valid rate, precision and
 recall to the job summary. Output holds counts and finding keys only, never message text.

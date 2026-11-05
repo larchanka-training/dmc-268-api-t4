@@ -17,7 +17,7 @@ from tests.conftest import (
     make_organization,
     make_user,
 )
-from tests.worker.test_process import HEAD_SHA, make_payload
+from tests.worker.test_process import BASE_SHA, make_payload
 
 ORG = make_organization("acme", "100", installation_id=42)
 REPO = "octocat/hello-world"
@@ -50,7 +50,7 @@ async def client_for(
 
 async def test_rules_have_the_agreed_shape(auth_clock: FixedClock) -> None:
     client, job_id, _ = await client_for(
-        auth_clock, files={(REPO, ".review/rules.md", HEAD_SHA): RULES_MD}
+        auth_clock, files={(REPO, ".review/rules.md", BASE_SHA): RULES_MD}
     )
 
     response = client.get(f"/jobs/{job_id}/rules")
@@ -59,17 +59,17 @@ async def test_rules_have_the_agreed_shape(auth_clock: FixedClock) -> None:
     assert response.headers["cache-control"] == "no-store"
     assert response.json() == {
         "path": ".review/rules.md",
-        "ref": HEAD_SHA,
+        "ref": BASE_SHA,
         "status": "applied",
-        "file_url": f"https://github.com/{REPO}/blob/{HEAD_SHA}/.review/rules.md",
+        "file_url": f"https://github.com/{REPO}/blob/{BASE_SHA}/.review/rules.md",
         "rules": [{"id": "R1", "section": "Security", "text": "Bind every SQL parameter."}],
         "dropped_suspicious": 1,
         "dropped_over_limit": 0,
     }
 
 
-async def test_rules_absent_link_to_the_pr_branch(auth_clock: FixedClock) -> None:
-    client, job_id, _ = await client_for(auth_clock, head_ref="feature/x")
+async def test_rules_absent_link_to_the_base_branch(auth_clock: FixedClock) -> None:
+    client, job_id, _ = await client_for(auth_clock, base_ref="feature/x")
 
     body = client.get(f"/jobs/{job_id}/rules").json()
 

@@ -184,6 +184,15 @@ class DiffFormatError(Exception):
         self.line_number = line_number
 
 
+class SymbolParseError(Exception):
+    """The syntax tree of a file could not be trusted at the changed lines.
+
+    Raised by a `SymbolIndex` implementation: the caller falls back to a plain
+    line window, never fails the review. The message carries a reason only —
+    never source content (AGENTS.md hard rule 3).
+    """
+
+
 class ContextUnavailableError(Exception):
     """The code behind a finding cannot be rebuilt from the forge: the installation or a
     reviewed commit is gone, or the finding's line is not in the diff any more.

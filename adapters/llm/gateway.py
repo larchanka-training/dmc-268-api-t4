@@ -11,6 +11,7 @@ from adapters.llm.config import (
     DEFAULT_REVIEW_SCOPE,
     ReviewScope,
 )
+from adapters.llm.context_budget import fit_context_to_prompt, split_request
 from adapters.llm.prompt import (
     ChatMessage,
     FileReview,
@@ -30,7 +31,7 @@ from adapters.llm.schema import (
     parse_review,
     parse_summary,
 )
-from domain.diff import DiffLineKind, parse_diff, split_by_file
+from domain.diff import DiffLineKind, parse_diff
 from domain.errors import (
     AllProvidersFailedError,
     DiffFormatError,
@@ -40,7 +41,7 @@ from domain.errors import (
     ProviderUnavailableError,
 )
 from domain.models import RISK_ORDER, Finding, ReviewResult, VerificationOutcome
-from domain.ports import ReviewRequest
+from domain.ports import PromptFit, ReviewRequest
 
 logger = logging.getLogger("adapters.llm")
 
@@ -195,16 +196,29 @@ class FallbackLLMGateway:
         self._prompt_version = prompt_version
         self._review_scope = review_scope
 
-    async def review(self, request: ReviewRequest) -> ReviewResult:
+    async def review(self, request: ReviewRequest, *, fit: PromptFit | None = None) -> ReviewResult:
+        """Review `request`, reusing `fit` when the caller already trimmed the context.
+
+        The worker's BUILD_CONTEXT step computes the fit once (with the rules it
+        parsed) and passes it through, so the request sent to the provider and
+        the step metrics describe the same trim. Without one the gateway fits
+        itself, as before.
+        """
         rule_set = parse_rules(request.rules_markdown)
         screen = await self._screen_rules(rule_set.rules)
         _log_rules(rule_set, screen)
         rules = screen.rules
+        if fit is None:
+            fit = fit_context_to_prompt(
+                request,
+                rules,
+                max_input_tokens=self._max_input_tokens,
+                prompt_version=self._prompt_version,
+                review_scope=self._review_scope,
+            )
+        request = fit.request
         parts = self._split(request)
-        estimated = max(
-            estimate_tokens(build_messages(part, rules, version=self._prompt_version))
-            for part in parts
-        )
+        estimated = fit.estimated_tokens
         if estimated > self._max_input_tokens:
             too_large = LLMInputTooLargeError(estimated, self._max_input_tokens)
             logger.warning(
@@ -250,12 +264,7 @@ class FallbackLLMGateway:
             return RuleScreenReport(VerificationOutcome.FAILED, unchanged)
 
     def _split(self, request: ReviewRequest) -> tuple[ReviewRequest, ...]:
-        if self._review_scope is ReviewScope.PR:
-            return (request,)
-        return tuple(
-            dataclasses.replace(request, diff_text=file_diff)
-            for file_diff in split_by_file(request.diff_text)
-        )
+        return split_request(request, self._review_scope)
 
     async def _first_pass_by_file(
         self, request: ReviewRequest, parts: Sequence[ReviewRequest], rules: Sequence[Rule]

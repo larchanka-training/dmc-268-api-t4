@@ -12,8 +12,10 @@ stream waits.
 """
 
 import asyncio
+import json
 import time
 import uuid
+from collections.abc import Mapping
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -26,6 +28,7 @@ from domain.jobs import (
     StepStatus,
     events_from_steps,
     latest_steps,
+    validate_step_metrics,
 )
 from domain.ports import ReviewJobStatus
 
@@ -73,16 +76,22 @@ class PostgresStepRecorder:
         *,
         worker_id: str,
         error_kind: str | None = None,
+        metrics: Mapping[str, int | str] | None = None,
     ) -> None:
         row_id = _as_uuid(job_id)
         if row_id is None:
             return
+        if metrics is not None:
+            # The write path enforces the same counters-only contract as
+            # `StepRecord.__post_init__` on the read path.
+            validate_step_metrics(metrics)
         async with self._engine.begin() as conn:
             await conn.execute(
                 text(
                     "UPDATE pr_review_steps s"
                     " SET status = :status, finished_at = clock_timestamp(),"
-                    " error_kind = :error_kind"
+                    " error_kind = :error_kind,"
+                    " metrics = COALESCE(CAST(:metrics AS jsonb), metrics)"
                     " FROM pr_review_jobs j"
                     " WHERE s.job_id = j.id AND j.id = :job_id"
                     " AND j.status = 'PROCESSING' AND j.locked_by = :worker"
@@ -91,6 +100,7 @@ class PostgresStepRecorder:
                 {
                     "status": str(status),
                     "error_kind": error_kind,
+                    "metrics": json.dumps(dict(metrics)) if metrics else None,
                     "job_id": row_id,
                     "worker": worker_id,
                     "attempt": attempt,
@@ -154,7 +164,7 @@ class PostgresJobEventsSource:
             rows = (
                 await conn.execute(
                     text(
-                        "SELECT step, attempt, status, started_at, finished_at, error_kind"
+                        "SELECT step, attempt, status, started_at, finished_at, error_kind, metrics"
                         " FROM pr_review_steps WHERE job_id = :id ORDER BY attempt, seq"
                     ),
                     {"id": row_id},
@@ -169,6 +179,7 @@ class PostgresJobEventsSource:
                 started_at=row.started_at,
                 finished_at=row.finished_at,
                 error_kind=row.error_kind,
+                metrics=dict(row.metrics) if row.metrics else None,
             )
             for row in rows
         ]

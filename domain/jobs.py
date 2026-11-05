@@ -12,7 +12,7 @@ docs/PIPELINE_SPEC.md §2 [D2]. The status set is `domain.ports.ReviewJobStatus`
 import base64
 import binascii
 import random
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -105,6 +105,38 @@ class StepStatus(StrEnum):
     SKIPPED = "SKIPPED"
 
 
+#: The metric keys a step row may carry (CONTEXT_AND_VERIFICATION_SPEC [C6]).
+#: Counters only, plus the single enum-like `context_cut`; the values are
+#: validated by `validate_step_metrics` before a row is built.
+STEP_METRIC_KEYS = frozenset(
+    {
+        "context_files",
+        "context_fetches",
+        "tier1_symbols",
+        "tier2_symbols",
+        "fallback_files",
+        "parse_errors",
+        "context_tokens",
+        "context_cut",
+    }
+)
+
+_CONTEXT_CUT_VALUES = ("none", "tier2", "tier1", "fallback")
+
+
+def validate_step_metrics(metrics: Mapping[str, int | str]) -> None:
+    """Allowlist and type-check step metrics, so nothing else rides along into storage."""
+    unknown = sorted(set(metrics) - STEP_METRIC_KEYS)
+    if unknown:
+        raise ValueError(f"unknown step metric keys: {unknown}")
+    for key, value in metrics.items():
+        if key == "context_cut":
+            if value not in _CONTEXT_CUT_VALUES:
+                raise ValueError(f"context_cut must be one of {_CONTEXT_CUT_VALUES}, got {value!r}")
+        elif isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"step metric {key} must be a non-negative integer, got {value!r}")
+
+
 class UiStage(StrEnum):
     """The stages of the dashboard's progress bar.
 
@@ -171,7 +203,11 @@ class JobSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class StepRecord:
-    """One row of `pr_review_steps`: a step of one attempt and how far it got."""
+    """One row of `pr_review_steps`: a step of one attempt and how far it got.
+
+    `metrics` carries counters only (see STEP_METRIC_KEYS): never rule text,
+    source or prompt content (AGENTS.md hard rule 3).
+    """
 
     step: JobStep
     attempt: int
@@ -179,6 +215,11 @@ class StepRecord:
     started_at: datetime
     finished_at: datetime | None = None
     error_kind: str | None = None
+    metrics: Mapping[str, int | str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.metrics is not None:
+            validate_step_metrics(self.metrics)
 
 
 def events_from_steps(

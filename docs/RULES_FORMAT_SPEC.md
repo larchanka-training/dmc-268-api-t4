@@ -3,8 +3,8 @@ title: Repository Rules Format Specification
 doc_type: specification
 system: pr-review-bot
 status: proposed
-version: 1.0
-updated: 2026-10-18
+version: 1.1
+updated: 2026-10-27
 owners: [dmc-268-team-4]
 
 purpose: >
@@ -38,10 +38,10 @@ sources:
 # Repository Rules Format Specification
 
 A repository can tell the reviewer what matters to it by committing `.review/rules.md`.
-The file is read from the pull request's own branch (§1), so whoever writes the branch
-writes the rules: usually the repository's maintainers, sometimes the PR author, a
-stranger in the case of a fork. It is untrusted text: never trusted enough to steer the
-reviewer. Everything below follows from that.
+The file is read from the pull request's **base** branch (§1, revised [R1] 2026-10-27), so
+the rules a pull request is reviewed by are the maintainers' rules: the PR author cannot
+change them, not even from a fork. It is untrusted text all the same: never trusted enough
+to steer the reviewer. Everything below follows from that.
 
 PR #40 shipped an interim parser (`adapters/llm/rules.py`) and the prompt isolation for
 rules. Where this document says **(PR #40)**, it confirms that behaviour as the
@@ -52,28 +52,29 @@ Decisions are marked **[R1]**–**[R12]**.
 
 ---
 
-## 1. Source: the pull request's own branch **[R1]**
+## 1. Source: the pull request's base branch **[R1, revised 2026-10-27]**
 
-The rules are read from the pull request's **head** revision, at the head SHA the review
-is computed against, which is the same revision the diff and the code context come from
-([CONTEXT_AND_VERIFICATION_SPEC.md §1.3](./CONTEXT_AND_VERIFICATION_SPEC.md#13-source-c3)):
+The rules are read from the pull request's **base** revision, at the `base_sha` recorded
+with the review job — the branch the pull request merges into, so whoever may merge into
+it (normally the repository's maintainers) writes the rules:
 
 ```
-GET /repos/{owner}/{repo}/contents/.review/rules.md?ref={head_sha}
+GET /repos/{owner}/{repo}/contents/.review/rules.md?ref={base_sha}
 Accept: application/vnd.github.raw+json
 ```
 
-A pull request's own edit to `.review/rules.md` therefore applies to that pull request
-immediately. That is the point: a team that changes its rules sees them at work on the PR
-that changes them, and a branch can carry rules that suit it.
+**Decision note.** v1.0 of this section (2026-10-18) read the file from the pull
+request's head revision, so a branch could carry rules that suit it and a team changing
+its rules saw them at work immediately. The cost was accepted then: the PR author
+controlled the rules their own PR was reviewed by. The team reversed that on 2026-10-27:
+the author of a change must not steer the review of that change. With the base source,
+an edit to `.review/rules.md` in a pull request applies only to the pull requests that
+come after it merges — including follow-up pushes of the same PR after a rebase onto
+the updated base. Level 1 of §3 stays regardless of source: security findings cannot be
+muted, and no rule can change the output or the bot's behaviour.
 
-The cost is that the PR author controls the rules their own PR is reviewed by. They can
-add `path: src/**` to `# Ignore`, or drop a rule, and pass their own review unchecked. For
-a pull request from a fork, the fork's version applies, so a stranger can do the same.
-What stays out of their reach is level 1 of §3: security findings cannot be muted, and no
-rule can change the output or the bot's behaviour. The rest is made **visible** rather than
-prevented: when the diff touches `.review/rules.md`, the Check Run says so (§7), so the
-human reviewer sees that the PR was reviewed by rules it changed itself.
+The console preview of a job's rules (`GET /jobs/{id}/rules`) reads the same `base_sha`,
+so what the console shows is what the review applied.
 
 ## 2. Syntax
 
@@ -246,8 +247,7 @@ The `BUILD_CONTEXT` step records, in `metrics`, counts and digests only
 | Key | Value |
 | :--- | :--- |
 | `rules_status` | `absent`, `applied`, `rejected:<reason>`, `ignored:forbidden` |
-| `rules_ref` | The head SHA the file was read at |
-| `rules_changed_in_pr` | `true` when the diff touches `.review/rules.md` (§1) |
+| `rules_ref` | The base SHA the file was read at (§1) |
 | `rules_digest` | sha256 of the raw file |
 | `rules_sections` | Recognised section names present, e.g. `["Security", "Ignore"]`; other sections are counted, not named |
 | `rules_kept`, `dropped_pattern`, `dropped_jev`, `dropped_over_limit` | PR #40 counters |
@@ -262,19 +262,23 @@ reading logs: **[R11]**
 ```
 Rules: .review/rules.md @ 3f2a9c1 — 6 rules, 2 ignore paths, 1 muted category; 1 rule dropped as suspicious.
 Rules: .review/rules.md @ 3f2a9c1 ignored — not valid UTF-8.
-Rules: .review/rules.md @ 3f2a9c1 — changed in this pull request; 5 rules, 3 ignore paths.
 ```
 
-When `rules_changed_in_pr` is true, the line always says "changed in this pull request",
-so the review is never read as if it ran under the rules the branch started from.
+No line when the file is absent. (v1.0 also printed a "changed in this pull request"
+variant keyed on `rules_changed_in_pr`; with the base source of §1 it has no meaning —
+a pull request's own edit to the rules file never steers its review — and v1.1 drops it.)
 
-No line when the file is absent.
+*Implementation status (2026-10-27).* The Check Run line and the `BUILD_CONTEXT` step
+metrics ship with the interim parser of PR #40: the line counts applied rules, rules
+dropped as suspicious and rules dropped over the limit, and says why a rejected file was
+ignored. The `rules_*` and `ignore_*` step-metric keys above arrive with the full parser
+of §2 (directives, recognised sections), which is still ahead.
 
 ## 8. Changes against PR #40 **[R12]**
 
 | Area | PR #40 | This specification |
 | :--- | :--- | :--- |
-| Source revision | Not fetched yet (`ReviewRequest.rules_markdown` is filled by the caller) | Head SHA, the PR's own branch (§1) |
+| Source revision | Not fetched yet (`ReviewRequest.rules_markdown` is filled by the caller) | Base SHA, the pull request's base branch (§1, revised [R1] 2026-10-27) |
 | Recognised sections | Any heading is a free section | Same, plus the meanings in §2.2 |
 | `# Ignore` | Its items would become rules | Directives, never sent to a model (§2.3) |
 | Raw size, encoding | Not checked | 64 KB, strict UTF-8 (§4) |

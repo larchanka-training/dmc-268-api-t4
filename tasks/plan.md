@@ -120,3 +120,48 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy domain adapters
 ```
+
+---
+
+# Correctness plan: Python symbol collection Point lifetime
+
+## Overview
+
+Fix the Python tree-sitter collector's use of temporary `Point` wrappers. In fresh subprocesses, reading a chained `node.end_point.row` can produce row `0` instead of `300`; using a retained `Point` local produces the correct row. On a valid function with roughly 300 assignments, Point access during traversal can also terminate the child process with `SIGSEGV`. Preserve the existing Python symbol results and traversal order without shared mutable state or changes to parser ownership.
+
+## Relevant context and constraints
+
+- `TreeSitterSymbolIndex` documents that it is safe to share across jobs (`adapters/context/tree_sitter_index.py`). Keep the fix local to the current call and do not introduce a module-level or instance-level traversal stack/cache.
+- Python symbol collection is depth-first and source ordered: append a definition before visiting its named children; a decorated definition visits its final named child with the decorator row as the span start; function descendants retain the current `in_class`; class descendants use `in_class=True`.
+- Existing behavioral coverage is in `tests/adapters/test_context_tree_sitter.py` (decorators, class/method kind, nested spans, docstrings, and parse-error behavior). Keep TypeScript/JavaScript and Go collectors out of scope.
+- Because the failure may terminate the interpreter rather than raise a Python exception, the large-input regression must run parsing in a child process. The pytest runner itself must survive a reproduced crash.
+
+## Architecture decision
+
+Keep the existing recursive depth-first traversal. Retain each relevant tree-sitter `Point` in a local before reading `.row`, and keep the definition/decorator points alive while traversing that node's children. Avoid point reads on generic syntax nodes. Apply the same retained-local pattern in `_header_end`, `_python_docstring_end`, and parse-error/call-line checks where point rows are read before further node traversal. This preserves source order and avoids adding traversal state.
+
+## Test-first implementation order
+
+1. Add a subprocess-isolated regression for a valid function containing approximately 300 assignment statements. It should invoke the public `TreeSitterSymbolIndex` API, assert a successful child exit and expected end row, and use a finite timeout. Confirm the test fails on the current implementation without allowing a child crash to kill pytest.
+2. Retain Point wrappers in the Python collector/helpers and avoid unnecessary Point reads on generic nodes. Re-run the subprocess regression and existing Python context tests; confirm symbol results remain unchanged.
+3. Run the parser adapter tests and requested static checks; inspect the final diff for narrow scope and worker-safety regressions.
+
+## Acceptance criteria
+
+- The subprocess regression passes reliably for a valid ~300-assignment function; a child crash or nonzero exit is reported as a normal pytest failure.
+- Symbol names, kinds, spans, decorator handling, docstring signature ends, and ordering remain unchanged for existing Python fixtures and representative nested definitions.
+- Python traversal remains recursive with Point wrappers held through the relevant child traversal; unrelated language collectors and worker/parser lifecycle do not change.
+- The subprocess regression, parser adapter tests, `uv run ruff check .`, `uv run ruff format --check .`, and `uv run mypy domain adapters` pass. Run the full pytest suite if requested/needed for the repository gate.
+
+## Risks and mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Point wrappers are released before child traversal | Incorrect rows or process-level crash | Keep relevant wrappers in locals for the duration of recursive descent and cover with the subprocess regression |
+| Broader behavior changes while fixing Python | Other language collectors or index sharing can regress | Keep the patch in the Python Point-read paths and run adapter tests |
+| Regression still crashes pytest | Test process is lost and failure diagnosis is poor | Run the reproducer through `subprocess.run` with captured output and timeout |
+| Fix introduces shared state or synchronization changes | Concurrent worker calls could interfere or serialize | Keep the fix local; do not change parser ownership/lifecycle |
+
+## Open questions
+
+- None for the narrow fix; use the existing public index behavior as the compatibility contract.
