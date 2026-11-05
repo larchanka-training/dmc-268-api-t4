@@ -233,4 +233,97 @@ def test_unsupported_extension_is_not_supported(index: TreeSitterSymbolIndex) ->
     assert index.supports("app/x.rb") is False
     assert index.supports("app/x.py") is True
     assert index.supports("app/x.tsx") is True
+    assert index.supports("app/x.java") is True
+    assert index.supports("app/x.rs") is True
     assert index.supports("README") is False
+
+
+# --- Java --------------------------------------------------------------------------
+
+
+JAVA_SOURCE = "\n".join(
+    [
+        "/** Handles things. */",  # 1  <- javadoc extends the span upward
+        '@SuppressWarnings("x")',  # 2
+        "public final class Handler {",  # 3
+        "",  # 4
+        "    /** Runs it. */",  # 5
+        "    public int run(int value) {",  # 6
+        "        return helper(value);",  # 7
+        "    }",  # 8
+        "",  # 9
+        "    Handler(int value) {",  # 10
+        "        this.value = value;",  # 11
+        "    }",  # 12
+        "",  # 13
+        "    int helper(int x) {",  # 14
+        "        return x + 1;",  # 15
+        "    }",  # 16
+        "}",  # 17
+    ]
+)
+
+
+def test_java_method_and_javadoc_span(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("Handler.java", JAVA_SOURCE, [7])
+    assert (span.name, span.kind) == ("run", "method")
+    assert span.start_line == 5  # the javadoc, not the annotation-free line
+    assert span.end_line == 8
+    assert span.signature_end_line == 6
+
+
+def test_java_constructor_is_a_method_and_calls_resolve(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("Handler.java", JAVA_SOURCE, [11])
+    assert (span.name, span.kind) == ("Handler", "method")
+    (called,) = index.called_from("Handler.java", JAVA_SOURCE, [7])
+    assert (called.name, called.kind) == ("helper", "method")
+
+
+# --- Rust --------------------------------------------------------------------------
+
+
+RUST_SOURCE = "\n".join(
+    [
+        "/// Adds one.",  # 1  <- doc comment
+        "#[inline]",  # 2  <- attribute
+        "pub fn add(a: u32) -> u32 {",  # 3
+        "    a + 1",  # 4
+        "}",  # 5
+        "",  # 6
+        "pub struct Calc {",  # 7
+        "    pub n: u32,",  # 8
+        "}",  # 9
+        "",  # 10
+        "impl Calc {",  # 11
+        "    /// Doubles.",  # 12
+        "    fn double(&self) -> u32 {",  # 13
+        "        helper(self.n)",  # 14
+        "    }",  # 15
+        "}",  # 16
+        "",  # 17
+        "fn helper(x: u32) -> u32 {",  # 18
+        "    x * 2",  # 19
+        "}",  # 20
+    ]
+)
+
+
+def test_rust_struct_counts_as_class(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("calc.rs", RUST_SOURCE, [8])
+    assert (span.name, span.kind) == ("Calc", "class")
+    assert (span.start_line, span.end_line) == (7, 9)
+
+
+def test_rust_function_span_starts_at_doc_and_attribute(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("calc.rs", RUST_SOURCE, [4])
+    assert (span.name, span.kind) == ("add", "function")
+    assert span.start_line == 1  # the /// doc, above the #[inline] attribute
+    assert span.end_line == 5
+    assert span.signature_end_line == 3
+
+
+def test_rust_method_inside_impl_and_same_file_call(index: TreeSitterSymbolIndex) -> None:
+    (span,) = index.enclosing("calc.rs", RUST_SOURCE, [14])
+    assert (span.name, span.kind) == ("double", "method")
+    (called,) = index.called_from("calc.rs", RUST_SOURCE, [14])
+    assert (called.name, called.kind) == ("helper", "function")

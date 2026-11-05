@@ -53,6 +53,13 @@ class CachedRepositoryContents:
         *,
         max_bytes: int,
     ) -> bytes | None:
+        # Sweep expired entries first: otherwise an entry nobody asks about
+        # again survives until the max-entries eviction. Bounded — at most
+        # max_entries (256) keys, no lock needed (single event loop, no await
+        # inside the sweep) — so this stays cheap on every read.
+        now = self._clock.now()
+        for key in [k for k, (_, expires_at) in self._entries.items() if now >= expires_at]:
+            del self._entries[key]
         key = (installation_id, repo_full_name, ref, path, max_bytes)
         entry = self._entries.get(key)
         if entry is not None:

@@ -7,13 +7,18 @@ from adapters.llm.config import CONTEXT_TOKEN_BUDGET_FRACTION, ReviewScope
 from adapters.llm.prompt import PROMPT_VERSION, build_messages, estimate_tokens
 from adapters.llm.rules import Rule
 from domain.context import ContextCut
-from domain.diff import split_by_file
-from domain.ports import ContextBlockKind, FileContext, ReviewRequest
+from domain.diff import parse_diff, split_by_file
+from domain.errors import DiffFormatError
+from domain.ports import ContextBlockKind, FileContext, PromptFit, ReviewRequest
 
 
 @dataclass(frozen=True, slots=True)
-class ContextBudgetFit:
-    """The request after optional context was cut to fit the rendered prompt."""
+class ContextBudgetFit(PromptFit):
+    """The request after optional context was cut to fit the rendered prompt.
+
+    A `domain.ports.PromptFit`: the worker computes it once and passes it to the
+    gateway, which reuses it instead of trimming again.
+    """
 
     request: ReviewRequest
     estimated_tokens: int
@@ -46,8 +51,8 @@ def fit_context_to_prompt(
     ) -> tuple[tuple[int, ...], tuple[int, ...]]:
         full_request = replace(request, context=candidate)
         base_request = replace(full_request, context=())
-        full_parts = _split(full_request, review_scope)
-        base_parts = _split(base_request, review_scope)
+        full_parts = split_request(full_request, review_scope)
+        base_parts = split_request(base_request, review_scope)
         full = tuple(
             estimate_tokens(build_messages(part, rules, version=prompt_version))
             for part in full_parts
@@ -132,13 +137,35 @@ def _result(
     )
 
 
-def _split(request: ReviewRequest, scope: ReviewScope) -> tuple[ReviewRequest, ...]:
+def split_request(request: ReviewRequest, scope: ReviewScope) -> tuple[ReviewRequest, ...]:
+    """Split a request into first-pass parts: one per file in FILE scope.
+
+    [C4]'s cap is per request, so a per-file part carries only its own file's
+    context blocks — the full `request.context` on every part would spend
+    n_files × context. A part whose path cannot be parsed keeps no context:
+    its hunks, already in its diff, are its context. The summary call and PR
+    scope keep the whole request, context included, exactly once.
+    """
     if scope is ReviewScope.PR:
         return (request,)
     parts = tuple(
-        replace(request, diff_text=file_diff) for file_diff in split_by_file(request.diff_text)
+        replace(request, diff_text=file_diff, context=_own_context(file_diff, request.context))
+        for file_diff in split_by_file(request.diff_text)
     )
     return parts or (request,)
+
+
+def _own_context(file_diff: str, contexts: Sequence[FileContext]) -> tuple[FileContext, ...]:
+    """The context blocks of the one file `file_diff` describes."""
+    try:
+        paths = {
+            path
+            for diff in parse_diff(file_diff)
+            if (path := diff.new_path or diff.old_path) is not None
+        }
+    except DiffFormatError:
+        return ()
+    return tuple(context for context in contexts if context.path in paths)
 
 
 def _without_kind(

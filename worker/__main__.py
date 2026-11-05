@@ -111,12 +111,12 @@ def main() -> None:
     vcs = build_vcs_from_env()
     review = build_review_from_env()
     context_stage = build_context_stage_from_env()
-    asyncio.run(_run_until_signalled(settings, vcs, review, context_stage))
     # Prometheus on the internal :9101, for Alloy (docs/observability.md § Metrics). The
-    # server thread is a daemon: it ends with the process, after the drain.
+    # server thread is a daemon: it ends with the process, after the drain. It must be
+    # up before the run loop starts, or the endpoint never serves while jobs run.
     metrics.init_worker_metrics(ERROR_KINDS)
     metrics.serve(metrics.WORKER_REGISTRY, metrics.WORKER_PORT)
-    asyncio.run(_run_until_signalled(settings, vcs, review))
+    asyncio.run(_run_until_signalled(settings, vcs, review, context_stage))
 
 
 if __name__ == "__main__":

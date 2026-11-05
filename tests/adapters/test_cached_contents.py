@@ -99,3 +99,19 @@ async def test_different_key_dimensions_do_not_collide(clock: FakeClock) -> None
     await cache.read_file(1, "o/r", ".review/rules.md", SHA, max_bytes=1000)
 
     assert len(inner.calls) == 4
+
+
+async def test_expired_entries_are_swept_on_any_read(clock: FakeClock) -> None:
+    # An entry nobody asks about again must not squat in the cache until the
+    # max-entries eviction: every read sweeps what the TTL has expired.
+    inner = CountingContents({(SHA, ".review/rules.md"): RULES, (SHA, "src/x.py"): b"x = 1\n"})
+    cache = make_cache(inner, clock)
+
+    await cache.read_file(1, "o/r", ".review/rules.md", SHA, max_bytes=65_537)
+    await cache.read_file(1, "o/r", "src/x.py", SHA, max_bytes=65_537)
+    assert len(cache) == 2
+    clock.advance(601)
+    await cache.read_file(1, "o/r", ".review/rules.md", SHA, max_bytes=65_537)
+
+    assert len(cache) == 1  # src/x.py was swept, the freshly fetched one stays
+    assert len(inner.calls) == 3  # only rules.md was fetched again

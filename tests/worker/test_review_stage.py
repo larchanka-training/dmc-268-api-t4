@@ -27,6 +27,7 @@ from domain.models import (
 )
 from domain.ports import (
     ExistingCheckRun,
+    PromptFit,
     PublishedComment,
     PublishOutcome,
     PullRequestTarget,
@@ -65,9 +66,11 @@ class FakeGateway:
         self.findings = findings
         self.error = error
         self.requests: list[ReviewRequest] = []
+        self.fits: list[PromptFit | None] = []
 
-    async def review(self, request: ReviewRequest) -> ReviewResult:
+    async def review(self, request: ReviewRequest, *, fit: PromptFit | None = None) -> ReviewResult:
         self.requests.append(request)
+        self.fits.append(fit)
         if self.error is not None:
             raise self.error
         return ReviewResult(summary="One issue.", findings=self.findings, provider="p", model="m")

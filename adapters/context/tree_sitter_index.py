@@ -14,8 +14,10 @@ from dataclasses import dataclass
 from os.path import splitext
 
 import tree_sitter_go
+import tree_sitter_java
 import tree_sitter_javascript
 import tree_sitter_python
+import tree_sitter_rust
 import tree_sitter_typescript
 from tree_sitter import Language, Node, Parser, Tree
 
@@ -24,7 +26,8 @@ from domain.ports import SymbolSpan
 
 
 def default_languages() -> dict[str, Language]:
-    """The first-tier languages of [C2]: Python, TypeScript/JavaScript, Go."""
+    """The first-tier languages of [C2]: Python, TypeScript/JavaScript, Go,
+    Java, Rust."""
     return {
         ".py": Language(tree_sitter_python.language()),
         ".go": Language(tree_sitter_go.language()),
@@ -34,6 +37,8 @@ def default_languages() -> dict[str, Language]:
         ".cjs": Language(tree_sitter_javascript.language()),
         ".ts": Language(tree_sitter_typescript.language_typescript()),
         ".tsx": Language(tree_sitter_typescript.language_tsx()),
+        ".java": Language(tree_sitter_java.language()),
+        ".rs": Language(tree_sitter_rust.language()),
     }
 
 
@@ -143,7 +148,7 @@ class TreeSitterSymbolIndex:
         stack: list[Node] = [tree.root_node]
         while stack:
             node = stack.pop()
-            if node.type in ("call", "call_expression"):
+            if node.type in ("call", "call_expression", "method_invocation"):
                 start_point = node.start_point
                 if start_point.row in rows:
                     name = _callee_name(node)
@@ -171,6 +176,10 @@ class TreeSitterSymbolIndex:
             _collect_ts(tree.root_node, source_lines, out=out)
         elif family == ".go":
             _collect_go(tree.root_node, source_lines, out=out)
+        elif family == ".java":
+            _collect_java(tree.root_node, source_lines, out=out)
+        elif family == ".rs":
+            _collect_rust(tree.root_node, source_lines, in_impl=False, out=out)
         return tuple(out)
 
 
@@ -208,7 +217,9 @@ def _callee_name(call_node: Node) -> str | None:
             attribute = function.child_by_field_name("attribute")
             return _text(attribute)
         return None
-    function = call_node.child_by_field_name("function")  # TypeScript/JavaScript, Go
+    if call_node.type == "method_invocation":  # Java: obj.go(...)
+        return _text(call_node.child_by_field_name("name"))
+    function = call_node.child_by_field_name("function")  # TypeScript/JavaScript, Go, Rust
     if function is None:
         return None
     if function.type == "identifier":
@@ -420,3 +431,97 @@ def _collect_go(node: Node, source_lines: Sequence[str], out: list[_RawSymbol]) 
         return
     for child in node.named_children:
         _collect_go(child, source_lines, out)
+
+
+# --- Java ------------------------------------------------------------------------
+
+
+def _collect_java(node: Node, source_lines: Sequence[str], out: list[_RawSymbol]) -> None:
+    """[C2]: methods and constructors are `method`; class, interface, enum and
+    record are `class`. The span starts at a Javadoc comment directly above —
+    annotations are part of the declaration node already."""
+    if node.type in (
+        "class_declaration",
+        "interface_declaration",
+        "enum_declaration",
+        "record_declaration",
+    ):
+        name = _text(node.child_by_field_name("name"))
+        if name is not None:
+            start = _extend_over_jsdoc(source_lines, node.start_point.row)
+            out.append(_RawSymbol(name, "class", start, node.end_point.row, node.end_point.row))
+        for child in node.named_children:
+            _collect_java(child, source_lines, out)
+        return
+    if node.type in ("method_declaration", "constructor_declaration"):
+        name = _text(node.child_by_field_name("name"))
+        body = node.child_by_field_name("body")
+        if name is not None:
+            start = _extend_over_jsdoc(source_lines, node.start_point.row)
+            out.append(
+                _RawSymbol(
+                    name,
+                    "method",
+                    start,
+                    node.end_point.row,
+                    _header_end(body, node.start_point.row, node.end_point.row),
+                )
+            )
+        return
+    for child in node.named_children:
+        _collect_java(child, source_lines, out)
+
+
+# --- Rust ------------------------------------------------------------------------
+
+
+def _extend_over_rust_attrs_and_docs(source_lines: Sequence[str], start_row: int) -> int:
+    """[C2]: `///` doc comments and `#[...]` attributes sit above the item, as
+    its siblings; walk the lines up while they belong to either."""
+    row = start_row - 1
+    while row >= 0:
+        stripped = source_lines[row].lstrip()
+        if stripped.startswith("//") or stripped.startswith("#["):
+            row -= 1
+            continue
+        break
+    return row + 1
+
+
+def _collect_rust(
+    node: Node, source_lines: Sequence[str], *, in_impl: bool, out: list[_RawSymbol]
+) -> None:
+    """[C2]: a `fn` is a `function`, or a `method` inside an `impl` or `trait`;
+    `struct`, `enum`, `trait` and `impl` blocks count as `class`."""
+    if node.type == "function_item":
+        name = _text(node.child_by_field_name("name"))
+        body = node.child_by_field_name("body")
+        if name is not None:
+            start = _extend_over_rust_attrs_and_docs(source_lines, node.start_point.row)
+            out.append(
+                _RawSymbol(
+                    name,
+                    "method" if in_impl else "function",
+                    start,
+                    node.end_point.row,
+                    _header_end(body, node.start_point.row, node.end_point.row),
+                )
+            )
+        return
+    if node.type == "function_signature_item":
+        name = _text(node.child_by_field_name("name"))
+        if name is not None:
+            start = _extend_over_rust_attrs_and_docs(source_lines, node.start_point.row)
+            out.append(_RawSymbol(name, "method", start, node.end_point.row, node.end_point.row))
+        return
+    if node.type in ("struct_item", "enum_item", "trait_item", "impl_item"):
+        name = _text(node.child_by_field_name("name"))
+        if name is not None:
+            start = _extend_over_rust_attrs_and_docs(source_lines, node.start_point.row)
+            out.append(_RawSymbol(name, "class", start, node.end_point.row, node.end_point.row))
+        if node.type in ("trait_item", "impl_item"):
+            for child in node.named_children:
+                _collect_rust(child, source_lines, in_impl=True, out=out)
+        return
+    for child in node.named_children:
+        _collect_rust(child, source_lines, in_impl=in_impl, out=out)

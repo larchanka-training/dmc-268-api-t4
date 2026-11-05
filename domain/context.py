@@ -35,6 +35,24 @@ class ContextCut(StrEnum):
     TIER1 = "tier1"
     FALLBACK = "fallback"
 
+    @property
+    def rank(self) -> int:
+        """Severity, ascending: the declaration order is the cut order (§1.4 [C4]).
+
+        The single place the ordering lives; `more_severe` and every caller
+        compare through it instead of a local priority table.
+        """
+        return _CUT_RANK[self]
+
+    @classmethod
+    def more_severe(cls, first: "ContextCut", second: "ContextCut") -> "ContextCut":
+        """The deeper of two cuts, e.g. of the budget pass and the prompt fit."""
+        return max(first, second, key=lambda cut: cut.rank)
+
+
+#: Built after the class: rank lookup by member, in declaration order.
+_CUT_RANK = {cut: rank for rank, cut in enumerate(ContextCut)}
+
 
 @dataclass(frozen=True, slots=True)
 class ContextMetrics:
@@ -51,6 +69,47 @@ class ContextMetrics:
     parse_errors: int = 0
     context_tokens: int = 0
     context_cut: ContextCut = ContextCut.NONE
+
+    @classmethod
+    def from_contexts(
+        cls,
+        contexts: Sequence["FileContext"],
+        *,
+        parse_errors: int = 0,
+        context_tokens: int = 0,
+        context_cut: ContextCut = ContextCut.NONE,
+    ) -> "ContextMetrics":
+        """Count the surviving blocks of `contexts` — the single tier/fallback
+        tally, shared by `build_context` and the worker's prompt-fit recount.
+
+        `context_tokens` and `context_cut` are passed in: the worker measures
+        tokens on the serialized prompt (a different estimator) and merges the
+        fit's cut with the budget's.
+        """
+        return cls(
+            context_files=len(contexts),
+            tier1_symbols=sum(
+                1
+                for context in contexts
+                for block in context.blocks
+                if block.kind is ContextBlockKind.ENCLOSING
+            ),
+            tier2_symbols=sum(
+                1
+                for context in contexts
+                for block in context.blocks
+                if block.kind is ContextBlockKind.CALLED
+            ),
+            fallback_files=sum(
+                1
+                for context in contexts
+                if context.blocks
+                and all(block.kind is ContextBlockKind.WINDOW for block in context.blocks)
+            ),
+            parse_errors=parse_errors,
+            context_tokens=context_tokens,
+            context_cut=context_cut,
+        )
 
 
 def select_context_files(
@@ -277,28 +336,8 @@ def build_context(
         for b in surviving
         if b.tier1 or b.tier2 or b.fallback
     )
-    tier1_symbols = sum(
-        1
-        for context in contexts
-        for block in context.blocks
-        if block.kind is ContextBlockKind.ENCLOSING
-    )
-    tier2_symbols = sum(
-        1
-        for context in contexts
-        for block in context.blocks
-        if block.kind is ContextBlockKind.CALLED
-    )
-    kept_fallback_files = sum(
-        1
-        for context in contexts
-        if context.blocks and all(block.kind is ContextBlockKind.WINDOW for block in context.blocks)
-    )
-    metrics = ContextMetrics(
-        context_files=len(contexts),
-        tier1_symbols=tier1_symbols,
-        tier2_symbols=tier2_symbols,
-        fallback_files=kept_fallback_files,
+    metrics = ContextMetrics.from_contexts(
+        contexts,
         parse_errors=parse_errors,
         context_tokens=sum(
             estimate(block.text) for context in contexts for block in context.blocks

@@ -28,6 +28,7 @@ from domain.jobs import (
     StepStatus,
     events_from_steps,
     latest_steps,
+    validate_step_metrics,
 )
 from domain.ports import ReviewJobStatus
 
@@ -80,6 +81,10 @@ class PostgresStepRecorder:
         row_id = _as_uuid(job_id)
         if row_id is None:
             return
+        if metrics is not None:
+            # The write path enforces the same counters-only contract as
+            # `StepRecord.__post_init__` on the read path.
+            validate_step_metrics(metrics)
         async with self._engine.begin() as conn:
             await conn.execute(
                 text(

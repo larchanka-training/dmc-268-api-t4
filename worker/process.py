@@ -32,7 +32,7 @@ from adapters.llm.config import (
     DEFAULT_REVIEW_SCOPE,
     ReviewScope,
 )
-from adapters.llm.context_budget import fit_context_to_prompt
+from adapters.llm.context_budget import ContextBudgetFit, fit_context_to_prompt
 from adapters.llm.prompt import estimate_text_tokens
 from adapters.llm.rules import Rule, parse_rules
 from adapters.observability import metrics
@@ -41,6 +41,7 @@ from adapters.observability.logging import bind_context
 from domain.context import (
     MAX_SOURCE_BYTES,
     ContextCut,
+    ContextMetrics,
     build_context,
     select_context_files,
 )
@@ -61,7 +62,6 @@ from domain.findings import NewPublishedFinding, published_findings
 from domain.jobs import JobStep, StepStatus
 from domain.ports import (
     ClaimedJob,
-    ContextBlockKind,
     FileContext,
     GitProvider,
     JobRepository,
@@ -365,9 +365,8 @@ async def _process(
             # BUILD_CONTEXT does forge round-trips of its own (rules at the base
             # SHA, up to 30 source files at the head SHA): renew the lease before
             # them, as before the LLM stage that follows.
-            rules_markdown: str | None = None
-            contexts: tuple[FileContext, ...] = ()
             rules_audit: RulesAudit | None = None
+            loaded: LoadedContext | None = None
             if context_stage is not None:
                 if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                     return False
@@ -378,10 +377,13 @@ async def _process(
                     pr_description=context.description,
                 )
                 loaded = await _build_context(
-                    payload, filtered.kept, context_stage, base_request=base_request
+                    payload,
+                    filtered.kept,
+                    context_stage,
+                    base_request=base_request,
+                    job_id=job_id,
+                    log=log,
                 )
-                rules_markdown = loaded.rules_markdown
-                contexts = loaded.contexts
                 rules_audit = loaded.rules_audit
                 context_metrics = loaded.metrics
                 await progress.end(StepStatus.OK, metrics=context_metrics)
@@ -391,7 +393,7 @@ async def _process(
                         "job_id": job_id,
                         "repo": payload.repo_full_name,
                         "pr_number": payload.pr_number,
-                        "rules_loaded": rules_markdown is not None,
+                        "rules_loaded": loaded.rules_markdown is not None,
                         "context_files": context_metrics["context_files"],
                         "context_fetches": context_metrics["context_fetches"],
                         "tier1_symbols": context_metrics["tier1_symbols"],
@@ -409,15 +411,18 @@ async def _process(
             await progress.begin(JobStep.LLM_CALL)
             target = _pull_request_target(claimed, context.head_sha)
             try:
-                result = await review.gateway.review(
-                    ReviewRequest(
-                        diff_text=context.diff_text,
-                        pr_title=context.title,
-                        pr_description=context.description,
-                        rules_markdown=rules_markdown,
-                        context=contexts,
+                # With a context stage, the gateway gets the request exactly as
+                # the worker fitted it, fit included — one trim, not two.
+                if loaded is not None and loaded.fit is not None:
+                    result = await review.gateway.review(loaded.fit.request, fit=loaded.fit)
+                else:
+                    result = await review.gateway.review(
+                        ReviewRequest(
+                            diff_text=context.diff_text,
+                            pr_title=context.title,
+                            pr_description=context.description,
+                        )
                     )
-                )
             except LLMInputTooLargeError as too_large:
                 # The job still fails as skip_diff_too_large below; the check run only
                 # tells the author why nothing else appears.
@@ -550,6 +555,9 @@ class LoadedContext:
     contexts: tuple[FileContext, ...]
     metrics: dict[str, int | str]
     rules_audit: RulesAudit | None
+    #: The prompt fit the gateway must reuse, so the request sent and the
+    #: metrics logged describe the same trim (no second fit in the gateway).
+    fit: ContextBudgetFit | None = None
 
 
 async def _build_context(
@@ -558,14 +566,17 @@ async def _build_context(
     stage: ContextStage,
     *,
     base_request: ReviewRequest,
+    job_id: str,
+    log: logging.Logger,
 ) -> LoadedContext:
     """The enriched context of one review (review-context spec).
 
     Rules come from the pull request's base SHA — the maintainers' revision, not
     the PR author's — and source files from the head SHA. Every rejection of the
     rules file means "review without rules", never a failure; a permission
-    refusal on contents clears the source fetches the same way. Transient forge
-    errors propagate to the job's retry path.
+    refusal on one source file skips only that file — the files already fetched
+    keep their context. Transient forge errors propagate to the job's retry
+    path.
 
     Counters only in the metrics and the audit — never rule text or source
     (AGENTS.md hard rule 3).
@@ -607,8 +618,9 @@ async def _build_context(
     selected = select_context_files(kept)
     sources: dict[str, str] = {}
     fetches = 0
-    try:
-        for diff in selected:
+    refused = 0
+    for diff in selected:
+        try:
             raw = await stage.contents.read_file(
                 payload.installation_id,
                 payload.repo_full_name,
@@ -616,15 +628,23 @@ async def _build_context(
                 payload.head_sha,
                 max_bytes=MAX_SOURCE_BYTES,
             )
-            fetches += 1
-            if raw is None or len(raw) > MAX_SOURCE_BYTES:
-                continue
-            try:
-                sources[diff.new_path] = raw.decode("utf-8", errors="strict")
-            except UnicodeDecodeError:
-                continue
-    except ForgePermissionError:
-        sources = {}
+        except ForgePermissionError:
+            # A refusal on a late file must not discard what earlier files
+            # already paid for: skip this one, keep the rest.
+            refused += 1
+            continue
+        fetches += 1
+        if raw is None or len(raw) > MAX_SOURCE_BYTES:
+            continue
+        try:
+            sources[diff.new_path] = raw.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            continue
+    if refused:
+        log.warning(
+            "job.context.sources_skipped",
+            extra={"job_id": job_id, "skipped_sources": refused},
+        )
 
     contexts, metrics = build_context(
         selected,
@@ -640,45 +660,32 @@ async def _build_context(
         prompt_version=stage.prompt_version,
         review_scope=stage.review_scope,
     )
-    contexts = context_fit.request.context
+    # Recount the blocks that survived the trim through the same tally
+    # `build_context` used; only the fetch counter and the fit's serialized
+    # token count and cut are the worker's own numbers.
+    trimmed = ContextMetrics.from_contexts(
+        context_fit.request.context,
+        parse_errors=metrics.parse_errors,
+        context_tokens=context_fit.context_tokens,
+        context_cut=ContextCut.more_severe(metrics.context_cut, context_fit.context_cut),
+    )
     step_metrics: dict[str, int | str] = {
-        "context_files": len(contexts),
+        "context_files": trimmed.context_files,
         "context_fetches": fetches,
-        "tier1_symbols": sum(
-            block.kind is ContextBlockKind.ENCLOSING
-            for context in contexts
-            for block in context.blocks
-        ),
-        "tier2_symbols": sum(
-            block.kind is ContextBlockKind.CALLED
-            for context in contexts
-            for block in context.blocks
-        ),
-        "fallback_files": sum(
-            bool(context.blocks)
-            and all(block.kind is ContextBlockKind.WINDOW for block in context.blocks)
-            for context in contexts
-        ),
-        "parse_errors": metrics.parse_errors,
-        "context_tokens": context_fit.context_tokens,
-        "context_cut": _more_severe_context_cut(metrics.context_cut, context_fit.context_cut).value,
+        "tier1_symbols": trimmed.tier1_symbols,
+        "tier2_symbols": trimmed.tier2_symbols,
+        "fallback_files": trimmed.fallback_files,
+        "parse_errors": trimmed.parse_errors,
+        "context_tokens": trimmed.context_tokens,
+        "context_cut": trimmed.context_cut.value,
     }
     return LoadedContext(
         rules_markdown=rules_markdown,
-        contexts=contexts,
+        contexts=context_fit.request.context,
         metrics=step_metrics,
         rules_audit=rules_audit,
+        fit=context_fit,
     )
-
-
-def _more_severe_context_cut(first: ContextCut, second: ContextCut) -> ContextCut:
-    priority = {
-        ContextCut.NONE: 0,
-        ContextCut.TIER2: 1,
-        ContextCut.TIER1: 2,
-        ContextCut.FALLBACK: 3,
-    }
-    return max((first, second), key=priority.__getitem__)
 
 
 async def _publish_skipped(

@@ -106,6 +106,7 @@ async def run_job(
     budget: int = 10_000,
     max_input_tokens: int = 32_000,
     steps: InMemoryStepRecorder | None = None,
+    diff: str = GOOD_DIFF,
 ):
     store = MemoryJobStore(clock=clock)
     job_id = await store.enqueue(make_payload())
@@ -114,7 +115,7 @@ async def run_job(
     publisher = FakePublisher()
     completed = await process_claimed_job(
         claimed,
-        FakeGitProvider(GOOD_DIFF),
+        FakeGitProvider(diff),
         store,
         review=ReviewStage(gateway=gateway, publisher=publisher),
         context_stage=stage_for(contents, budget, max_input_tokens),
@@ -160,6 +161,13 @@ async def test_rules_and_ast_context_reach_the_gateway(auth_clock: FixedClock) -
     assert metrics["context_fetches"] == 1
     assert metrics["tier1_symbols"] >= 1
     assert metrics["context_cut"] == "none"
+    # The gateway reused the worker's fit: the step metrics describe exactly
+    # the request the provider saw (one trim, not two).
+    fit = gateway.fits[0]
+    assert fit is not None
+    assert fit.request is request
+    assert metrics["context_tokens"] == fit.context_tokens
+    assert metrics["context_tokens"] > 0
 
 
 async def test_build_context_metrics_include_prompt_budget_trimming(
@@ -229,6 +237,69 @@ async def test_a_permission_refusal_means_no_context_not_a_failure(auth_clock: F
     (request,) = gateway.requests
     assert request.rules_markdown is None
     assert request.context == ()
+
+
+class RefusingContents(FakeRepositoryContents):
+    """Serves every scripted file but refuses one path at the head SHA —
+    what a forge 403 on a late source file looks like."""
+
+    def __init__(self, files, refuse_path: str):
+        super().__init__(files)
+        self._refuse_path = refuse_path
+
+    async def read_file(self, installation_id, repo_full_name, path, ref, *, max_bytes):
+        from domain.errors import ForgePermissionError as _Forbidden
+
+        if path == self._refuse_path and ref == HEAD_SHA:
+            raise _Forbidden("github", "HTTP 403")
+        return await super().read_file(
+            installation_id, repo_full_name, path, ref, max_bytes=max_bytes
+        )
+
+
+TWO_FILE_DIFF = GOOD_DIFF + (
+    "diff --git a/app/y.py b/app/y.py\n"
+    "index 3333333..4444444 100644\n"
+    "--- a/app/y.py\n"
+    "+++ b/app/y.py\n"
+    "@@ -5,2 +5,3 @@ def other(a):\n"
+    "     return helper(a)\n"
+    "+    return helper(a + 1)\n"
+    " \n"
+)
+
+
+async def test_a_permission_refusal_mid_loop_keeps_the_files_already_fetched(
+    auth_clock: FixedClock, caplog
+) -> None:
+    contents = RefusingContents(
+        {
+            (REPO, RULES_PATH, BASE_SHA): RULES_MD,
+            (REPO, "app/x.py", HEAD_SHA): PY_SOURCE.encode(),
+        },
+        refuse_path="app/y.py",
+    )
+    steps = InMemoryStepRecorder()
+
+    completed, job, gateway, _publisher = await run_job(
+        auth_clock, contents, diff=TWO_FILE_DIFF, steps=steps
+    )
+
+    assert completed is True
+    (request,) = gateway.requests
+    # x.py was fetched before the refusal on y.py: its context survives.
+    assert [context.path for context in request.context] == ["app/x.py"]
+    [record] = [
+        record for record in steps.records(job.job_id) if record["step"] is JobStep.BUILD_CONTEXT
+    ]
+    metrics = record["metrics"]
+    assert metrics is not None
+    assert metrics["context_files"] == 1
+    assert metrics["context_fetches"] == 1  # y.py was refused, not fetched
+    assert any(
+        rec.msg == "job.context.sources_skipped" and rec.skipped_sources == 1
+        for rec in caplog.records
+    )
 
 
 async def test_a_transient_forge_error_sends_the_job_to_retrying(auth_clock: FixedClock) -> None:

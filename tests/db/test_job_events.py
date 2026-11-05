@@ -167,6 +167,35 @@ async def test_build_context_metrics_round_trip_through_the_step_row(
     assert row.metrics["context_cut"] == "none"
 
 
+def test_finish_rejects_metrics_off_the_allowlist_without_touching_the_db() -> None:
+    # Validation happens before any statement runs, so no engine is needed:
+    # an unknown key (or a bad context_cut) never reaches the table.
+    recorder = PostgresStepRecorder(engine=None)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="unknown step metric keys"):
+        asyncio.run(
+            recorder.finish(
+                "0" * 32,
+                0,
+                JobStep.BUILD_CONTEXT,
+                StepStatus.OK,
+                worker_id="w-1",
+                metrics={"context_files": 1, "rule_text": "never content"},
+            )
+        )
+    with pytest.raises(ValueError, match="context_cut"):
+        asyncio.run(
+            recorder.finish(
+                "0" * 32,
+                0,
+                JobStep.BUILD_CONTEXT,
+                StepStatus.OK,
+                worker_id="w-1",
+                metrics={"context_cut": "everything"},
+            )
+        )
+
+
 async def test_a_waiting_stream_sees_a_step_recorded_meanwhile(engine: AsyncEngine) -> None:
     store = PostgresJobStore(engine)
     job_id = await store.enqueue(make_payload())

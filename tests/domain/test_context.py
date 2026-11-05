@@ -9,6 +9,7 @@ import pytest
 from domain.context import (
     MAX_CONTEXT_FILES,
     ContextCut,
+    ContextMetrics,
     build_context,
     select_context_files,
 )
@@ -263,3 +264,40 @@ def test_huge_budget_keeps_everything() -> None:
     )
     assert metrics.context_cut is ContextCut.NONE
     assert len(contexts[0].blocks) == 2
+
+
+def test_cut_rank_orders_severity_and_more_severe_picks_the_deeper_cut() -> None:
+    order = [ContextCut.NONE, ContextCut.TIER2, ContextCut.TIER1, ContextCut.FALLBACK]
+    assert [cut.rank for cut in order] == sorted(cut.rank for cut in order)
+    assert ContextCut.more_severe(ContextCut.NONE, ContextCut.TIER1) is ContextCut.TIER1
+    assert ContextCut.more_severe(ContextCut.FALLBACK, ContextCut.TIER2) is ContextCut.FALLBACK
+    assert ContextCut.more_severe(ContextCut.NONE, ContextCut.NONE) is ContextCut.NONE
+
+
+def test_metrics_from_contexts_counts_the_surviving_blocks() -> None:
+    contexts = (
+        FileContext(
+            path="a.py",
+            blocks=(
+                ContextBlock(ContextBlockKind.ENCLOSING, "run", 1, 3, "x=1"),
+                ContextBlock(ContextBlockKind.CALLED, "helper", 5, 6, "y=2"),
+            ),
+        ),
+        FileContext(
+            path="b.txt",
+            blocks=(ContextBlock(ContextBlockKind.WINDOW, "", 1, 4, "w"),),
+        ),
+        FileContext(path="empty.py", blocks=()),
+    )
+
+    metrics = ContextMetrics.from_contexts(
+        contexts, parse_errors=2, context_tokens=99, context_cut=ContextCut.TIER2
+    )
+
+    assert metrics.context_files == 3  # every context passed, empty or not
+    assert metrics.tier1_symbols == 1
+    assert metrics.tier2_symbols == 1
+    assert metrics.fallback_files == 1
+    assert metrics.parse_errors == 2
+    assert metrics.context_tokens == 99
+    assert metrics.context_cut is ContextCut.TIER2

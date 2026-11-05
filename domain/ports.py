@@ -130,8 +130,27 @@ class ReviewRequest:
     context: tuple[FileContext, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class PromptFit:
+    """A request after its optional context was trimmed to fit the prompt budget.
+
+    The caller that trimmed the context (the worker's BUILD_CONTEXT step) passes
+    the fit on to the gateway, so the request sent to the provider and the
+    metrics logged for the step describe the same trim — one fit, not two.
+    `context_cut` is a `domain.context.ContextCut` value, kept as `str` here so
+    the port does not import the context module.
+    """
+
+    request: ReviewRequest
+    estimated_tokens: int
+    context_tokens: int
+    context_cut: str
+
+
 class LLMGateway(Protocol):
-    async def review(self, request: ReviewRequest) -> ReviewResult: ...
+    async def review(
+        self, request: ReviewRequest, *, fit: PromptFit | None = None
+    ) -> ReviewResult: ...
 
 
 @dataclass(frozen=True, slots=True)
