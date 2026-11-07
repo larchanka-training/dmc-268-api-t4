@@ -53,6 +53,7 @@ def build_review_from_env() -> ReviewStage:
     app_settings = GitHubAppSettings.from_env()
     return ReviewStage(
         gateway=build_gateway(LLMSettings.from_env(), resilient=True),
+        console_url=os.environ.get("APP_ORIGIN", "").strip() or None,
         publisher=GitHubReviewPublisher(
             app_settings,
             GitHubAppAuth(app_settings, SystemClock()),

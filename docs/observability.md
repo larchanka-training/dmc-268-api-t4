@@ -188,6 +188,8 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `job.retrying` | info | A retryable failure; the job waits for its next attempt | `job_id`, `provider`, `repo`, `pr_number`, `error_kind`, `attempt`, `next_attempt_at`, `duration_ms` |
 | `job.store.failed` | error | A store call failed while recording the outcome | `job_id`, `provider`, `repo`, `pr_number`, `stage` (`complete`, `fail`, `get`), `error_kind`, `error_type`, `duration_ms` |
 | `job.skipped_check_run` | info when published; warning when posting failed | The PR is over the input budget: the "skipped" check run says why no review appears | `job_id`, `provider`, `repo`, `pr_number`, `input_tokens` (the estimate), `max_input_tokens`, `outcome` (`published`, `failed`); `error_type` when failed |
+| `job.check_run.start_failed` | warning | The "in progress" check run could not be shown; the review goes on | `job_id`, `provider`, `repo`, `pr_number`, `error_type` |
+| `job.check_run.close_failed` | warning | The job failed for good and its in-progress check run could not be closed | `job_id`, `provider`, `repo`, `pr_number`, `error_type` |
 | `job.step_record.failed` | error | Writing a `pr_review_steps` row failed; the job goes on | `job_id`, `step`, `error_type` |
 | `job.findings.not_kept` | error | Findings were posted but not stored | `job_id`, `provider`, `repo`, `pr_number`, `findings`, `error_type` |
 | `github.token.minted` | info | An installation token was minted | `provider`, `installation_id` |

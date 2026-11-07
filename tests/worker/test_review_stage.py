@@ -73,7 +73,35 @@ class FakeGateway:
         return ReviewResult(summary="One issue.", findings=self.findings, provider="p", model="m")
 
 
-class FakePublisher:
+class CheckStubs:
+    """start_check / fail_check / find_check_run for publishers that ignore check runs."""
+
+    failed_checks: list[str]
+
+    async def find_check_run(self, target: PullRequestTarget) -> ExistingCheckRun | None:
+        return None
+
+    async def start_check(
+        self,
+        target: PullRequestTarget,
+        existing: ExistingCheckRun | None = None,
+        details_url: str | None = None,
+    ) -> ExistingCheckRun:
+        return ExistingCheckRun(id=1, head_sha=target.head_sha)
+
+    async def fail_check(
+        self,
+        target: PullRequestTarget,
+        existing: ExistingCheckRun,
+        summary: str,
+        details_url: str | None = None,
+    ) -> None:
+        if not hasattr(self, "failed_checks"):
+            self.failed_checks = []
+        self.failed_checks.append(summary)
+
+
+class FakePublisher(CheckStubs):
     def __init__(self) -> None:
         self.calls: list[tuple[PullRequestTarget, PublishPlan]] = []
 
@@ -82,6 +110,7 @@ class FakePublisher:
         target: PullRequestTarget,
         plan: PublishPlan,
         existing_check: ExistingCheckRun | None = None,
+        details_url: str | None = None,
     ) -> PublishOutcome:
         self.calls.append((target, plan))
         return PublishOutcome(
@@ -255,7 +284,7 @@ async def test_a_failed_step_write_logs_the_step_and_the_error_class_only(
 # --- published findings -----------------------------------------------------
 
 
-class ReportingPublisher:
+class ReportingPublisher(CheckStubs):
     """Reports every planned comment back as posted, like a forge that took them all."""
 
     def __init__(self) -> None:
@@ -266,6 +295,7 @@ class ReportingPublisher:
         target: PullRequestTarget,
         plan: PublishPlan,
         existing_check: ExistingCheckRun | None = None,
+        details_url: str | None = None,
     ) -> PublishOutcome:
         self.plans.append(plan)
         return PublishOutcome(
@@ -387,6 +417,28 @@ class CheckRunForge:
         self.calls: list[tuple[PullRequestTarget, PublishPlan, ExistingCheckRun | None]] = []
         self.check_runs: dict[str, int] = {}
         self.updates = 0
+        self.started: list[str | None] = []
+        self.failed: list[str] = []
+        self.details: list[str | None] = []
+
+    async def start_check(
+        self,
+        target: PullRequestTarget,
+        existing: ExistingCheckRun | None = None,
+        details_url: str | None = None,
+    ) -> ExistingCheckRun:
+        self.started.append(details_url)
+        check_id = self.check_runs.setdefault(target.head_sha, 100 + len(self.check_runs))
+        return ExistingCheckRun(check_id, target.head_sha)
+
+    async def fail_check(
+        self,
+        target: PullRequestTarget,
+        existing: ExistingCheckRun,
+        summary: str,
+        details_url: str | None = None,
+    ) -> None:
+        self.failed.append(summary)
 
     async def find_check_run(self, target: PullRequestTarget) -> ExistingCheckRun | None:
         check_id = self.check_runs.get(target.head_sha)
@@ -397,8 +449,10 @@ class CheckRunForge:
         target: PullRequestTarget,
         plan: PublishPlan,
         existing_check: ExistingCheckRun | None = None,
+        details_url: str | None = None,
     ) -> PublishOutcome:
         self.calls.append((target, plan, existing_check))
+        self.details.append(details_url)
         if self.error is not None:
             raise self.error
         if existing_check is not None and existing_check.head_sha == target.head_sha:
@@ -444,7 +498,8 @@ async def test_a_pull_request_over_the_budget_gets_a_skipped_check_run() -> None
     assert len(gateway.requests) == 1
     [(target, plan, existing)] = publisher.calls
     assert target.head_sha == HEAD_SHA
-    assert existing is None
+    # The check shown as in progress is the one the skipped plan completes.
+    assert existing == ExistingCheckRun(id=publisher.check_runs[HEAD_SHA], head_sha=HEAD_SHA)
     assert plan.conclusion is CheckConclusion.SKIPPED
     assert plan.comments == ()
     assert plan.needs_review is False
@@ -461,10 +516,9 @@ async def test_a_second_run_on_the_same_head_updates_the_skipped_check_run() -> 
     await run_too_large(publisher, delivery_id="d-2")
 
     assert len(publisher.check_runs) == 1
-    assert publisher.updates == 1
+    assert publisher.updates == 2
     (_, _, first), (_, _, second) = publisher.calls
-    assert first is None
-    assert second == ExistingCheckRun(id=publisher.check_runs[HEAD_SHA], head_sha=HEAD_SHA)
+    assert first == second == ExistingCheckRun(id=publisher.check_runs[HEAD_SHA], head_sha=HEAD_SHA)
 
 
 async def test_a_failed_skipped_check_run_still_records_the_job(
@@ -526,3 +580,58 @@ async def test_the_skipped_check_run_carries_no_diff_or_pull_request_text() -> N
     [(_, plan, _)] = publisher.calls
     for sentinel in (DIFF_SENTINEL, TITLE_SENTINEL, DESCRIPTION_SENTINEL, "app/users.py"):
         assert sentinel not in plan.summary
+
+
+# --- the in-progress check run ----------------------------------------------
+
+
+async def run_review(
+    publisher: CheckRunForge, gateway: FakeGateway, console_url: str | None = None
+) -> tuple[str, bool]:
+    store = MemoryJobStore()
+    job_id = await enqueue(store, make_payload())
+    claimed = await claim(store)
+    done = await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(gateway=gateway, publisher=publisher, console_url=console_url),
+    )
+    return job_id, done
+
+
+async def test_the_check_run_is_in_progress_before_the_review_and_completed_in_place() -> None:
+    publisher = CheckRunForge()
+
+    job_id, done = await run_review(publisher, FakeGateway(()), "https://console.test/")
+
+    assert done
+    link = f"https://console.test/runs/{job_id}"
+    assert publisher.started == [link]
+    assert publisher.details == [link]
+    (call,) = publisher.calls
+    assert call[2] is not None  # the in-progress check is the one that is completed
+    assert publisher.updates == 1
+    assert publisher.failed == []
+
+
+async def test_a_job_that_fails_for_good_closes_the_in_progress_check() -> None:
+    publisher = CheckRunForge()
+
+    _, done = await run_review(publisher, FakeGateway(error=LLMOutputError("p", "bad")))
+
+    assert not done
+    assert len(publisher.failed) == 1
+    assert publisher.calls == []
+
+
+async def test_a_retryable_failure_leaves_the_check_for_the_retry() -> None:
+    publisher = CheckRunForge()
+
+    _, done = await run_review(
+        publisher,
+        FakeGateway(error=AllProvidersFailedError([ProviderUnavailableError("p", "HTTP 503")])),
+    )
+
+    assert not done
+    assert publisher.failed == []

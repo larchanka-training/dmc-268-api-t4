@@ -45,6 +45,7 @@ from domain.findings import NewPublishedFinding, published_findings
 from domain.jobs import JobStep, StepStatus
 from domain.ports import (
     ClaimedJob,
+    ExistingCheckRun,
     GitProvider,
     JobRepository,
     JobStats,
@@ -78,6 +79,9 @@ class ReviewStage:
     # Where published findings are kept, and what tells a re-review which ones the
     # pull request already has. Without it every review posts every finding again.
     comments: ReviewCommentStore | None = None
+    # The console's origin: the check run links to `<origin>/runs/<job id>` for the full
+    # report. Without it the check run has no details link.
+    console_url: str | None = None
 
 
 #: Dev-only escape hatch: when "1", the fetched diff text is logged verbatim
@@ -256,6 +260,9 @@ async def _process(
     job_id = claimed.job_id
     payload = claimed.payload
     progress = _Steps(steps, claimed, log)
+    check: ExistingCheckRun | None = None
+    target: PullRequestTarget | None = None
+    details_url = _details_url(review.console_url if review else None, job_id)
 
     try:
         await progress.begin(JobStep.CLAIMED)
@@ -306,6 +313,7 @@ async def _process(
                 return False
             await progress.begin(JobStep.LLM_CALL)
             target = _pull_request_target(claimed, context.head_sha)
+            check = await _start_check(review.publisher, target, details_url, claimed, log)
             try:
                 result = await review.gateway.review(
                     ReviewRequest(
@@ -318,8 +326,16 @@ async def _process(
                 # The job still fails as skip_diff_too_large below; the check run only
                 # tells the author why nothing else appears.
                 await _publish_skipped(
-                    review.publisher, target, too_large, len(filtered.kept), claimed, log
+                    review.publisher,
+                    target,
+                    too_large,
+                    len(filtered.kept),
+                    claimed,
+                    log,
+                    check=check,
+                    details_url=details_url,
                 )
+                check = None
                 raise
             await progress.begin(JobStep.POSTPROCESS)
             posted = (
@@ -345,7 +361,8 @@ async def _process(
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                 return False
             await progress.begin(JobStep.POST_FEEDBACK)
-            outcome = await review.publisher.publish(target, plan)
+            outcome = await review.publisher.publish(target, plan, check, details_url)
+            check = None
             stats = replace(stats, findings_published=len(outcome.comments))
             summary = plan.plain_summary
             if review.comments is not None:
@@ -356,6 +373,8 @@ async def _process(
     except Exception as err:
         error_kind, retryable = _classify(err)
         await progress.end(StepStatus.FAILED, error_kind)
+        if check is not None and target is not None and review is not None and not retryable:
+            await _fail_check(review.publisher, target, check, details_url, claimed, log)
         return await _record_failure(
             jobs,
             claimed,
@@ -435,6 +454,53 @@ def _pull_request_target(claimed: ClaimedJob, head_sha: str) -> PullRequestTarge
     )
 
 
+def _details_url(console_url: str | None, job_id: str) -> str | None:
+    return None if console_url is None else f"{console_url.rstrip('/')}/runs/{job_id}"
+
+
+async def _start_check(
+    publisher: ReviewPublisher,
+    target: PullRequestTarget,
+    details_url: str | None,
+    claimed: ClaimedJob,
+    log: logging.Logger,
+) -> ExistingCheckRun | None:
+    """Show the check as in progress. Best effort: a review without the early status is
+    still a review, so a failure is logged (class only) and the job goes on."""
+    try:
+        existing = await publisher.find_check_run(target)
+        return await publisher.start_check(target, existing, details_url)
+    except Exception as err:
+        log.warning(
+            "job.check_run.start_failed",
+            extra={**_job_fields(claimed), "error_type": type(err).__name__},
+        )
+        return None
+
+
+async def _fail_check(
+    publisher: ReviewPublisher,
+    target: PullRequestTarget,
+    check: ExistingCheckRun,
+    details_url: str | None,
+    claimed: ClaimedJob,
+    log: logging.Logger,
+) -> None:
+    """The job failed for good: do not leave the check "in progress" on the pull request."""
+    try:
+        await publisher.fail_check(
+            target,
+            check,
+            "The review could not be completed. See the run for details.",
+            details_url,
+        )
+    except Exception as err:
+        log.warning(
+            "job.check_run.close_failed",
+            extra={**_job_fields(claimed), "error_type": type(err).__name__},
+        )
+
+
 async def _publish_skipped(
     publisher: ReviewPublisher,
     target: PullRequestTarget,
@@ -442,6 +508,9 @@ async def _publish_skipped(
     reviewable_files: int,
     claimed: ClaimedJob,
     log: logging.Logger,
+    *,
+    check: ExistingCheckRun | None = None,
+    details_url: str | None = None,
 ) -> None:
     """Post the "skipped" check run, updating the one an earlier run left on this SHA.
 
@@ -459,8 +528,8 @@ async def _publish_skipped(
         "max_input_tokens": too_large.limit,
     }
     try:
-        existing = await publisher.find_check_run(target)
-        await publisher.publish(target, plan, existing)
+        existing = check if check is not None else await publisher.find_check_run(target)
+        await publisher.publish(target, plan, existing, details_url)
     except Exception as err:
         log.warning(
             "job.skipped_check_run",
