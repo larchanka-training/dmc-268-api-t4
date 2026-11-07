@@ -25,11 +25,15 @@ def parse_retry_after(value: str | None) -> float:
         return DEFAULT_COOLDOWN_SECONDS
 
 
-_TRANSIENT_REASONS = ("timeout", "connection error", "HTTP 5")
+_TRANSIENT_REASONS = ("connection error", "HTTP 5")
 
 
 def _is_transient(error: Exception) -> bool:
-    """A timeout, a dropped connection or a 5xx: worth repeating after a short wait."""
+    """A dropped connection or a 5xx: fails fast, so worth repeating after a short wait.
+
+    Not a timeout: each costs LLM_TIMEOUT_SECONDS, and repeating it would push one call past
+    the job lease (LEASE_SECONDS); the gateway falls back to the next provider instead.
+    """
     return isinstance(error, ProviderUnavailableError) and error.reason.startswith(
         _TRANSIENT_REASONS
     )
