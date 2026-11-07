@@ -41,7 +41,7 @@ class RetryPolicy:
         if attempt + 1 >= self.max_attempts:
             return None
         base = min(self.base_seconds * 2**attempt, self.cap_seconds)
-        delay = base * (1.0 + rng.uniform(-self.jitter_fraction, self.jitter_fraction))
+        delay: float = base * (1.0 + rng.uniform(-self.jitter_fraction, self.jitter_fraction))
         if retry_after is not None:
             if retry_after > self.cap_seconds:
                 return None
