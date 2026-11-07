@@ -326,7 +326,10 @@ class GitHubReviewPublisher:
             is_failure=is_forge_failure,
             # A POST that timed out may have landed: repeating it could post a second
             # review. Only a throttle (the request was refused) is safe to repeat.
-            can_retry=lambda error: method != "POST" or isinstance(error, ForgeRateLimitedError),
+            can_retry=lambda error: (
+                isinstance(error, ForgeUnavailableError)
+                and (method != "POST" or isinstance(error, ForgeRateLimitedError))
+            ),
             retry_after=forge_retry_after,
             open_error=forge_open_error,
         )

@@ -97,6 +97,10 @@ class CircuitBreaker:
             return True
         return False
 
+    def release_probe(self) -> None:
+        """Give the probe slot back when a probe ended without a verdict (cancelled)."""
+        self._probing = False
+
     def record_success(self) -> None:
         self._failures = 0
         self._opened_at = None

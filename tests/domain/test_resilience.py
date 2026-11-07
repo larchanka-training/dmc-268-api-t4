@@ -81,3 +81,13 @@ def test_success_resets_the_failure_count() -> None:
     breaker.record_success()
     breaker.record_failure()
     assert breaker.state == "closed"
+
+
+def test_releasing_the_probe_lets_the_next_call_probe() -> None:
+    clock = _Clock()
+    breaker = CircuitBreaker(failure_threshold=1, reset_seconds=5, clock=clock)
+    breaker.record_failure()
+    clock.now = 5
+    assert breaker.allow()
+    breaker.release_probe()
+    assert breaker.allow()

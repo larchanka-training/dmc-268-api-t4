@@ -54,8 +54,9 @@ class Resilience:
 
         ``is_failure``: the service is unhealthy (feeds the breaker); any other
         exception means it answered, so the breaker counts a success.
-        ``can_retry``: safe and useful to repeat. ``open_error``: what to raise
-        while the breaker is open, given the seconds until the next probe.
+        ``can_retry``: safe and useful to repeat, whether or not it feeds the
+        breaker. ``open_error``: what to raise while the breaker is open, given the seconds
+        until the next probe.
         """
         attempt = 0
         while True:
@@ -65,10 +66,10 @@ class Resilience:
             try:
                 result = await operation()
             except Exception as error:
-                if not is_failure(error):
+                if is_failure(error):
+                    self._breaker.record_failure()
+                else:
                     self._breaker.record_success()
-                    raise
-                self._breaker.record_failure()
                 delay = (
                     self._policy.delay(attempt, self._rng, retry_after(error))
                     if can_retry(error)
@@ -82,6 +83,11 @@ class Resilience:
                 )
                 await self._sleep(delay)
                 attempt += 1
+            except BaseException:
+                # Cancelled mid-call: no verdict, so free the probe slot instead of
+                # keeping the breaker shut.
+                self._breaker.release_probe()
+                raise
             else:
                 self._breaker.record_success()
                 return result

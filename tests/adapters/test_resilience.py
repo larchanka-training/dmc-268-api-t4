@@ -1,4 +1,6 @@
+import asyncio
 import random
+from typing import Any
 
 import httpx
 import pytest
@@ -7,7 +9,12 @@ from adapters.github.client import GitHubVCSClient
 from adapters.github.publisher import GitHubReviewPublisher
 from adapters.llm.openai_compat import OpenAICompatibleProvider
 from adapters.resilience import Resilience
-from domain.errors import ForgeUnavailableError, PrNotFoundError, ProviderUnavailableError
+from domain.errors import (
+    ForgeRateLimitedError,
+    ForgeUnavailableError,
+    PrNotFoundError,
+    ProviderUnavailableError,
+)
 from domain.resilience import CircuitBreaker, RetryPolicy
 
 
@@ -172,3 +179,61 @@ async def test_publisher_does_not_repeat_a_post_that_failed_with_5xx() -> None:
         with pytest.raises(ForgeUnavailableError):
             await publisher._send(http, "GET", "/x")
         assert calls == ["GET"] * 3
+
+
+async def test_a_cancelled_probe_does_not_keep_the_breaker_shut() -> None:
+    clock = [0.0]
+    resilience = Resilience(
+        "test",
+        RetryPolicy(max_attempts=1),
+        CircuitBreaker(failure_threshold=1, reset_seconds=5, clock=lambda: clock[0]),
+        sleep=_Sleeper(),
+    )
+
+    async def fail() -> None:
+        raise ForgeUnavailableError("github", "down")
+
+    async def cancelled() -> None:
+        raise asyncio.CancelledError
+
+    def kwargs() -> dict[str, Any]:
+        return {
+            "is_failure": lambda _: True,
+            "can_retry": lambda _: False,
+            "open_error": lambda _: ForgeUnavailableError("github", "circuit open"),
+        }
+
+    with pytest.raises(ForgeUnavailableError):
+        await resilience.call(fail, **kwargs())
+    clock[0] = 5
+    with pytest.raises(asyncio.CancelledError):
+        await resilience.call(cancelled, **kwargs())
+
+    assert resilience.breaker.allow()
+
+
+async def test_throttles_are_retried_but_do_not_open_the_github_breaker() -> None:
+    client = _github(
+        httpx.MockTransport(lambda _: httpx.Response(429, headers={"Retry-After": "1"})),
+        _resilience(_Sleeper(), threshold=1),
+    )
+    async with httpx.AsyncClient(transport=client._transport) as http:
+        for _ in range(2):
+            with pytest.raises(ForgeRateLimitedError):
+                await client._get(http, "http://gh.test/x", {}, "step", 1)
+
+
+async def test_llm_timeouts_are_not_repeated_in_call() -> None:
+    calls: list[int] = []
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        raise httpx.ReadTimeout("slow")
+
+    sleeper = _Sleeper()
+    provider = _llm(httpx.MockTransport(handler), _resilience(sleeper))
+
+    with pytest.raises(ProviderUnavailableError, match="timeout"):
+        await provider.complete([])
+    assert len(calls) == 1
+    assert sleeper.delays == []

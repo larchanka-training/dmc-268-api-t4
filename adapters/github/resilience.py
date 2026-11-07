@@ -7,8 +7,12 @@ from domain.errors import ForgeRateLimitedError, ForgeUnavailableError
 
 
 def is_forge_failure(error: Exception) -> bool:
-    """GitHub is unhealthy or throttling. A 404, 403 or 422 means it answered."""
-    return isinstance(error, ForgeUnavailableError)
+    """GitHub is unhealthy (5xx, timeout, network). A 404, 403 or 422 means it answered.
+
+    A throttle (429) is not an outage: it is per installation, and one busy tenant must
+    not open the breaker shared by every other one. It is still retried after its wait.
+    """
+    return isinstance(error, ForgeUnavailableError) and not isinstance(error, ForgeRateLimitedError)
 
 
 def forge_retry_after(error: Exception) -> float | None:

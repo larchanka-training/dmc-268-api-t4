@@ -158,7 +158,7 @@ class GitHubVCSClient:
         return await self._resilience.call(
             operation,
             is_failure=is_forge_failure,
-            can_retry=lambda _: True,
+            can_retry=lambda error: isinstance(error, ForgeUnavailableError),
             retry_after=forge_retry_after,
             open_error=forge_open_error,
         )
