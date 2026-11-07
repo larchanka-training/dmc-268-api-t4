@@ -635,3 +635,33 @@ async def test_a_retryable_failure_leaves_the_check_for_the_retry() -> None:
 
     assert not done
     assert publisher.failed == []
+
+
+class _ExhaustedStore(MemoryJobStore):
+    """A store whose retries are used up: a retryable error now ends the job."""
+
+    async def fail(self, job_id, error_kind, *, retryable, worker_id):  # type: ignore[no-untyped-def]
+        return await super().fail(job_id, error_kind, retryable=False, worker_id=worker_id)
+
+
+async def test_a_retryable_error_on_the_last_attempt_closes_the_in_progress_check() -> None:
+    publisher = CheckRunForge()
+    store = _ExhaustedStore()
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
+    gateway = FakeGateway(
+        error=AllProvidersFailedError([ProviderUnavailableError("p", "HTTP 503")])
+    )
+
+    done = await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(gateway=gateway, publisher=publisher),
+    )
+
+    assert not done
+    stored = await store.get(claimed.job_id)
+    assert stored is not None
+    assert stored.status is ReviewJobStatus.FAILED
+    assert len(publisher.failed) == 1

@@ -307,8 +307,9 @@ async def _process(
         )
         summary: str | None = None
         if review is not None:
-            # LLM_CALL can take minutes (two 300 s attempts plus a fallback): renew the
-            # lease before it and again before posting, and stop if it was lost.
+            # LLM_CALL can take minutes (one attempt per provider, each bounded by
+            # LLM_TIMEOUT_SECONDS): renew the lease before it and again before posting,
+            # and stop if it was lost.
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
                 return False
             await progress.begin(JobStep.LLM_CALL)
@@ -373,9 +374,7 @@ async def _process(
     except Exception as err:
         error_kind, retryable = _classify(err)
         await progress.end(StepStatus.FAILED, error_kind)
-        if check is not None and target is not None and review is not None and not retryable:
-            await _fail_check(review.publisher, target, check, details_url, claimed, log)
-        return await _record_failure(
+        status = await _record_failure(
             jobs,
             claimed,
             log,
@@ -384,6 +383,16 @@ async def _process(
             retryable=retryable,
             error=err,
         )
+        # Decided on the status the store returned, not on the error kind: a retryable
+        # error on the last attempt still ends the job, and nothing would close the check.
+        if (
+            status is ReviewJobStatus.FAILED
+            and check is not None
+            and target is not None
+            and review is not None
+        ):
+            await _fail_check(review.publisher, target, check, details_url, claimed, log)
+        return False
 
     try:
         completed = await jobs.complete(job_id, stats, worker_id=claimed.worker_id, summary=summary)
@@ -570,8 +579,9 @@ async def _record_failure(
     error_kind: str,
     retryable: bool,
     error: Exception,
-) -> bool:
+) -> ReviewJobStatus | None:
     """Record RETRYING or FAILED with the store, then log which one it was.
+    Returns the status the store set, or None when the store raised or the lease was lost.
 
     FAILED is logged at error with the exception: one Sentry event per failed
     job, its message replaced by the error_kind in production
@@ -599,11 +609,11 @@ async def _record_failure(
                 "duration_ms": _elapsed_ms(started),
             },
         )
-        return False
+        return None
     if status is ReviewJobStatus.RETRYING:
         metrics.record_job(status, error_kind, review_seconds=None)
         await _log_retrying(jobs, claimed, log, started, error_kind=error_kind)
-        return False
+        return status
     if status is ReviewJobStatus.FAILED:
         metrics.record_job(status, error_kind, review_seconds=_review_seconds(claimed, started))
         log.error(
@@ -617,7 +627,7 @@ async def _record_failure(
                 "duration_ms": _elapsed_ms(started),
             },
         )
-    return False
+    return status
 
 
 async def _log_retrying(
