@@ -82,6 +82,8 @@ ALLOWED_FIELDS = frozenset(
         # job and worker
         "stage", "files", "reviewable", "hunks", "chunks", "reviewable_paths",
         "skipped_paths", "next_attempt_at", "channel", "reaped",
+        # in-call retries and the circuit breaker
+        "delay_seconds",
         # logging and metrics themselves
         "log_dir", "port",
         # the alert relay: ids and Sentry's fixed vocabulary, never the issue title

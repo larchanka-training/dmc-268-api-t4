@@ -222,6 +222,8 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `llm.summary.finished` | info | Per-file review: the summary agent answered | `provider`, `model`, `duration_ms`, `files`, `risk`, `checklist`, `risk_invalid`, `checklist_invalid`, `checklist_trimmed` |
 | `llm.provider.fallback` | warning | A provider failed; the next one is tried | `provider`, `next_provider`, `reason` |
 | `llm.call.failed` | warning | Every provider failed (`AllProvidersFailedError`); the job is retried | `reason`: each provider and its reason, never a response body |
+| `resilience.retrying` | warning | An external call failed and is repeated after a backoff (GitHub, LLM) | `provider`, `attempt`, `delay_seconds` |
+| `resilience.circuit_open` | warning | The circuit breaker is open: the call was not sent | `provider` |
 | `llm.key.rate_limited` | warning | A key got 429 and cools down | `provider`, `key_masked`, `cooldown_seconds` |
 | `llm.key.rejected` | warning | A key got 401 or 403 and is disabled until restart | `provider`, `key_masked`, `http.status` |
 | `llm.verifier.skipped` | warning | The verifier input is over budget; the first pass is kept | `input_tokens`, `max_input_tokens` |
