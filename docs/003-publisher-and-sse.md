@@ -220,4 +220,7 @@ summary и напечатает ссылки. Полный путь провер
   open it for 30 s, then one probe call is let through. While it is open the call fails at once
   with the usual retryable error, so the job-level backoff (docs/PIPELINE_SPEC.md §4.3) takes over
   and the LLM gateway moves to the fallback provider. A GitHub `POST` is repeated only after a
-  throttle, never after a timeout, so a review is not posted twice.
+  throttle, never after a timeout, so a review is not posted twice. A GitHub 429 is retried but does
+  not count towards the breaker (it is per installation). LLM timeouts are not repeated in-call: each
+  costs `LLM_TIMEOUT_SECONDS`, and repeating them could outlast the job lease; only 5xx and dropped
+  connections are.
