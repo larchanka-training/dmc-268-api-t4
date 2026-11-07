@@ -759,3 +759,41 @@ async def test_a_final_failure_before_the_llm_closes_the_earlier_attempts_check(
     assert stored is not None
     assert stored.status is ReviewJobStatus.FAILED
     assert publisher.status[check_id] == "neutral"
+
+
+class _RerunDuringReview(FakeGateway):
+    """A re-run on the same SHA is enqueued and finishes while the old job's LLM call runs."""
+
+    def __init__(self, store: MemoryJobStore, publisher: CheckRunForge) -> None:
+        super().__init__(())
+        self.store = store
+        self.publisher = publisher
+
+    async def review(self, request: ReviewRequest) -> ReviewResult:
+        await enqueue(self.store, make_payload(delivery_id="d-2"))
+        newer = await claim(self.store, worker_id="w-2")
+        assert await process_claimed_job(
+            newer,
+            FakeGitProvider(make_context(GOOD_DIFF)),
+            self.store,
+            review=ReviewStage(gateway=FakeGateway(()), publisher=self.publisher),
+        )
+        return await super().review(request)
+
+
+async def test_a_superseded_job_keeps_the_result_a_same_sha_rerun_published() -> None:
+    publisher = CheckRunForge()
+    store = MemoryJobStore()
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
+
+    done = await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(gateway=_RerunDuringReview(store, publisher), publisher=publisher),
+    )
+
+    assert not done
+    assert publisher.closed == []
+    assert publisher.status[publisher.check_runs[HEAD_SHA]] == "completed"

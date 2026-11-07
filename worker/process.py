@@ -532,14 +532,21 @@ async def _close_if_superseded(
     """The lease was lost. Close this attempt's check as cancelled only when a newer
     delivery superseded the job; a reaped job is retried and reuses the check.
 
-    A newer job on the same head SHA reuses the same check run: if it reopened it before
-    this close lands, the check reads "cancelled" until that job completes it.
+    A newer job on the same head SHA reuses the same check run. A run it already
+    completed is left alone (re-read just before closing; this narrows the race, it does
+    not remove it). If it reopened the run before this close lands, the run reads
+    "cancelled" until that job completes it.
     """
     if check is None:
         return
     try:
         job = await jobs.get(claimed.job_id)
         if job is None or job.status is not ReviewJobStatus.SUPERSEDED:
+            return
+        # A newer job on the same SHA reuses this run; if it already completed it, the
+        # run is no longer in progress and its result must stay.
+        current = await publisher.find_check_run(target, in_progress_only=True)
+        if current is None or current.id != check.id:
             return
         await publisher.fail_check(
             target,
