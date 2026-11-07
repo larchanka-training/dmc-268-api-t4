@@ -476,7 +476,27 @@ class ReviewPublisher(Protocol):
         target: PullRequestTarget,
         plan: PublishPlan,
         existing_check: ExistingCheckRun | None = None,
+        details_url: str | None = None,
     ) -> PublishOutcome: ...
+
+    async def start_check(
+        self,
+        target: PullRequestTarget,
+        existing: ExistingCheckRun | None = None,
+        details_url: str | None = None,
+    ) -> ExistingCheckRun:
+        """Show the check as in progress before the review runs; `publish` completes it."""
+        ...
+
+    async def fail_check(
+        self,
+        target: PullRequestTarget,
+        existing: ExistingCheckRun,
+        summary: str,
+        details_url: str | None = None,
+    ) -> None:
+        """Close an in-progress check (neutral) when the review could not finish."""
+        ...
 
     async def find_check_run(self, target: PullRequestTarget) -> ExistingCheckRun | None:
         """The bot's check run on the target's head SHA, when an earlier job left one."""

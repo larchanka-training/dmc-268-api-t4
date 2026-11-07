@@ -84,32 +84,24 @@ class GitHubReviewPublisher:
         target: PullRequestTarget,
         plan: PublishPlan,
         existing_check: ExistingCheckRun | None = None,
+        details_url: str | None = None,
     ) -> PublishOutcome:
         key = (target.installation_id, target.owner, target.repo)
         lock = self._locks.setdefault(key, asyncio.Lock())
-        async with lock:
-            token = await self._app_auth.installation_token(target.installation_id)
-            async with httpx.AsyncClient(
-                base_url=self._settings.api_base_url,
-                timeout=self._settings.timeout_seconds,
-                transport=self._transport,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                },
-            ) as client:
-                check = await self._upsert_check_run(client, target, plan, existing_check)
-                review_id = review_url = None
-                comments: tuple[PublishedComment, ...] = ()
-                fallback = False
-                if plan.needs_review:
-                    review, fallback = await self._create_review(client, target, plan)
-                    review_id = _int(review.get("id"))
-                    review_url = _str(review.get("html_url"))
-                    comments = await self._published_comments(
-                        client, target, plan, review_id, review_url, fallback
-                    )
+        async with lock, await self._client(target) as client:
+            check = await self._upsert_check_run(
+                client, target, plan, existing_check, details_url
+            )
+            review_id = review_url = None
+            comments: tuple[PublishedComment, ...] = ()
+            fallback = False
+            if plan.needs_review:
+                review, fallback = await self._create_review(client, target, plan)
+                review_id = _int(review.get("id"))
+                review_url = _str(review.get("html_url"))
+                comments = await self._published_comments(
+                    client, target, plan, review_id, review_url, fallback
+                )
 
         logger.info(
             "github.review.published",
@@ -130,10 +122,9 @@ class GitHubReviewPublisher:
             inline_fallback=fallback,
         )
 
-    async def find_check_run(self, target: PullRequestTarget) -> ExistingCheckRun | None:
-        """The newest check run of this App named CHECK_RUN_NAME on the head SHA."""
+    async def _client(self, target: PullRequestTarget) -> httpx.AsyncClient:
         token = await self._app_auth.installation_token(target.installation_id)
-        async with httpx.AsyncClient(
+        return httpx.AsyncClient(
             base_url=self._settings.api_base_url,
             timeout=self._settings.timeout_seconds,
             transport=self._transport,
@@ -142,7 +133,63 @@ class GitHubReviewPublisher:
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
-        ) as client:
+        )
+
+    async def start_check(
+        self,
+        target: PullRequestTarget,
+        existing: ExistingCheckRun | None = None,
+        details_url: str | None = None,
+    ) -> ExistingCheckRun:
+        """Show the check as "in progress" on the head SHA, before the review runs.
+
+        Reuses the check run `existing` (same head SHA) and moves it back to in progress;
+        otherwise creates one.
+        """
+        body: dict[str, Any] = {
+            "status": "in_progress",
+            "output": {"title": "Review in progress", "summary": "The review is running."},
+        }
+        if details_url is not None:
+            body["details_url"] = details_url
+        base = f"/repos/{target.owner}/{target.repo}/check-runs"
+        async with await self._client(target) as client:
+            if existing is not None and existing.head_sha == target.head_sha:
+                response = await self._send(client, "PATCH", f"{base}/{existing.id}", body)
+            else:
+                body = {"name": CHECK_RUN_NAME, "head_sha": target.head_sha, **body}
+                response = await self._send(client, "POST", base, body)
+        check_id = _int(_object(response).get("id"))
+        if check_id is None:
+            raise ForgeUnavailableError(PROVIDER_NAME, "check run response carried no id")
+        return ExistingCheckRun(id=check_id, head_sha=target.head_sha)
+
+    async def fail_check(
+        self,
+        target: PullRequestTarget,
+        existing: ExistingCheckRun,
+        summary: str,
+        details_url: str | None = None,
+    ) -> None:
+        """Close an in-progress check as neutral when the review could not finish."""
+        body: dict[str, Any] = {
+            "status": "completed",
+            "conclusion": "neutral",
+            "output": {"title": "Review could not finish", "summary": summary},
+        }
+        if details_url is not None:
+            body["details_url"] = details_url
+        async with await self._client(target) as client:
+            await self._send(
+                client,
+                "PATCH",
+                f"/repos/{target.owner}/{target.repo}/check-runs/{existing.id}",
+                body,
+            )
+
+    async def find_check_run(self, target: PullRequestTarget) -> ExistingCheckRun | None:
+        """The newest check run of this App named CHECK_RUN_NAME on the head SHA."""
+        async with await self._client(target) as client:
             # Another App may name its check the same; PATCHing that one answers 403.
             params = {
                 "check_name": CHECK_RUN_NAME,
@@ -168,6 +215,7 @@ class GitHubReviewPublisher:
         target: PullRequestTarget,
         plan: PublishPlan,
         existing: ExistingCheckRun | None,
+        details_url: str | None = None,
     ) -> tuple[int, str | None]:
         output = {
             "title": _CHECK_TITLE[str(plan.conclusion)],
@@ -180,6 +228,8 @@ class GitHubReviewPublisher:
                 "conclusion": str(plan.conclusion),
                 "output": output,
             }
+            if details_url is not None:
+                body["details_url"] = details_url
             response = await self._send(client, "PATCH", f"{base}/{existing.id}", body)
         else:
             body = {
@@ -189,6 +239,8 @@ class GitHubReviewPublisher:
                 "conclusion": str(plan.conclusion),
                 "output": output,
             }
+            if details_url is not None:
+                body["details_url"] = details_url
             response = await self._send(client, "POST", base, body)
         payload = _object(response)
         check_id = _int(payload.get("id"))
