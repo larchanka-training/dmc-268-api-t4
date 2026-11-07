@@ -34,7 +34,7 @@ from domain.ports import (
     ReviewRequest,
 )
 from domain.publishing import CheckConclusion, PublishPlan
-from tests.conftest import all_log_text, log_events
+from tests.conftest import FixedClock, all_log_text, log_events
 from tests.worker.test_process import (
     DESCRIPTION_SENTINEL,
     DIFF_SENTINEL,
@@ -78,7 +78,9 @@ class CheckStubs:
 
     failed_checks: list[str]
 
-    async def find_check_run(self, target: PullRequestTarget) -> ExistingCheckRun | None:
+    async def find_check_run(
+        self, target: PullRequestTarget, *, in_progress_only: bool = False
+    ) -> ExistingCheckRun | None:
         return None
 
     async def start_check(
@@ -95,6 +97,8 @@ class CheckStubs:
         existing: ExistingCheckRun,
         summary: str,
         details_url: str | None = None,
+        *,
+        conclusion: str = "neutral",
     ) -> None:
         if not hasattr(self, "failed_checks"):
             self.failed_checks = []
@@ -420,6 +424,8 @@ class CheckRunForge:
         self.started: list[str | None] = []
         self.failed: list[str] = []
         self.details: list[str | None] = []
+        self.status: dict[int, str] = {}
+        self.closed: list[tuple[str, str]] = []
 
     async def start_check(
         self,
@@ -429,6 +435,7 @@ class CheckRunForge:
     ) -> ExistingCheckRun:
         self.started.append(details_url)
         check_id = self.check_runs.setdefault(target.head_sha, 100 + len(self.check_runs))
+        self.status[check_id] = "in_progress"
         return ExistingCheckRun(check_id, target.head_sha)
 
     async def fail_check(
@@ -437,12 +444,22 @@ class CheckRunForge:
         existing: ExistingCheckRun,
         summary: str,
         details_url: str | None = None,
+        *,
+        conclusion: str = "neutral",
     ) -> None:
         self.failed.append(summary)
+        self.status[existing.id] = conclusion
+        self.closed.append((existing.head_sha, conclusion))
 
-    async def find_check_run(self, target: PullRequestTarget) -> ExistingCheckRun | None:
+    async def find_check_run(
+        self, target: PullRequestTarget, *, in_progress_only: bool = False
+    ) -> ExistingCheckRun | None:
         check_id = self.check_runs.get(target.head_sha)
-        return None if check_id is None else ExistingCheckRun(check_id, target.head_sha)
+        if check_id is None:
+            return None
+        if in_progress_only and self.status.get(check_id) != "in_progress":
+            return None
+        return ExistingCheckRun(check_id, target.head_sha)
 
     async def publish(
         self,
@@ -461,6 +478,7 @@ class CheckRunForge:
         else:
             check_id = 100 + len(self.check_runs)
             self.check_runs[target.head_sha] = check_id
+        self.status[check_id] = "completed"
         return PublishOutcome(
             check_run_id=check_id, check_run_url=None, review_id=None, review_url=None, comments=()
         )
@@ -665,3 +683,79 @@ async def test_a_retryable_error_on_the_last_attempt_closes_the_in_progress_chec
     assert stored is not None
     assert stored.status is ReviewJobStatus.FAILED
     assert len(publisher.failed) == 1
+
+
+class _PushDuringReview(FakeGateway):
+    """A push lands while the LLM runs: the store supersedes the job on the old SHA."""
+
+    def __init__(self, store: MemoryJobStore) -> None:
+        super().__init__(())
+        self.store = store
+
+    async def review(self, request: ReviewRequest) -> ReviewResult:
+        await enqueue(self.store, make_payload(delivery_id="d-2", head_sha="b" * 40))
+        return await super().review(request)
+
+
+async def test_a_job_superseded_by_a_push_cancels_its_in_progress_check() -> None:
+    publisher = CheckRunForge()
+    store = MemoryJobStore()
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
+
+    done = await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(gateway=_PushDuringReview(store), publisher=publisher),
+    )
+
+    assert not done
+    assert publisher.calls == []
+    assert publisher.closed == [(HEAD_SHA, "cancelled")]
+    assert publisher.status[publisher.check_runs[HEAD_SHA]] == "cancelled"
+
+
+class _LastAttemptStore(MemoryJobStore):
+    """Ends the job on the second failure, as if that were the last retry."""
+
+    fails = 0
+
+    async def fail(self, job_id, error_kind, *, retryable, worker_id):  # type: ignore[no-untyped-def]
+        self.fails += 1
+        last = self.fails >= 2
+        return await super().fail(
+            job_id, error_kind, retryable=retryable and not last, worker_id=worker_id
+        )
+
+
+async def test_a_final_failure_before_the_llm_closes_the_earlier_attempts_check() -> None:
+    publisher = CheckRunForge()
+    clock = FixedClock()
+    store = _LastAttemptStore(clock=clock)
+    job_id = await enqueue(store, make_payload())
+    unavailable = AllProvidersFailedError([ProviderUnavailableError("p", "HTTP 503")])
+
+    first = await claim(store)
+    await process_claimed_job(
+        first,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(gateway=FakeGateway(error=unavailable), publisher=publisher),
+    )
+    check_id = publisher.check_runs[HEAD_SHA]
+    assert publisher.status[check_id] == "in_progress"
+
+    clock.advance(3600)
+    second = await claim(store)
+    await process_claimed_job(
+        second,
+        FakeGitProvider(error=ForgeUnavailableError("github", "HTTP 502")),
+        store,
+        review=ReviewStage(gateway=FakeGateway(()), publisher=publisher),
+    )
+
+    stored = await store.get(job_id)
+    assert stored is not None
+    assert stored.status is ReviewJobStatus.FAILED
+    assert publisher.status[check_id] == "neutral"

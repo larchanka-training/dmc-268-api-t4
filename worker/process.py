@@ -360,6 +360,7 @@ async def _process(
                 dismissed_by_verifier=result.rejected_by_verifier,
             )
             if not await jobs.extend_lease(job_id, worker_id=claimed.worker_id):
+                await _close_if_superseded(jobs, review.publisher, target, check, claimed, log)
                 return False
             await progress.begin(JobStep.POST_FEEDBACK)
             outcome = await review.publisher.publish(target, plan, check, details_url)
@@ -383,15 +384,10 @@ async def _process(
             retryable=retryable,
             error=err,
         )
-        # Decided on the status the store returned, not on the error kind: a retryable
-        # error on the last attempt still ends the job, and nothing would close the check.
-        if (
-            status is ReviewJobStatus.FAILED
-            and check is not None
-            and target is not None
-            and review is not None
-        ):
-            await _fail_check(review.publisher, target, check, details_url, claimed, log)
+        if review is not None:
+            await _close_after_failure(
+                jobs, review.publisher, status, target, check, details_url, claimed, log
+            )
         return False
 
     try:
@@ -485,6 +481,77 @@ async def _start_check(
             extra={**_job_fields(claimed), "error_type": type(err).__name__},
         )
         return None
+
+
+async def _close_after_failure(
+    jobs: JobRepository,
+    publisher: ReviewPublisher,
+    status: ReviewJobStatus | None,
+    target: PullRequestTarget | None,
+    check: ExistingCheckRun | None,
+    details_url: str | None,
+    claimed: ClaimedJob,
+    log: logging.Logger,
+) -> None:
+    """Do not leave an "in progress" check behind once no attempt will complete it.
+
+    Decided on the status the store returned, not on the error kind: a retryable error
+    on the last attempt still ends the job. When this attempt failed before showing its
+    own check (say, the fetch), an earlier attempt's check may still be in progress on
+    the webhook's head SHA, so it is looked up there.
+    """
+    if status is None:
+        if target is not None:
+            await _close_if_superseded(jobs, publisher, target, check, claimed, log)
+        return
+    if status is not ReviewJobStatus.FAILED:
+        return
+    if check is None or target is None:
+        target = _pull_request_target(claimed, claimed.payload.head_sha)
+        try:
+            check = await publisher.find_check_run(target, in_progress_only=True)
+        except Exception as err:
+            log.warning(
+                "job.check_run.close_failed",
+                extra={**_job_fields(claimed), "error_type": type(err).__name__},
+            )
+            return
+        if check is None:
+            return
+    await _fail_check(publisher, target, check, details_url, claimed, log)
+
+
+async def _close_if_superseded(
+    jobs: JobRepository,
+    publisher: ReviewPublisher,
+    target: PullRequestTarget,
+    check: ExistingCheckRun | None,
+    claimed: ClaimedJob,
+    log: logging.Logger,
+) -> None:
+    """The lease was lost. Close this attempt's check as cancelled only when a newer
+    delivery superseded the job; a reaped job is retried and reuses the check.
+
+    A newer job on the same head SHA reuses the same check run: if it reopened it before
+    this close lands, the check reads "cancelled" until that job completes it.
+    """
+    if check is None:
+        return
+    try:
+        job = await jobs.get(claimed.job_id)
+        if job is None or job.status is not ReviewJobStatus.SUPERSEDED:
+            return
+        await publisher.fail_check(
+            target,
+            check,
+            "A newer push or re-run replaced this review.",
+            conclusion="cancelled",
+        )
+    except Exception as err:
+        log.warning(
+            "job.check_run.close_failed",
+            extra={**_job_fields(claimed), "error_type": type(err).__name__},
+        )
 
 
 async def _fail_check(
