@@ -9,6 +9,7 @@ from adapters.llm.keys import Clock, KeyPool
 from adapters.llm.openai_compat import OpenAICompatibleProvider
 from adapters.llm.reflection import JevVerifier
 from adapters.llm.rule_screen import JevRuleScreen
+from adapters.resilience import default_resilience
 from domain.ports import LLMGateway
 
 
@@ -18,13 +19,14 @@ def build_gateway(
     transport: httpx.AsyncBaseTransport | None = None,
     clock: Clock = time.monotonic,
     wrap_provider: Callable[[ChatProvider], ChatProvider] | None = None,
+    resilient: bool = False,
 ) -> LLMGateway:
     """Wire the review pipeline; wrap_provider lets the eval harness observe each provider."""
     configured = [settings.primary]
     if settings.fallback is not None:
         configured.append(settings.fallback)
     providers: list[ChatProvider] = [
-        _build_provider(provider, settings, transport=transport, clock=clock)
+        _build_provider(provider, settings, transport=transport, clock=clock, resilient=resilient)
         for provider in configured
     ]
     if wrap_provider is not None:
@@ -78,6 +80,7 @@ def _build_provider(
     *,
     transport: httpx.AsyncBaseTransport | None,
     clock: Clock,
+    resilient: bool = False,
 ) -> OpenAICompatibleProvider:
     key_pool = KeyPool(provider.name, provider.api_keys, clock) if provider.api_keys else None
     return OpenAICompatibleProvider(
@@ -91,4 +94,5 @@ def _build_provider(
         provider_order=provider.provider_order,
         timeout_seconds=settings.timeout_seconds,
         transport=transport,
+        resilience=default_resilience(provider.name) if resilient else None,
     )

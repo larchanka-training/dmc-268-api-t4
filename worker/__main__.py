@@ -27,6 +27,7 @@ from adapters.observability import metrics
 from adapters.observability.config import LoggingSettings, SentrySettings
 from adapters.observability.logging import configure_logging
 from adapters.observability.sentry import init_sentry
+from adapters.resilience import default_resilience
 from domain.ports import GitProvider
 from worker.config import WorkerSettings
 from worker.loop import run_worker
@@ -34,11 +35,16 @@ from worker.process import DEBUG_LOG_DIFF_ENV, ERROR_KINDS, ReviewStage
 
 logger = logging.getLogger(__name__)
 
+# One breaker for every GitHub call of this worker process: the client and the publisher.
+_GITHUB_RESILIENCE = default_resilience("github")
+
 
 def build_vcs_from_env() -> GitProvider:
     """The same VCS wiring as ``api.main.build_app``: GitHubAppSettings →
     ``build_vcs_client`` (the App auth lives inside the factory)."""
-    return build_vcs_client(GitHubAppSettings.from_env(), clock=SystemClock())
+    return build_vcs_client(
+        GitHubAppSettings.from_env(), clock=SystemClock(), resilience=_GITHUB_RESILIENCE
+    )
 
 
 def build_review_from_env() -> ReviewStage:
@@ -46,8 +52,13 @@ def build_review_from_env() -> ReviewStage:
     variable fails here, at startup, naming the variable."""
     app_settings = GitHubAppSettings.from_env()
     return ReviewStage(
-        gateway=build_gateway(LLMSettings.from_env()),
-        publisher=GitHubReviewPublisher(app_settings, GitHubAppAuth(app_settings, SystemClock())),
+        gateway=build_gateway(LLMSettings.from_env(), resilient=True),
+        console_url=os.environ.get("APP_ORIGIN", "").strip() or None,
+        publisher=GitHubReviewPublisher(
+            app_settings,
+            GitHubAppAuth(app_settings, SystemClock()),
+            resilience=_GITHUB_RESILIENCE,
+        ),
     )
 
 

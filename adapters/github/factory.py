@@ -6,6 +6,7 @@ from adapters.clock import SystemClock
 from adapters.github.app_auth import GitHubAppAuth
 from adapters.github.client import GitHubVCSClient
 from adapters.github.config import GitHubAppSettings
+from adapters.resilience import Resilience
 from domain.ports import Clock, GitProvider
 
 
@@ -14,8 +15,9 @@ def build_vcs_client(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
     clock: Clock | None = None,
+    resilience: Resilience | None = None,
 ) -> GitProvider:
     app_auth = GitHubAppAuth(
         settings, clock if clock is not None else SystemClock(), transport=transport
     )
-    return GitHubVCSClient(settings, app_auth, transport=transport)
+    return GitHubVCSClient(settings, app_auth, transport=transport, resilience=resilience)
