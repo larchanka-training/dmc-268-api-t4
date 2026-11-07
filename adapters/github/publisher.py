@@ -25,6 +25,12 @@ import httpx
 
 from adapters.github.app_auth import GitHubAppAuth
 from adapters.github.config import PROVIDER_NAME, GitHubAppSettings
+from adapters.github.resilience import (
+    forge_open_error,
+    forge_retry_after,
+    is_forge_failure,
+)
+from adapters.resilience import Resilience
 from domain.errors import (
     ForgePermissionError,
     ForgeRateLimitedError,
@@ -63,10 +69,12 @@ class GitHubReviewPublisher:
         app_auth: GitHubAppAuth,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        resilience: Resilience | None = None,
     ) -> None:
         self._settings = settings
         self._app_auth = app_auth
         self._transport = transport
+        self._resilience = resilience
         # Comment posts are serialised per repository (WORKFLOW_DESIGN.md §9), within
         # this process.
         self._locks: dict[tuple[int, str, str], asyncio.Lock] = {}
@@ -260,6 +268,26 @@ class GitHubReviewPublisher:
         body: dict[str, Any] | None = None,
         *,
         params: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        if self._resilience is None:
+            return await self._send_once(client, method, path, body, params)
+        return await self._resilience.call(
+            lambda: self._send_once(client, method, path, body, params),
+            is_failure=is_forge_failure,
+            # A POST that timed out may have landed: repeating it could post a second
+            # review. Only a throttle (the request was refused) is safe to repeat.
+            can_retry=lambda error: method != "POST" or isinstance(error, ForgeRateLimitedError),
+            retry_after=forge_retry_after,
+            open_error=forge_open_error,
+        )
+
+    async def _send_once(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None,
+        params: dict[str, Any] | None,
     ) -> httpx.Response:
         try:
             response = await client.request(method, path, json=body, params=params)

@@ -11,16 +11,26 @@ may hold repository content, and never a token (AGENTS.md hard rule 2).
 
 import logging
 import time
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar
 
 import httpx
 
 from adapters.github.app_auth import GitHubAppAuth
 from adapters.github.config import PROVIDER_NAME, GitHubAppSettings
-from domain.errors import ForgeUnavailableError, InstallationGoneError, PrNotFoundError
+from adapters.github.resilience import forge_open_error, forge_retry_after, is_forge_failure
+from adapters.resilience import Resilience
+from domain.errors import (
+    ForgeRateLimitedError,
+    ForgeUnavailableError,
+    InstallationGoneError,
+    PrNotFoundError,
+)
 from domain.ports import CommitInfo, PullRequestContext
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 COMMITS_PER_PAGE = 100
 # A cap, not a limit we expect to reach: without it a lying Link header would
@@ -41,7 +51,9 @@ class GitHubVCSClient:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         base_url: str | None = None,
+        resilience: Resilience | None = None,
     ) -> None:
+        self._resilience = resilience
         self._settings = settings
         self._app_auth = app_auth
         self._transport = transport
@@ -139,7 +151,30 @@ class GitHubVCSClient:
             )
         return tuple(commits), dropped_commits
 
+    async def _guarded(self, operation: Callable[[], Awaitable[_T]]) -> _T:
+        """Run a GET with in-call retries and the circuit breaker, when configured."""
+        if self._resilience is None:
+            return await operation()
+        return await self._resilience.call(
+            operation,
+            is_failure=is_forge_failure,
+            can_retry=lambda _: True,
+            retry_after=forge_retry_after,
+            open_error=forge_open_error,
+        )
+
     async def _fetch_diff(
+        self,
+        client: httpx.AsyncClient,
+        path: str,
+        headers: dict[str, str],
+        installation_id: int,
+    ) -> str:
+        return await self._guarded(
+            lambda: self._fetch_diff_once(client, path, headers, installation_id)
+        )
+
+    async def _fetch_diff_once(
         self,
         client: httpx.AsyncClient,
         path: str,
@@ -191,6 +226,18 @@ class GitHubVCSClient:
         step: str,
         installation_id: int,
     ) -> httpx.Response:
+        return await self._guarded(
+            lambda: self._get_once(client, url, headers, step, installation_id)
+        )
+
+    async def _get_once(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        headers: dict[str, str],
+        step: str,
+        installation_id: int,
+    ) -> httpx.Response:
         request = client.build_request("GET", url, headers=headers)
         response = await self._send(client, request, step)
         try:
@@ -230,6 +277,9 @@ def _check_status(response: httpx.Response, step: str, installation_id: int) -> 
         raise PrNotFoundError(PROVIDER_NAME, "pull request not found")
     if response.status_code in (401, 403):
         raise InstallationGoneError(installation_id, "permission denied")
+    if response.status_code == 429:
+        raw = response.headers.get("Retry-After", "").strip()
+        raise ForgeRateLimitedError(PROVIDER_NAME, int(raw) if raw.isdigit() else None)
     if response.status_code >= 400:
         raise ForgeUnavailableError(PROVIDER_NAME, f"{step}: HTTP {response.status_code}")
     if response.status_code not in _PERMITTED_STATUSES:
