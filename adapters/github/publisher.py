@@ -89,9 +89,7 @@ class GitHubReviewPublisher:
         key = (target.installation_id, target.owner, target.repo)
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock, await self._client(target) as client:
-            check = await self._upsert_check_run(
-                client, target, plan, existing_check, details_url
-            )
+            check = await self._upsert_check_run(client, target, plan, existing_check, details_url)
             review_id = review_url = None
             comments: tuple[PublishedComment, ...] = ()
             fallback = False
