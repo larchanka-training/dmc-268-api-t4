@@ -3,7 +3,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from domain.alerts import Alert
 from domain.auth import Session, SignInAttempt
@@ -468,6 +468,10 @@ class PublishOutcome:
     inline_fallback: bool = False
 
 
+#: How the worker closes a check run it can no longer complete with a review.
+CheckCloseConclusion = Literal["neutral", "cancelled"]
+
+
 class ReviewPublisher(Protocol):
     """Posts a planned review on one forge."""
 
@@ -494,12 +498,18 @@ class ReviewPublisher(Protocol):
         existing: ExistingCheckRun,
         summary: str,
         details_url: str | None = None,
+        *,
+        conclusion: CheckCloseConclusion = "neutral",
     ) -> None:
-        """Close an in-progress check (neutral) when the review could not finish."""
+        """Close an in-progress check when the review could not finish (neutral) or a
+        newer push superseded it (cancelled)."""
         ...
 
-    async def find_check_run(self, target: PullRequestTarget) -> ExistingCheckRun | None:
-        """The bot's check run on the target's head SHA, when an earlier job left one."""
+    async def find_check_run(
+        self, target: PullRequestTarget, *, in_progress_only: bool = False
+    ) -> ExistingCheckRun | None:
+        """The bot's check run on the target's head SHA, when an earlier job left one;
+        with `in_progress_only`, only one still shown as in progress."""
         ...
 
 

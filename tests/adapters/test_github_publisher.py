@@ -351,3 +351,24 @@ async def test_fail_check_closes_the_check_as_neutral(auth_clock: FixedClock) ->
     assert update["status"] == "completed"
     assert update["conclusion"] == "neutral"
     assert update["output"]["summary"] == "Retry later."
+
+
+async def test_fail_check_can_cancel_a_superseded_check(auth_clock: FixedClock) -> None:
+    publisher, transport = publisher_for(auth_clock, github())
+
+    await publisher.fail_check(
+        TARGET, ExistingCheckRun(id=555, head_sha=HEAD), "Superseded.", conclusion="cancelled"
+    )
+
+    (update,) = sent(transport, "PATCH", "/check-runs/555")
+    assert update["conclusion"] == "cancelled"
+
+
+async def test_find_check_run_can_ask_for_an_in_progress_one_only(auth_clock: FixedClock) -> None:
+    publisher, transport = publisher_for(
+        auth_clock, github(check=lambda _: httpx.Response(200, json={"check_runs": []}))
+    )
+
+    assert await publisher.find_check_run(TARGET, in_progress_only=True) is None
+    (listed,) = [r for r in transport.requests if r.url.path.endswith("/check-runs")]
+    assert listed.url.params["status"] == "in_progress"

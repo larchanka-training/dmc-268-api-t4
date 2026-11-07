@@ -39,6 +39,7 @@ from domain.errors import (
 )
 from domain.models import DiffSide
 from domain.ports import (
+    CheckCloseConclusion,
     ExistingCheckRun,
     PublishedComment,
     PublishOutcome,
@@ -55,6 +56,10 @@ _CHECK_TITLE = {
     "failure": "Changes requested",
     # The only skip today is a pull request over the LLM input budget (issue #55).
     "skipped": "Skipped: pull request too large",
+}
+_CLOSE_TITLE = {
+    "neutral": "Review could not finish",
+    "cancelled": "Superseded by a newer push",
 }
 _SIDE = {DiffSide.OLD: "LEFT", DiffSide.NEW: "RIGHT"}
 _REVIEW_COMMENTS_PER_PAGE = 100
@@ -168,12 +173,14 @@ class GitHubReviewPublisher:
         existing: ExistingCheckRun,
         summary: str,
         details_url: str | None = None,
+        *,
+        conclusion: CheckCloseConclusion = "neutral",
     ) -> None:
-        """Close an in-progress check as neutral when the review could not finish."""
+        """Close an in-progress check the review can no longer complete."""
         body: dict[str, Any] = {
             "status": "completed",
-            "conclusion": "neutral",
-            "output": {"title": "Review could not finish", "summary": summary},
+            "conclusion": conclusion,
+            "output": {"title": _CLOSE_TITLE[conclusion], "summary": summary},
         }
         if details_url is not None:
             body["details_url"] = details_url
@@ -185,7 +192,9 @@ class GitHubReviewPublisher:
                 body,
             )
 
-    async def find_check_run(self, target: PullRequestTarget) -> ExistingCheckRun | None:
+    async def find_check_run(
+        self, target: PullRequestTarget, *, in_progress_only: bool = False
+    ) -> ExistingCheckRun | None:
         """The newest check run of this App named CHECK_RUN_NAME on the head SHA."""
         async with await self._client(target) as client:
             # Another App may name its check the same; PATCHing that one answers 403.
@@ -194,6 +203,8 @@ class GitHubReviewPublisher:
                 "filter": "latest",
                 "app_id": self._settings.app_id,
             }
+            if in_progress_only:
+                params["status"] = "in_progress"
             response = await self._send(
                 client,
                 "GET",
