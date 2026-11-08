@@ -20,6 +20,8 @@ from collections.abc import Awaitable, Callable
 import asyncpg  # type: ignore[import-untyped]
 
 from adapters.db.repository import PostgresJobStore
+from adapters.observability import metrics
+from worker.config import DEFAULT_REAPER_INTERVAL_SECONDS
 
 #: One stable int per periodic task. The values are arbitrary — only their
 #: uniqueness matters, since they all live in one 64-bit advisory-lock
@@ -58,10 +60,15 @@ async def reap_tick(
     task_key: int,
     dsn: str,
     *,
+    interval: float = DEFAULT_REAPER_INTERVAL_SECONDS,
     connect: ConnectionFactory | None = None,
     logger: logging.Logger | None = None,
 ) -> int | None:
     """One reaper pass under the advisory lock.
+
+    The leader counts what it reaped in ``lease_expiries_total`` and records its success
+    in ``periodic_task_runs`` with ``interval``, for "Periodic task stale"
+    (docs/observability.md § Application).
 
     Connection strategy: a dedicated ``asyncpg.connect`` per tick, not a
     SQLAlchemy pool connection. ``pg_try_advisory_lock`` is session-scoped,
@@ -80,6 +87,7 @@ async def reap_tick(
     async def _reap() -> None:
         nonlocal reaped
         reaped = await store.reap_expired()
+        await store.record_periodic_run("reaper", interval)
 
     try:
         leader = await run_if_leader(connection, task_key, _reap)
@@ -88,6 +96,7 @@ async def reap_tick(
             await connection.close()
     if not leader:
         return None
+    metrics.count_lease_expiries(reaped)
     # Count only: ids and kinds are metadata, everything else on a job row
     # is untrusted webhook data.
     log.info("worker.reaper.tick", extra={"reaped": reaped})
@@ -116,7 +125,9 @@ async def reaper_loop(
     failing = False
     while not stop.is_set():
         try:
-            await reap_tick(store, TASK_KEYS["reaper"], dsn, connect=connect, logger=log)
+            await reap_tick(
+                store, TASK_KEYS["reaper"], dsn, interval=interval, connect=connect, logger=log
+            )
         except Exception as err:
             if not failing:
                 log.warning("worker.reaper.failed", extra={"error_type": type(err).__name__})

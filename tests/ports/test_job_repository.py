@@ -145,7 +145,7 @@ def memory_env() -> StoreEnv:
 
 async def _truncate(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
-        await conn.execute(text("TRUNCATE TABLE pr_review_jobs CASCADE"))
+        await conn.execute(text("TRUNCATE TABLE pr_review_jobs, periodic_task_runs CASCADE"))
 
 
 @pytest.fixture(scope="session")
@@ -321,6 +321,40 @@ async def test_claim_marks_the_job_processing_and_reports_the_attempt(env: Store
     stored = await env.store.get(job_id)
     assert stored is not None
     assert stored.status is ReviewJobStatus.PROCESSING
+
+
+async def test_the_trace_context_rides_from_enqueue_to_claim(env: StoreEnv) -> None:
+    """The review continues the webhook's trace (docs/observability.md § Review pipeline)."""
+    context = {
+        "sentry-trace": "1e51d95e7b09499c9938b17acfc1f228-b4d0b7383865c8f3-1",
+        "baggage": "sentry-trace_id=1e51d95e7b09499c9938b17acfc1f228,sentry-environment=production",
+    }
+    await enqueue(env.store, make_job(trace_context=context))
+
+    claimed = await claim(env.store, "w-1")
+
+    assert claimed.payload.trace_context == context
+
+
+async def test_a_job_without_a_trace_context_claims_with_none(env: StoreEnv) -> None:
+    await enqueue(env.store, make_job())
+
+    claimed = await claim(env.store, "w-1")
+
+    assert claimed.payload.trace_context is None
+
+
+async def test_a_periodic_run_is_upserted_with_its_interval(env: StoreEnv) -> None:
+    """The leader's record for "Periodic task stale" (docs/observability.md § Application)."""
+    assert await env.store.periodic_runs() == ()
+
+    await env.store.record_periodic_run("reaper", 30)
+    [first] = await env.store.periodic_runs()
+    await env.store.record_periodic_run("reaper", 45)
+    [second] = await env.store.periodic_runs()
+
+    assert (second.task, second.interval_seconds) == ("reaper", 45.0)
+    assert second.last_success_at >= first.last_success_at
 
 
 async def test_claim_skips_a_future_attempt_until_it_is_due(env: StoreEnv) -> None:

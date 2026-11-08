@@ -98,7 +98,7 @@ prometheus.relabel "containers" {
 // --- Postgres ------------------------------------------------------------------------
 
 // The read-only dmc268_exporter role (pg_monitor), created once by hand
-// (tasks/observability-checklist.md, phase 3).
+// (docs/tasks/observability-checklist.md, phase 3).
 prometheus.exporter.postgres "db" {
 	data_source_names  = ["postgresql://dmc268_exporter:" + encoding.url_encode(sys.env("POSTGRES_EXPORTER_PASSWORD")) + "@postgres:5432/dmc268?sslmode=disable"]
 	enabled_collectors = ["database", "locks", "stat_database", "stat_user_tables", "stat_statements"]
@@ -183,6 +183,115 @@ loki.process "logs" {
 	stage.timestamp {
 		source = "ts"
 		format = "RFC3339Nano"
+	}
+}
+
+// --- container logs ------------------------------------------------------------------
+
+// Caddy and Postgres log to stderr, so their lines come from Docker, not from ./logs. Only
+// this compose project's caddy and postgres: the api and worker are tailed from their files
+// above (their stdout would arrive twice), and other containers on the host stay out.
+discovery.docker "containers" {
+	host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "container_logs" {
+	targets = discovery.docker.containers.targets
+
+	rule {
+		source_labels = [
+			"__meta_docker_container_label_com_docker_compose_project",
+			"__meta_docker_container_label_com_docker_compose_service",
+		]
+		separator = "/"
+		regex     = sys.env("COMPOSE_PROJECT") + "/(caddy|postgres)"
+		action    = "keep"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+}
+
+loki.source.docker "containers" {
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.relabel.container_logs.output
+	forward_to = [loki.process.containers.receiver]
+}
+
+// The same labels as the app's lines: service, and level in the app's words.
+loki.process "containers" {
+	forward_to = [loki.write.cloud.receiver]
+
+	// Caddy writes JSON. Its error log carries the request (Cookie and Authorization are
+	// redacted by Caddy), and a query string can hold an OAuth code
+	// (/api/auth/callback?code=…): every query is cut before the line leaves the VPS.
+	stage.match {
+		selector = "{service=\"caddy\"}"
+
+		stage.replace {
+			expression = "(\\?[^\"\\s]+)"
+			replace    = "?redacted"
+		}
+
+		stage.json {
+			expressions = {level = ""}
+		}
+
+		stage.labels {
+			values = {level = ""}
+		}
+	}
+
+	stage.match {
+		selector = "{service=\"caddy\", level=\"warn\"}"
+
+		stage.static_labels {
+			values = {level = "warning"}
+		}
+	}
+
+	stage.match {
+		selector = "{service=\"caddy\", level=~\"fatal|panic|dpanic\"}"
+
+		stage.static_labels {
+			values = {level = "critical"}
+		}
+	}
+
+	// Postgres: "2026-10-30 12:00:00.123 UTC [57] ERROR:  …" (the default log_line_prefix).
+	// A DETAIL, HINT or STATEMENT line that continues a message gets no level.
+	stage.match {
+		selector = "{service=\"postgres\"} |~ \"] (LOG|INFO|NOTICE):\""
+
+		stage.static_labels {
+			values = {level = "info"}
+		}
+	}
+
+	stage.match {
+		selector = "{service=\"postgres\"} |~ \"] WARNING:\""
+
+		stage.static_labels {
+			values = {level = "warning"}
+		}
+	}
+
+	stage.match {
+		selector = "{service=\"postgres\"} |~ \"] ERROR:\""
+
+		stage.static_labels {
+			values = {level = "error"}
+		}
+	}
+
+	stage.match {
+		selector = "{service=\"postgres\"} |~ \"] (FATAL|PANIC):\""
+
+		stage.static_labels {
+			values = {level = "critical"}
+		}
 	}
 }
 

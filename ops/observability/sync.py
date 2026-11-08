@@ -19,15 +19,18 @@ Settings, from the environment:
 - ``GRAFANA_SM_URL``, ``GRAFANA_SM_TOKEN``, ``SITE_ADDRESS``: Synthetic Monitoring's API
   and the site to probe. Without them the synthetic check is skipped with a warning.
 
-Rules go through Grafana's import of Prometheus-format rules, so they become
-Grafana-managed rules routed by the notification policy below to the ``telegram``
-contact point. ⚠️ That path waits for the checklist's "Rule routing check" in Grafana
-Cloud. The contact point is created once with placeholder values and never touched
-again: the real bot token and chat id are typed into Grafana by hand.
+The rules files are Prometheus-format (promtool tests them). They become Grafana-managed
+rules through the alerting provisioning API, in the form Grafana's own import of
+Prometheus rules produces, so the notification policy below routes them to the
+``telegram`` contact point. The import API itself is not served by Grafana Cloud (404,
+2026-10-30), hence the provisioning API. The contact point is created once with
+placeholder values and never touched again: the real bot token and chat id are typed
+into Grafana by hand.
 """
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import sys
@@ -47,12 +50,20 @@ UPTIME_CHECK = HERE / "synthetics" / "uptime.json"
 
 FOLDER_UID = "dmc268"
 FOLDER_TITLE = "DMC-268"
-#: The rules' folder; the import API names it by title.
-RULES_NAMESPACE = "DMC-268 alerts"
+#: The rules' folder.
+RULES_FOLDER_UID = "dmc268-alerts"
+RULES_FOLDER_TITLE = "DMC-268 alerts"
+#: Rules query a minute in the past, as Grafana's import sets them: Alloy pushes once a
+#: minute, so the newest minute may not have arrived yet.
+QUERY_RANGE = {"from": 660, "to": 60}
 CONTACT_POINT = "telegram"
 PLACEHOLDER = "placeholder: enter the bot token and chat id in Grafana"
 DEFAULT_PROM_DATASOURCE_UID = "grafanacloud-prom"
 PARTS = ("dashboards", "rules", "alerting", "synthetics")
+#: Pushed only when asked for (``--only drill``): the "No throughput" drill copy. The next
+#: ``rules`` sync deletes it, since its group is not among the rules files.
+DRILL = "drill"
+DRILL_ALERTS = ALERTS / "drill"
 TIMEOUT_SECONDS = 30.0
 
 #: Working hours (Europe/Berlin, Mon-Fri) for the two rules notified only then. Each
@@ -65,8 +76,17 @@ QUIET_HOURS = {
 LOCATION = "Europe/Berlin"
 
 
+#: What Grafana answers when creating a folder whose uid exists: 412 in Grafana 13, 409
+#: in older versions.
+FOLDER_EXISTS = frozenset({409, 412})
+
+
 class SyncError(Exception):
     """A Grafana API call failed. The text names the call and the status, never a token."""
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass
@@ -87,14 +107,23 @@ class Settings:
             return source.get(name, "").strip()
 
         return cls(
-            grafana_url=text("GRAFANA_URL").rstrip("/"),
+            grafana_url=base_url(text("GRAFANA_URL")),
             grafana_token=text("GRAFANA_SA_TOKEN"),
             prom_datasource_uid=text("GRAFANA_PROM_DATASOURCE_UID") or DEFAULT_PROM_DATASOURCE_UID,
-            sentry_org_url=text("SENTRY_ORG_URL").rstrip("/"),
-            sm_url=text("GRAFANA_SM_URL").rstrip("/"),
+            sentry_org_url=base_url(text("SENTRY_ORG_URL")),
+            sm_url=base_url(text("GRAFANA_SM_URL")),
             sm_token=text("GRAFANA_SM_TOKEN"),
             site_address=text("SITE_ADDRESS"),
         )
+
+
+def base_url(value: str) -> str:
+    """A base URL without its trailing slash; a bare host gets ``https://``, since
+    Grafana's pages show some API URLs without one."""
+    value = value.rstrip("/")
+    if value and "://" not in value:
+        value = f"https://{value}"
+    return value
 
 
 class Api:
@@ -123,7 +152,7 @@ class Api:
 
     def get(self, path: str, *, missing_ok: bool = False) -> Any:
         """The decoded body; None for a 404 when ``missing_ok``."""
-        response = self._client.get(path, headers={"Accept": "application/json"})
+        response = self._call("GET", path, headers={"Accept": "application/json"})
         if missing_ok and response.status_code == 404:
             return None
         return self._decode(response, "GET", path)
@@ -140,17 +169,27 @@ class Api:
         if self._dry_run:
             self._report(f"  dry run: {method} {self._name}{path}")
             return None
-        response = self._client.request(
+        response = self._call(
             method, path, json=json_body, content=content, headers=dict(headers or {})
         )
         return self._decode(response, method, path)
+
+    def _call(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """The request; a transport failure names the API and the call (never a token)."""
+        try:
+            return self._client.request(method, path, **kwargs)
+        except httpx.HTTPError as error:
+            raise SyncError(
+                f"{method} {self._name}{path} failed: {type(error).__name__}: {error}"
+            ) from error
 
     def _decode(self, response: httpx.Response, method: str, path: str) -> Any:
         if response.status_code >= 400:
             # The body is Grafana's error message; it never echoes the token.
             raise SyncError(
                 f"{method} {self._name}{path} answered HTTP {response.status_code}: "
-                f"{response.text[:300]}"
+                f"{response.text[:300]}",
+                response.status_code,
             )
         if not response.content:
             return None
@@ -177,10 +216,21 @@ def prepared_dashboard(path: Path, settings: Settings) -> dict[str, Any]:
     return dashboard
 
 
+def ensure_folder(grafana: Api, uid: str, title: str, report: Callable[[str], None]) -> None:
+    # Created, not looked up first: below Admin, Grafana answers a lookup of a folder that
+    # does not exist with 403 (folders:read), since no permission exists on it yet.
+    try:
+        grafana.send("POST", "/api/folders", json_body={"uid": uid, "title": title})
+    except SyncError as error:
+        if error.status not in FOLDER_EXISTS:
+            raise
+        report(f"  folder {title} exists")
+    else:
+        report(f"  folder {title} ready")
+
+
 def sync_dashboards(grafana: Api, settings: Settings, report: Callable[[str], None]) -> None:
-    if grafana.get(f"/api/folders/{FOLDER_UID}", missing_ok=True) is None:
-        grafana.send("POST", "/api/folders", json_body={"uid": FOLDER_UID, "title": FOLDER_TITLE})
-        report(f"  folder {FOLDER_TITLE} created")
+    ensure_folder(grafana, FOLDER_UID, FOLDER_TITLE, report)
     for path in dashboard_files():
         dashboard = prepared_dashboard(path, settings)
         grafana.send(
@@ -199,10 +249,10 @@ def sync_dashboards(grafana: Api, settings: Settings, report: Callable[[str], No
 # --- rules -------------------------------------------------------------------------
 
 
-def rule_groups() -> list[dict[str, Any]]:
-    """Every group of every rules file, in file order."""
+def rule_groups(folder: Path = ALERTS) -> list[dict[str, Any]]:
+    """Every group of every rules file in ``folder``, in file order."""
     groups: list[dict[str, Any]] = []
-    for path in sorted(ALERTS.glob("*.rules.yaml")):
+    for path in sorted(folder.glob("*.rules.yaml")):
         groups.extend(yaml.safe_load(path.read_text(encoding="utf-8"))["groups"])
     names = [group["name"] for group in groups]
     if len(names) != len(set(names)):
@@ -210,26 +260,119 @@ def rule_groups() -> list[dict[str, Any]]:
     return groups
 
 
-def sync_rules(grafana: Api, settings: Settings, report: Callable[[str], None]) -> None:
-    namespace = f"/api/convert/prometheus/config/v1/rules/{quote(RULES_NAMESPACE)}"
-    headers = {
-        "Content-Type": "application/yaml",
-        "X-Grafana-Alerting-Datasource-UID": settings.prom_datasource_uid,
+def rule_uid(group: str, alert: str) -> str:
+    """Stable, so a sync replaces a rule instead of adding a copy; Grafana allows 40
+    characters of [a-zA-Z0-9-_]."""
+    uid = f"dmc268-{group}-{alert.lower()}"
+    if len(uid) > 40:
+        uid = "dmc268-" + hashlib.sha1(f"{group}/{alert}".encode()).hexdigest()[:20]
+    return uid
+
+
+def grafana_rule(rule: Mapping[str, Any], group: str, datasource_uid: str) -> dict[str, Any]:
+    """A Prometheus alerting rule as a Grafana-managed one, in the form Grafana's own
+    import produces (read back from Grafana 13.2): the PromQL as an instant query, a
+    math step that makes every returned series 1, and a threshold above 0. So it fires
+    once per returned series, and no data is OK, as in Prometheus."""
+    expression = {"type": "__expr__", "uid": "__expr__"}
+    return {
+        "uid": rule_uid(group, rule["alert"]),
+        "title": rule["alert"],
+        "ruleGroup": group,
+        "folderUID": RULES_FOLDER_UID,
+        "condition": "threshold",
+        "data": [
+            {
+                "refId": "query",
+                "queryType": "prometheus",
+                "relativeTimeRange": QUERY_RANGE,
+                "datasourceUid": datasource_uid,
+                "model": {
+                    "refId": "query",
+                    "datasource": {"type": "prometheus", "uid": datasource_uid},
+                    "expr": rule["expr"],
+                    "instant": True,
+                    "range": False,
+                },
+            },
+            {
+                "refId": "prometheus_math",
+                "queryType": "math",
+                "relativeTimeRange": {"from": 0, "to": 0},
+                "datasourceUid": "__expr__",
+                "model": {
+                    "refId": "prometheus_math",
+                    "datasource": expression,
+                    "type": "math",
+                    "expression": "is_number($query) || is_nan($query) || is_inf($query)",
+                },
+            },
+            {
+                "refId": "threshold",
+                "queryType": "threshold",
+                "relativeTimeRange": {"from": 0, "to": 0},
+                "datasourceUid": "__expr__",
+                "model": {
+                    "refId": "threshold",
+                    "datasource": expression,
+                    "type": "threshold",
+                    "expression": "prometheus_math",
+                    "conditions": [{"evaluator": {"type": "gt", "params": [0]}}],
+                },
+            },
+        ],
+        "noDataState": "OK",
+        "execErrState": "OK",
+        "for": rule.get("for", "0s"),
+        "labels": dict(rule.get("labels", {})),
+        "annotations": dict(rule.get("annotations", {})),
+        "isPaused": False,
+        # Resolved at the first evaluation without its series, as in Prometheus.
+        "missingSeriesEvalsToResolve": 1,
     }
-    groups = rule_groups()
+
+
+def sync_rules(
+    grafana: Api,
+    settings: Settings,
+    report: Callable[[str], None],
+    *,
+    folder: Path = ALERTS,
+    prune: bool = True,
+) -> None:
+    """Every group of ``folder``; with ``prune``, the rules of any other group in the
+    rules' Grafana folder are deleted (the drill pushes without it)."""
+    ensure_folder(grafana, RULES_FOLDER_UID, RULES_FOLDER_TITLE, report)
+    groups = rule_groups(folder)
     for group in groups:
+        name = group["name"]
+        rules = [grafana_rule(rule, name, settings.prom_datasource_uid) for rule in group["rules"]]
+        # A PUT replaces the whole group, so a rule removed from it goes too.
         grafana.send(
-            "POST", namespace, content=yaml.safe_dump(group, sort_keys=False), headers=headers
+            "PUT",
+            f"/api/v1/provisioning/folder/{RULES_FOLDER_UID}/rule-groups/{quote(name)}",
+            json_body={
+                "title": name,
+                "folderUid": RULES_FOLDER_UID,
+                "interval": interval_seconds(group.get("interval", "1m")),
+                "rules": rules,
+            },
         )
-        report(f"  rule group {group['name']}: {len(group['rules'])} rules")
+        report(f"  rule group {name}: {len(rules)} rules")
+    if not prune:
+        return
     # A group removed from the files is removed from Grafana too.
-    existing = grafana.get(namespace, missing_ok=True) or {}
     wanted = {group["name"] for group in groups}
-    for listed in existing.get(RULES_NAMESPACE, []) if isinstance(existing, dict) else []:
-        name = listed.get("name")
-        if name and name not in wanted:
-            grafana.send("DELETE", f"{namespace}/{quote(name)}")
-            report(f"  rule group {name} deleted")
+    for listed in grafana.get("/api/v1/provisioning/alert-rules") or []:
+        if listed.get("folderUID") == RULES_FOLDER_UID and listed.get("ruleGroup") not in wanted:
+            grafana.send("DELETE", f"/api/v1/provisioning/alert-rules/{quote(listed['uid'])}")
+            report(f"  rule {listed.get('title')} of group {listed.get('ruleGroup')} deleted")
+
+
+def interval_seconds(value: str) -> int:
+    """A Prometheus duration like 1m or 30s, in seconds."""
+    units = {"s": 1, "m": 60, "h": 3600}
+    return int(value[:-1]) * units[value[-1]]
 
 
 def quote(segment: str) -> str:
@@ -355,7 +498,12 @@ def run(
             dry_run=dry_run,
             report=report,
         )
-        steps = {"dashboards": sync_dashboards, "rules": sync_rules, "alerting": sync_alerting}
+        steps: dict[str, Callable[[Api, Settings, Callable[[str], None]], None]] = {
+            "dashboards": sync_dashboards,
+            "rules": sync_rules,
+            "alerting": sync_alerting,
+            DRILL: lambda g, s, r: sync_rules(g, s, r, folder=DRILL_ALERTS, prune=False),
+        }
         try:
             for part in grafana_parts:
                 report(f"{part}:")
@@ -392,13 +540,17 @@ def run(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Push dashboards, rules and checks to Grafana.")
-    parser.add_argument("--only", default="", help=f"comma-separated parts of {', '.join(PARTS)}")
+    parser.add_argument(
+        "--only",
+        default="",
+        help=f"comma-separated parts of {', '.join(PARTS)}; or {DRILL} for the drill rule",
+    )
     parser.add_argument("--dry-run", action="store_true", help="print the writes; reads still run")
     args = parser.parse_args(argv)
     parts = [part.strip() for part in args.only.split(",") if part.strip()] or list(PARTS)
-    unknown = [part for part in parts if part not in PARTS]
+    unknown = [part for part in parts if part not in (*PARTS, DRILL)]
     if unknown:
-        parser.error(f"unknown parts {unknown}; choose from {', '.join(PARTS)}")
+        parser.error(f"unknown parts {unknown}; choose from {', '.join((*PARTS, DRILL))}")
     try:
         run(Settings.from_env(), parts, dry_run=args.dry_run)
     except (SyncError, httpx.HTTPError) as error:

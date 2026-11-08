@@ -432,7 +432,7 @@ What the user sees when a dependency fails, in the order the pipeline meets them
 | Forge 401/403 | `FAILED`, integration torn down | Installation marked broken, reconnect prompt |
 | Quota exhausted | Job `SKIPPED`; the bot posts one announcement on the PR | Usage bar at 100%, link to billing |
 | Subscription suspended | Jobs `SKIPPED` with `subscription_inactive` | Read-only console with a payment banner |
-| Database down | Webhooks `5xx`: GitHub retries, **GitLab does not** — those deliveries are lost | Console unavailable |
+| Database down | Webhooks `5xx`: neither forge retries; GitHub's can be redelivered for 3 days, **GitLab's are lost** | Console unavailable |
 | Worker dead | Lease expiry; the reaper requeues | Job stays "processing" up to 10 minutes, then retries |
 
 Two properties of this table matter more than the rest: nothing silently disappears — every

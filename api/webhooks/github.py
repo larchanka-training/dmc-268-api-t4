@@ -33,6 +33,7 @@ from adapters.github.payload import parse_pull_request_event, reviewable_action
 from adapters.github.signature import SIGNATURE_HEADER, verify_webhook_signature
 from adapters.observability import metrics
 from adapters.observability.logging import bind_fields
+from adapters.observability.sentry import current_trace_context
 from api.deps import ApiError
 from domain.errors import WebhookPayloadError, WebhookSignatureError
 from domain.jobs import clamp_for_storage
@@ -230,6 +231,8 @@ async def _receive(request: Request, deps: GitHubWebhookDeps) -> tuple[Response,
             ),
             head_ref=clamp_for_storage(event.head_ref) if event.head_ref is not None else None,
             base_ref=clamp_for_storage(event.base_ref) if event.base_ref is not None else None,
+            # The review continues this request's trace (docs/observability.md).
+            trace_context=current_trace_context(),
         )
     except ValueError:
         raise ApiError(400, "invalid_payload") from None

@@ -81,16 +81,17 @@ async def test_a_completed_review_reads_back_as_steps_then_its_status(engine: As
     assert [(e.step, e.step_status) for e in snapshot.steps] == [
         (JobStep.CLAIMED, StepStatus.OK),
         (JobStep.FETCH_DIFF, StepStatus.OK),
+        (JobStep.BUILD_CONTEXT, StepStatus.OK),
         (JobStep.LLM_CALL, StepStatus.OK),
         (JobStep.POSTPROCESS, StepStatus.OK),
         (JobStep.POST_FEEDBACK, StepStatus.OK),
     ]
-    # Five steps, each started and finished, then COMPLETED.
-    assert snapshot.last_seq == 11
-    events = await source.next_events(job_id, after_seq=9, timeout_seconds=0)
+    # Six steps, each started and finished, then COMPLETED.
+    assert snapshot.last_seq == 13
+    events = await source.next_events(job_id, after_seq=11, timeout_seconds=0)
     assert [(e.seq, e.status, e.step) for e in events] == [
-        (10, ReviewJobStatus.PROCESSING, JobStep.POST_FEEDBACK),
-        (11, ReviewJobStatus.COMPLETED, None),
+        (12, ReviewJobStatus.PROCESSING, JobStep.POST_FEEDBACK),
+        (13, ReviewJobStatus.COMPLETED, None),
     ]
 
 
@@ -177,6 +178,7 @@ async def test_the_store_lists_jobs_with_filters_and_reads_steps(engine: AsyncEn
     assert [step.step for step in await store.steps(completed.job_id)] == [
         JobStep.CLAIMED,
         JobStep.FETCH_DIFF,
+        JobStep.BUILD_CONTEXT,
         JobStep.LLM_CALL,
         JobStep.POSTPROCESS,
         JobStep.POST_FEEDBACK,

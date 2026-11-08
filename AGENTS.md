@@ -12,13 +12,13 @@ Target layout: [docs/BACKEND_ARCHITECTURE.md § Planned code layout](docs/BACKEN
 |---|---|---|
 | `docs/`, `SYSTEM_DESIGN.md`, `main.py` | exists | design documents, FastAPI stub |
 | `domain/` | exists | models, ports (`domain/ports.py`), errors; pure Python |
-| `adapters/` | exists (`llm/`, `github/`, `identity/`, `memory/`, `jobs/`, `db/`, `observability/`, `alerting/`) | `observability/` sets up JSON logging, Sentry and the Prometheus metrics with the API's DB sampler (docs/observability.md); `alerting/` sends the Sentry relay's alerts to Telegram (or logs them while no bot is set); `jobs/` holds the in-memory `JobRepository`; `db/` holds config/models/session/repository (`PostgresJobStore`); `github/publisher.py` posts reviews; `github/contents.py` reads a repository file (rules.md preview, finding context); `github/compare.py` reads a base...head diff for a finding's context; `db/job_events.py` records pipeline steps and reads them back for the SSE stream (`memory/job_events.py` is its in-memory twin for tests); `db/review_comments.py` keeps published findings (`memory/review_comments.py` is its twin); `gitlab/`, `stripe/`, `vault/` planned; tenancy/billing/auth/config tables still planned |
+| `adapters/` | exists (`llm/`, `github/`, `identity/`, `memory/`, `jobs/`, `db/`, `observability/`, `alerting/`) | `observability/` sets up JSON logging, Sentry and the Prometheus metrics with the API's DB sampler, and the worker's step `Observer` (docs/observability.md); `alerting/` sends the Sentry relay's alerts to Telegram (or logs them while no bot is set); `jobs/` holds the in-memory `JobRepository`; `db/` holds config/models/session/repository (`PostgresJobStore`); `github/publisher.py` posts reviews; `github/contents.py` reads a repository file (rules.md preview), finding context); `github/compare.py` reads a base...head diff for a finding's context; `db/job_events.py` records pipeline steps and reads them back for the SSE stream (`memory/job_events.py` is its in-memory twin for tests); `db/review_comments.py` keeps published findings (`memory/review_comments.py` is its twin); `gitlab/`, `stripe/`, `vault/` planned; tenancy/billing/auth/config tables still planned |
 | `tests/` | exists | pytest suite |
 | `api/` | exists | auth, `/repositories`, `/webhooks/github`, `/jobs`, `/jobs/{id}`, `/jobs/{id}/rules`, `/jobs/{id}/findings/{fid}/context`, `/jobs/{id}/file-lines` and the job events stream (`api/jobs.py`), the Sentry → Telegram relay `/internal/alerts/sentry` (`api/internal_alerts.py`), the access log (`api/access_log.py`), app factory; `/v1` routes planned |
 | `worker/` | exists (`process.py` processes one job; `loop.py` claim/LISTEN/poll, `run_worker`; `listener.py` LISTEN; `periodic.py` advisory-lock leader + lease reaper; `config.py`, `__main__.py`) | remaining periodic tasks planned: usage rollover, credential health, retention purge, grace expiry |
 | `ops/` | exists (`bootstrap.sh`, `publish_smoke.py`, `observability/`) | `observability/`: Grafana dashboards (`dashboards/build.py` generates the JSON), alert rules with `promtool` tests, the synthetic check and `sync.py`, which pushes them (docs/observability.md, docs/runbooks.md); `replay.py` planned |
-| `evals/`, `test-prs-dataset/` | exists | LLM eval harness (`python -m evals validate\|run`) and the 29-case gold dataset; see [test-prs-dataset/README.md](test-prs-dataset/README.md) |
-| `alembic/` | exists (`0001` review jobs + steps, `0002` published findings, `0003` pg_stat_statements) | migrations; tenancy/billing tables later |
+| `evals/`, `test-prs-dataset/` | exists | LLM eval harness (`python -m evals validate\|run`) and the 30-case gold dataset; see [test-prs-dataset/README.md](test-prs-dataset/README.md) |
+| `alembic/` | exists (`0001` review jobs + steps, `0002` published findings, `0003` pg_stat_statements, `0004` jobs' trace_context, `0005` periodic_task_runs) | migrations; tenancy/billing tables later |
 
 ## Commands
 
@@ -84,9 +84,10 @@ Documents disagree here. Do not pick a side in code; ask the team.
 3. **Severity (resolved):** severity AND category are persisted on published findings
    ([docs/PIPELINE_SPEC.md §7.1, D4](docs/PIPELINE_SPEC.md); decision 2026-10-10, this PR);
    the columns land with the pr_review_comments migration, which is deliberately not `0001`.
-4. **Secret storage:** encrypted in the database ([SYSTEM_DESIGN.md §10](SYSTEM_DESIGN.md)) vs
-   systemd `LoadCredential`, never in the environment ([docs/BACKEND_ARCHITECTURE.md § Deployment](docs/BACKEND_ARCHITECTURE.md))
-   vs `LoadCredential` or a `0600` env file ([docs/configuration.md](docs/configuration.md));
-   PR #8 reads LLM keys from env ([docs/llm-gateway.md](docs/llm-gateway.md)).
+4. **Secret storage (resolved):** our own secrets live in GitHub Secrets; `deploy.yml` writes
+   them to a `0600` `.env` on the VPS, and the containers read them from the environment
+   ([docs/observability.md § Configuration and secrets](docs/observability.md); decision 2026-10-30).
+   Not covered: secrets a tenant supplies (BYOK LLM keys, phase 2 in [SYSTEM_DESIGN.md §10](SYSTEM_DESIGN.md)),
+   which cannot go through GitHub Secrets.
 5. **Finding categories:** [SYSTEM_DESIGN.md §5.5](SYSTEM_DESIGN.md) vs the frontend set
    used by PR #8 ([docs/llm-gateway.md § Расхождения](docs/llm-gateway.md)).

@@ -47,6 +47,10 @@ jobs:
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
           LLM_PROMPT_VERSION: ${{ inputs.prompt_version != 'default' && inputs.prompt_version || '' }}
           FIXTURE: ${{ inputs.fixture || 'tests/fixtures/sql_injection.diff' }}
+          # The gateway's llm.* spans, in a Sentry environment of their own (counts only).
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          ENV: smoke
+          IMAGE_TAG: ${{ github.sha }}
         run: |
           # GitHub runs steps with bash -e; failures are classified below, so -e is off.
           set +e -uo pipefail

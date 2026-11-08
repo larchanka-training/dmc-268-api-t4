@@ -597,14 +597,16 @@ levers over whose pull requests spend their budget.
 
 Forges redeliver webhooks. Neither layer alone is sufficient.
 
-**Layer 1 — `UNIQUE (provider, delivery_id)`.** GitHub reuses the
-`X-GitHub-Delivery` GUID across automatic retries of a failed delivery, so
-`ON CONFLICT DO NOTHING` collapses them; a *manual* redelivery from the UI may
-carry a fresh GUID, which is why layer 2 exists. GitLab sends
-`X-Gitlab-Event-UUID` and is the weaker case: it does not retry a failed delivery
-the way GitHub does, and disables a hook that keeps failing instead. So on GitLab
-layer 1 protects against far less, and **a delivery dropped because your API was
-down is simply lost** — the review has to be re-triggered by the next push or by a
+**Layer 1 — `UNIQUE (provider, delivery_id)`.** Neither forge retries a failed
+delivery on its own: GitHub marks it failed and sends it again only when it is
+redelivered, from the App's *Advanced → Recent deliveries* page or with
+`POST /app/hook/deliveries/{id}/attempts`, for up to 3 days
+([GitHub: handling failed deliveries](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries)).
+A redelivery that reuses the `X-GitHub-Delivery` GUID is collapsed by
+`ON CONFLICT DO NOTHING`; one that carries a fresh GUID is why layer 2 exists.
+GitLab sends `X-Gitlab-Event-UUID` and is the weaker case: it disables a hook that
+keeps failing. So **a delivery dropped because your API was down is lost** unless
+someone redelivers it: the review has to be re-triggered by the next push or by a
 command. Uniqueness is scoped per provider because the two id namespaces are
 unrelated.
 
