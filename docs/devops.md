@@ -180,7 +180,8 @@ gh workflow run deploy.yml -R larchanka-training/dmc-268-api-t4 --ref main -f im
     и Caddy получает на него сертификат Let's Encrypt (HTTP-01 через порт 80). Имя
     вычисляется в `deploy.yml` из `DEPLOY_HOST`, маскируется и пишется в `.env` как
     `SITE_ADDRESS`; оттуда же `APP_ORIGIN=https://<site>` и
-    `GITHUB_CALLBACK_URL=https://<site>/api/auth/github/callback`. Volume `caddy_data`
+    `GITHUB_CALLBACK_URL=https://<site>/api/auth/github/callback` (переезд на `/api/v1/...`
+    см. [api-versioning.md](api-versioning.md)). Volume `caddy_data`
     обязателен: без него сертификат перевыпускался бы на каждом деплое и упёрся бы в лимиты
     Let's Encrypt. Первый выпуск занимает до минуты, поэтому smoke делает повторы.
     **В настройках GitHub App** нужно указать адреса на https: Callback URL
@@ -188,6 +189,9 @@ gh workflow run deploy.yml -R larchanka-training/dmc-268-api-t4 --ref main -f im
     и Webhook URL `https://<site>/api/webhooks/github`. Префикс `/api` обязателен: без него
     Caddy отдаёт запрос фронтенду, и GitHub получает 405. В коде и в `openapi.yaml` путь
     записан без префикса (`/webhooks/github`), потому что Caddy срезает `/api`.
+    С #43 все роуты API висят под `/v1` (`https://<site>/api/v1/webhooks/github` и т. д.),
+    а старые адреса без `/v1` работают до конца переезда, порядок в
+    [api-versioning.md](api-versioning.md).
     Если появится свой домен, меняется только `SITE_ADDRESS` (и эти три URL).
 19. **Старый адрес `http://<IP>` ведёт на имя сайта.** Сертификата на голый IP нет, поэтому
     стандартный редирект Caddy на `https://<IP>` в браузере давал ошибку. В Caddyfile отдельный

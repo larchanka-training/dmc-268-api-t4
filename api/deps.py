@@ -28,9 +28,12 @@ NO_STORE = "no-store"
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 _REQUESTED_WITH = "fetch"
-#: Server-to-server routes: forge webhooks and the Sentry alert relay. Each verifies its
-#: own signature in the route.
-_SERVER_TO_SERVER_PREFIXES = ("/webhooks/", "/internal/alerts/")
+#: Version prefix of every API route; the proxy adds /api in front (issue #43).
+API_PREFIX = "/v1"
+#: Server-to-server routes: forge webhooks (versioned, and at the root while the
+#: GitHub App moves over) and the Sentry alert relay. Each verifies its own
+#: signature in the route.
+_SERVER_TO_SERVER_PREFIXES = (f"{API_PREFIX}/webhooks/", "/webhooks/", "/internal/alerts/")
 
 
 class ApiError(Exception):
@@ -166,7 +169,7 @@ def enforce_csrf(request: Request) -> JSONResponse | None:
     # authentication is the delivery signature, verified in the route
     # (docs/WORKFLOW_DESIGN.md §2 Step 2; docs/observability.md § Alerts).
     # Behind uvicorn --root-path /api the request path carries the prefix
-    # (/api/webhooks/github), so match on the path the router sees.
+    # (/api/v1/webhooks/github), so match on the path the router sees.
     route_path = request.scope["path"].removeprefix(request.scope.get("root_path", ""))
     if route_path.startswith(_SERVER_TO_SERVER_PREFIXES):
         return None
