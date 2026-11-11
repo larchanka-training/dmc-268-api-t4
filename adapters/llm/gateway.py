@@ -14,11 +14,14 @@ from adapters.llm.config import (
     ReviewScope,
 )
 from adapters.llm.prompt import (
+    CHARS_PER_TOKEN_ESTIMATE,
     ChatMessage,
     FileReview,
     build_correction_messages,
     build_messages,
     build_summary_messages,
+    diff_as_prompt_text,
+    estimate_chars,
     estimate_tokens,
 )
 from adapters.llm.reflection import VerificationReport
@@ -32,7 +35,7 @@ from adapters.llm.schema import (
     parse_review,
     parse_summary,
 )
-from domain.diff import DiffLineKind, parse_diff, split_by_file
+from domain.diff import DiffLineKind, parse_diff, split_by_file, split_named_files
 from domain.errors import (
     AllProvidersFailedError,
     DiffFormatError,
@@ -41,6 +44,7 @@ from domain.errors import (
     LLMOutputError,
     ProviderUnavailableError,
 )
+from domain.input_budget import FileCost, fit_to_budget
 from domain.models import RISK_ORDER, Finding, ReviewResult, VerificationOutcome
 from domain.ports import ReviewRequest
 
@@ -206,22 +210,13 @@ class FallbackLLMGateway:
         screen = await self._screen_rules(rule_set.rules)
         _log_rules(rule_set, screen)
         rules = screen.rules
+        request, not_reviewed = self._fit(request, rules)
         parts = self._split(request)
-        estimated = max(
-            estimate_tokens(build_messages(part, rules, version=self._prompt_version))
-            for part in parts
-        )
-        if estimated > self._max_input_tokens:
-            too_large = LLMInputTooLargeError(estimated, self._max_input_tokens)
-            logger.warning(
-                "llm.input.too_large",
-                extra={"input_tokens": estimated, "max_input_tokens": self._max_input_tokens},
-            )
-            raise too_large
         if len(parts) == 1:
             result = await self._first_pass(parts[0], rules)
         else:
             result = await self._first_pass_by_file(request, parts, rules)
+        result = dataclasses.replace(result, not_reviewed=not_reviewed)
         if self._verifier is None:
             return result
         with sentry_sdk.start_span(op="llm.verify", name="llm.verify") as span:
@@ -241,6 +236,70 @@ class FallbackLLMGateway:
             verification=report.outcome,
             rejected_by_verifier=report.rejected,
         )
+
+    def _estimate(self, request: ReviewRequest, rules: Sequence[Rule]) -> int:
+        return estimate_tokens(build_messages(request, rules, version=self._prompt_version))
+
+    def _fit(
+        self, request: ReviewRequest, rules: Sequence[Rule]
+    ) -> tuple[ReviewRequest, tuple[str, ...]]:
+        """The request that fits the input budget and the paths left out to make it fit.
+
+        Graceful degradation (issue #88): whole files are dropped, tests and docs first,
+        and the rest is reviewed. Only when not a single file fits, or the diff cannot be
+        told apart by file, is the review refused with LLMInputTooLargeError.
+        """
+        estimated = max(self._estimate(part, rules) for part in self._split(request))
+        if estimated <= self._max_input_tokens:
+            return request, ()
+        try:
+            files = split_named_files(request.diff_text)
+        except DiffFormatError:
+            files = ()
+        kept = self._files_within_budget(request, rules, files)
+        if not kept:
+            logger.warning(
+                "llm.input.too_large",
+                extra={"input_tokens": estimated, "max_input_tokens": self._max_input_tokens},
+            )
+            raise LLMInputTooLargeError(estimated, self._max_input_tokens)
+        dropped = tuple(path for path, _ in files if path not in kept)
+        fitted = dataclasses.replace(
+            request, diff_text="".join(text for path, text in files if path in kept)
+        )
+        logger.warning(
+            "llm.input.degraded",
+            extra={
+                "kept": len(kept),
+                "dropped": len(dropped),
+                "input_tokens": estimated,
+                "max_input_tokens": self._max_input_tokens,
+            },
+        )
+        return fitted, dropped
+
+    def _files_within_budget(
+        self, request: ReviewRequest, rules: Sequence[Rule], files: Sequence[tuple[str, str]]
+    ) -> frozenset[str]:
+        """Paths to review. Per pull request the files share one budget; per file each
+        call has its own, so only the files that do not fit alone are left out."""
+        if self._review_scope is ReviewScope.FILE:
+            return frozenset(
+                path
+                for path, text in files
+                if self._estimate(dataclasses.replace(request, diff_text=text), rules)
+                <= self._max_input_tokens
+            )
+        # The diff is the only part of the prompt that changes, and its length is the sum
+        # of its files' lengths, so the budget left for it can be counted in characters.
+        fixed = estimate_chars(
+            build_messages(
+                dataclasses.replace(request, diff_text=""), rules, version=self._prompt_version
+            )
+        )
+        budget = self._max_input_tokens * CHARS_PER_TOKEN_ESTIMATE - fixed
+        costs = [FileCost(path, len(diff_as_prompt_text(text))) for path, text in files]
+        return frozenset(fit_to_budget(costs, budget=budget).kept)
 
     async def _screen_rules(self, rules: Sequence[Rule]) -> RuleScreenReport:
         unchanged = tuple(rules)

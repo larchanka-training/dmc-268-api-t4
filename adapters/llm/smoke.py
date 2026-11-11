@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import sys
+from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 
@@ -19,9 +20,9 @@ from adapters.llm.config import LLMSettings
 from adapters.llm.factory import build_gateway
 from adapters.observability.config import SentrySettings
 from adapters.observability.sentry import init_sentry
-from domain.diff import parse_diff
+from domain.diff import FileDiff, parse_diff, select_files
 from domain.diff_filter import filter_files
-from domain.errors import LLMConfigurationError, LLMGatewayError
+from domain.errors import DiffFormatError, LLMConfigurationError, LLMGatewayError
 from domain.models import ReviewResult
 from domain.ports import ReviewRequest
 from domain.publishing import CommentableLines, build_plan
@@ -78,8 +79,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"cannot read rules file {args.rules}: {exc.strerror}", file=sys.stderr)
             return EXIT_CONFIG_ERROR
 
+    try:
+        reviewable = filter_files(parse_diff(diff_text)).kept
+    except DiffFormatError as exc:
+        print(f"cannot read diff file {args.diff}: {exc}", file=sys.stderr)
+        return EXIT_CONFIG_ERROR
     request = ReviewRequest(
-        diff_text=diff_text,
+        # Like the worker: lockfiles and other filtered files are never sent to the model.
+        diff_text=select_files(diff_text, {diff.path for diff in reviewable}),
         pr_title=args.title,
         pr_description=args.description,
         rules_markdown=rules_markdown,
@@ -93,19 +100,21 @@ def main(argv: list[str] | None = None) -> int:
         sentry_sdk.flush()
     print(json.dumps(asdict(result), indent=2, ensure_ascii=False))
     if args.check_run is not None:
-        args.check_run.write_text(check_run_summary(result, diff_text), encoding="utf-8")
+        args.check_run.write_text(check_run_summary(result, reviewable), encoding="utf-8")
     return 0
 
 
-def check_run_summary(result: ReviewResult, diff_text: str) -> str:
+def check_run_summary(result: ReviewResult, reviewable: Sequence[FileDiff]) -> str:
     """The Check Run summary, built the way worker/process.py builds it (default policy)."""
+    left_out = frozenset(result.not_reviewed)
     plan = build_plan(
         result.findings,
         model_summary=result.summary,
-        lines=CommentableLines.from_files(filter_files(parse_diff(diff_text)).kept),
+        lines=CommentableLines.from_files(diff for diff in reviewable if diff.path not in left_out),
         model_risk=result.risk,
         checklist=result.checklist,
         dismissed_by_verifier=result.rejected_by_verifier,
+        not_reviewed=result.not_reviewed,
     )
     return plan.summary
 

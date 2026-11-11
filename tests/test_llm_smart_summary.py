@@ -25,6 +25,7 @@ from adapters.llm.schema import (
     CHECKLIST_MAX_ITEMS,
     parse_review,
 )
+from domain.diff import parse_diff
 from domain.errors import AllProvidersFailedError, LLMConfigurationError
 from domain.models import RiskLevel
 from domain.ports import ReviewRequest
@@ -389,7 +390,7 @@ def test_the_smoke_renders_the_check_run_summary_the_worker_would_publish() -> N
         checklist=("Run the tests",),
     )
 
-    summary = check_run_summary(result, TWO_FILES)
+    summary = check_run_summary(result, parse_diff(TWO_FILES))
 
     assert "Bumps two constants." in summary
     assert "**Risk: High** (the model said Low; the findings set the floor)" in summary

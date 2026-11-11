@@ -108,6 +108,11 @@ def rules_block(rules: Sequence[Rule]) -> str:
     return "\n".join([RULES_START, *lines, RULES_END])
 
 
+def diff_as_prompt_text(diff_text: str) -> str:
+    """The diff as the model sees it: numbered lines, marker look-alikes defanged."""
+    return escape_markers(number_diff(diff_text))
+
+
 def diff_block(request: ReviewRequest) -> str:
     return "\n".join(
         [
@@ -116,7 +121,7 @@ def diff_block(request: ReviewRequest) -> str:
             "PR description:",
             escape_markers(request.pr_description),
             "Diff:",
-            escape_markers(number_diff(request.diff_text)),
+            diff_as_prompt_text(request.diff_text),
             UNTRUSTED_END,
         ]
     )
@@ -220,5 +225,9 @@ def estimate_text_tokens(text: str) -> int:
     return -(-len(text) // CHARS_PER_TOKEN_ESTIMATE)
 
 
+def estimate_chars(messages: list[ChatMessage]) -> int:
+    return sum(len(message["content"]) for message in messages)
+
+
 def estimate_tokens(messages: list[ChatMessage]) -> int:
-    return estimate_text_tokens("".join(message["content"] for message in messages))
+    return -(-estimate_chars(messages) // CHARS_PER_TOKEN_ESTIMATE)

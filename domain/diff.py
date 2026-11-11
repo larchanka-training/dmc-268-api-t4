@@ -5,6 +5,7 @@ a line number, never diff content (AGENTS.md hard rule 3).
 """
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -88,6 +89,11 @@ class FileDiff:
     status: FileStatus
     is_binary: bool
     hunks: tuple[DiffHunk, ...]
+
+    @property
+    def path(self) -> str:
+        """The path the file is known by: its new side, or the old one for a deletion."""
+        return self.new_path or self.old_path
 
     def __post_init__(self) -> None:
         if self.status is FileStatus.ADDED:
@@ -383,3 +389,22 @@ def split_by_file(text: str) -> tuple[str, ...]:
     if len(pieces) > 1 and pieces[0]:
         pieces[1] = pieces[0] + pieces[1]
     return tuple(piece for piece in pieces[1:] if piece) if len(pieces) > 1 else (text,)
+
+
+def split_named_files(text: str) -> tuple[tuple[str, str], ...]:
+    """(path, raw diff text) of each file, in order.
+
+    Raise DiffFormatError when a piece is not one file's diff, as `parse_diff` would.
+    """
+    named: list[tuple[str, str]] = []
+    for piece in split_by_file(text):
+        parsed = parse_diff(piece)
+        if len(parsed) != 1:
+            raise DiffFormatError("a file's diff does not hold exactly one file", 1)
+        named.append((parsed[0].path, piece))
+    return tuple(named)
+
+
+def select_files(text: str, paths: Collection[str]) -> str:
+    """The diff of the files known by `paths` only, in their order, as raw text."""
+    return "".join(piece for path, piece in split_named_files(text) if path in paths)

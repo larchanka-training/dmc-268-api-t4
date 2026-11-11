@@ -49,6 +49,9 @@ SUMMARY_MARKER = "<!-- dmc268:summary -->"
 NO_ISSUES_LINE = "No issues found in this review."
 
 SUMMARY_FILES_SHOWN = 30
+# Paths listed under "Not reviewed (input budget)"; the rest is a count.
+SUMMARY_NOT_REVIEWED_SHOWN = 30
+NOT_REVIEWED_HEADING = "### Not reviewed (input budget)"
 SUMMARY_RISKS_SHOWN = 10
 # GitHub caps a check run summary at 65535 characters; keep well clear of it.
 SUMMARY_MAX_LENGTH = 60_000
@@ -304,7 +307,10 @@ def build_plan(
     model_risk: RiskLevel | None = None,
     checklist: tuple[str, ...] = (),
     dismissed_by_verifier: int = 0,
+    not_reviewed: tuple[str, ...] = (),
 ) -> PublishPlan:
+    """`lines` holds the files that were reviewed; `not_reviewed` the paths left out to fit
+    the model's input budget. The verdict and conclusion follow the reviewed part."""
     received = tuple(findings)
     in_diff = [finding for finding in received if lines.contains(finding.position)]
     loud_enough = [
@@ -364,6 +370,7 @@ def build_plan(
         model_risk=model_risk,
         checklist=checklist,
         dismissed=dismissed_by_verifier,
+        not_reviewed=not_reviewed,
     )
     return PublishPlan(
         comments=comments,
@@ -552,6 +559,13 @@ def _risk_line(risk: RiskLevel, model_risk: RiskLevel | None) -> str:
     return line
 
 
+def partial_review_line(reviewed: int, skipped: int) -> str:
+    return (
+        f"Reviewed {reviewed} of {reviewed + skipped} files; "
+        f"{skipped} skipped to fit the model's input budget."
+    )
+
+
 def render_summary(
     *,
     model_summary: str,
@@ -564,11 +578,18 @@ def render_summary(
     model_risk: RiskLevel | None = None,
     checklist: tuple[str, ...] = (),
     dismissed: int = 0,
+    not_reviewed: tuple[str, ...] = (),
 ) -> str:
-    """The overview: verdict, the model's summary, risk, checklist, risks by severity, files."""
+    """The overview: verdict, the model's summary, risk, checklist, risks by severity, files.
+
+    `files` are the reviewed ones; `not_reviewed` were left out to fit the input budget and
+    are listed by path, so nobody reads a partial review as a full one.
+    """
     parts = [SUMMARY_MARKER, f"## {_VERDICT_LABEL[verdict]}", ""]
     if model_summary.strip():
         parts.extend([redact(model_summary.strip()), ""])
+    if not_reviewed:
+        parts.extend([partial_review_line(len(files), len(not_reviewed)), ""])
     shown_risk = assess_risk(model_risk, findings, dismissed=dismissed) if risk is None else risk
     parts.extend([_risk_line(shown_risk, model_risk), ""])
     if not findings:
@@ -605,6 +626,12 @@ def render_summary(
     parts.extend(f"- `{path}`" for path in files[:SUMMARY_FILES_SHOWN])
     if len(files) > SUMMARY_FILES_SHOWN:
         parts.append(f"- …and {len(files) - SUMMARY_FILES_SHOWN} more")
+
+    if not_reviewed:
+        parts.extend(["", f"{NOT_REVIEWED_HEADING} ({len(not_reviewed)})", ""])
+        parts.extend(f"- `{path}`" for path in not_reviewed[:SUMMARY_NOT_REVIEWED_SHOWN])
+        if len(not_reviewed) > SUMMARY_NOT_REVIEWED_SHOWN:
+            parts.append(f"- …and {len(not_reviewed) - SUMMARY_NOT_REVIEWED_SHOWN} more")
 
     hidden = stats.already_posted + stats.over_limit
     if hidden:

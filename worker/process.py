@@ -24,7 +24,7 @@ import contextlib
 import logging
 import os
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -34,11 +34,12 @@ from adapters.observability.config import DEFAULT_ENV, read_env
 from adapters.observability.logging import bind_context
 from adapters.observability.observer import StepObserver
 from adapters.observability.sentry import job_transaction
-from domain.diff import parse_diff, split_into_chunks
+from domain.diff import FileDiff, parse_diff, select_files, split_into_chunks
 from domain.diff_filter import filter_files
 from domain.errors import LLMInputTooLargeError, classify
 from domain.findings import NewPublishedFinding, published_findings
 from domain.jobs import LEASE_SECONDS, JobStep
+from domain.models import ReviewResult
 from domain.ports import (
     ClaimedJob,
     GitProvider,
@@ -46,6 +47,7 @@ from domain.ports import (
     JobStats,
     LLMGateway,
     Observer,
+    PullRequestContext,
     PullRequestTarget,
     ReviewCommentStore,
     ReviewJobStatus,
@@ -256,13 +258,7 @@ async def _process(
             target = _pull_request_target(claimed, context.head_sha)
             async with observer.step(JobStep.LLM_CALL) as step:
                 try:
-                    result = await review.gateway.review(
-                        ReviewRequest(
-                            diff_text=context.diff_text,
-                            pr_title=context.title,
-                            pr_description=context.description,
-                        )
-                    )
+                    result = await _review(review.gateway, context, filtered.kept)
                 except LLMInputTooLargeError as too_large:
                     # The job still fails as skip_diff_too_large below; the check run
                     # only tells the author why nothing else appears.
@@ -271,7 +267,10 @@ async def _process(
                     )
                     raise
                 step.set(
-                    provider=result.provider, model=result.model, findings=len(result.findings)
+                    provider=result.provider,
+                    model=result.model,
+                    findings=len(result.findings),
+                    not_reviewed=len(result.not_reviewed),
                 )
             async with observer.step(JobStep.POSTPROCESS) as step:
                 posted: frozenset[str] = frozenset()
@@ -283,15 +282,19 @@ async def _process(
                             repo_id=payload.repo_id,
                             pr_number=payload.pr_number,
                         )
+                left_out = frozenset(result.not_reviewed)
                 plan = build_plan(
                     result.findings,
                     model_summary=result.summary,
-                    lines=CommentableLines.from_files(filtered.kept),
+                    lines=CommentableLines.from_files(
+                        diff for diff in filtered.kept if diff.path not in left_out
+                    ),
                     policy=review.policy,
                     posted_fingerprints=posted,
                     model_risk=result.risk,
                     checklist=result.checklist,
                     dismissed_by_verifier=result.rejected_by_verifier,
+                    not_reviewed=result.not_reviewed,
                 )
                 step.set(findings_total=len(result.findings), already_posted=len(posted))
             if not await _extend_lease(jobs, claimed):
@@ -388,6 +391,31 @@ def _pull_request_target(claimed: ClaimedJob, head_sha: str) -> PullRequestTarge
         repo=repo,
         number=payload.pr_number,
         head_sha=head_sha,
+    )
+
+
+NO_REVIEWABLE_FILES_SUMMARY = (
+    "Nothing to review: every changed file is a lockfile, a binary, minified or vendored."
+)
+
+
+async def _review(
+    gateway: LLMGateway, context: PullRequestContext, reviewable: Sequence[FileDiff]
+) -> ReviewResult:
+    """Review the files the filter kept: lockfiles and the like are never sent to the
+    model, and they do not count against its input budget.
+
+    With nothing left the model is not called at all."""
+    if not reviewable:
+        return ReviewResult(
+            summary=NO_REVIEWABLE_FILES_SUMMARY, findings=(), provider="none", model="none"
+        )
+    return await gateway.review(
+        ReviewRequest(
+            diff_text=select_files(context.diff_text, {diff.path for diff in reviewable}),
+            pr_title=context.title,
+            pr_description=context.description,
+        )
     )
 
 

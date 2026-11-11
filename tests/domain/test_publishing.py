@@ -13,9 +13,11 @@ from domain.models import (
 )
 from domain.publishing import (
     NO_ISSUES_LINE,
+    NOT_REVIEWED_HEADING,
     SUMMARY_FILES_SHOWN,
     SUMMARY_MARKER,
     SUMMARY_MAX_LENGTH,
+    SUMMARY_NOT_REVIEWED_SHOWN,
     CheckConclusion,
     CommentableLines,
     PublishPolicy,
@@ -572,3 +574,67 @@ def test_the_plain_summary_has_the_verdict_and_the_model_summary_without_markdow
     assert plan.plain_summary == "💬 Issues worth a look\n\nAdds sorting."
     clean = build_plan([], model_summary="", lines=lines())
     assert clean.plain_summary == "✅ No issues at or above the configured severity"
+
+
+# --- Files left out to fit the input budget (issue #88) -----------------------
+
+
+def test_the_summary_lists_the_files_that_were_not_reviewed() -> None:
+    plan = build_plan(
+        [finding()],
+        model_summary="Adds sorting.",
+        lines=lines(),
+        not_reviewed=("tests/test_users.py", "docs/users.md"),
+    )
+
+    assert "Reviewed 1 of 3 files; 2 skipped to fit the model's input budget." in plan.summary
+    section = plan.summary[plan.summary.index(NOT_REVIEWED_HEADING) :]
+    assert section.splitlines()[:4] == [
+        f"{NOT_REVIEWED_HEADING} (2)",
+        "",
+        "- `tests/test_users.py`",
+        "- `docs/users.md`",
+    ]
+    assert "### Files reviewed (1)" in plan.summary
+    assert "tests/test_users.py" not in plan.plain_summary
+
+
+def test_more_than_thirty_skipped_paths_are_cut_to_thirty_and_a_count() -> None:
+    skipped = tuple(f"tests/test_{n:02}.py" for n in range(SUMMARY_NOT_REVIEWED_SHOWN + 7))
+
+    summary = build_plan([], model_summary="", lines=lines(), not_reviewed=skipped).summary
+
+    section = summary[summary.index(NOT_REVIEWED_HEADING) :].splitlines()
+    assert section[0] == f"{NOT_REVIEWED_HEADING} (37)"
+    assert [line for line in section if line.startswith("- `")] == [
+        f"- `{path}`" for path in skipped[:SUMMARY_NOT_REVIEWED_SHOWN]
+    ]
+    assert section[-1] == "- …and 7 more"
+    assert "Reviewed 1 of 38 files; 37 skipped to fit the model's input budget." in summary
+
+
+def test_a_full_review_has_no_not_reviewed_section() -> None:
+    summary = build_plan([finding()], model_summary="Adds sorting.", lines=lines()).summary
+
+    assert NOT_REVIEWED_HEADING not in summary
+    assert "skipped to fit" not in summary
+
+
+def test_the_conclusion_follows_the_reviewed_part() -> None:
+    skipped = ("tests/test_users.py",)
+
+    clean = build_plan([], model_summary="", lines=lines(), not_reviewed=skipped)
+    with_finding = build_plan([finding()], model_summary="", lines=lines(), not_reviewed=skipped)
+
+    assert clean.conclusion is CheckConclusion.SUCCESS
+    assert with_finding.conclusion is CheckConclusion.NEUTRAL
+
+
+def test_the_summary_stays_under_the_check_run_cap_with_many_long_skipped_paths() -> None:
+    long_paths = tuple(f"{'deep/' * 200}file_{n}.py" for n in range(200))
+
+    summary = build_plan(
+        [], model_summary="x" * 4000, lines=lines(), not_reviewed=long_paths
+    ).summary
+
+    assert len(summary) <= SUMMARY_MAX_LENGTH < 65535

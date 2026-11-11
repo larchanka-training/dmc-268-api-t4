@@ -214,7 +214,8 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `llm.rule_screen.disabled` | warning | No TypeSafe key, or reflection off: rules checked by patterns only | `rules` |
 | `llm.rule_screen.finished` | info | The TypeSafe rule screen answered | `model`, `duration_ms`, `kept`, `dropped`, `unanswered`, `input_tokens`, `output_tokens` |
 | `llm.rule_screen.failed` | warning | The rule screen failed; patterns only | `rules`; `reason` for a TypeSafe error, `error_type` for any other exception |
-| `llm.input.too_large` | warning | The input is over the token budget; no provider is called | `input_tokens`, `max_input_tokens` |
+| `llm.input.too_large` | warning | The input is over the token budget and not a single file fits it (or the diff cannot be told apart by file); no provider is called | `input_tokens`, `max_input_tokens` |
+| `llm.input.degraded` | warning | The input is over the token budget: whole files were left out (tests, then docs, then the largest) and the rest is reviewed; the Check Run lists the paths | `kept` and `dropped` (files), `input_tokens` (the estimate before dropping), `max_input_tokens` |
 | `llm.reply.rejected` | warning | A reply was not valid review JSON; one corrective retry | `provider`, `model`, `reason` |
 | `llm.findings.trimmed` | warning | More findings than the limit; the most severe are kept | `provider`, `model`, `kept`, `trimmed` |
 | `llm.findings.dropped` | warning | Findings that failed the schema were dropped | `provider`, `model`, `dropped`, `dropped_fields` (failures per schema field, e.g. `{"severity": 1}`) |
@@ -531,7 +532,7 @@ review.job                         (root, worker; continues the webhook's trace)
 ├── build_context                  files, reviewable, skipped, chunks (parse and filter)
 ├── redact                         (planned) rules_fired, ruleset_version
 ├── gate                           (planned) result (proceed | superseded | quota | cancelled)
-├── llm_call                       model, input_tokens, output_tokens, retries
+├── llm_call                       model, input_tokens, output_tokens, retries, not_reviewed (files left out to fit the budget)
 │   ├── llm.rule_screen            rules_in, rules_dropped, outcome (TypeSafe; skipped without a key)
 │   ├── llm.attempt                one per request: provider, model, purpose (review | correction), outcome
 │   │   └── http.client POST …     (httpx, automatic)

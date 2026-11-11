@@ -1,6 +1,7 @@
 """worker.process_claimed_job with a ReviewStage: parsed diff → LLM → posted review."""
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 import pytest
 
@@ -529,3 +530,78 @@ async def test_the_skipped_check_run_carries_no_diff_or_pull_request_text() -> N
     [(_, plan, _)] = publisher.calls
     for sentinel in (DIFF_SENTINEL, TITLE_SENTINEL, DESCRIPTION_SENTINEL, "app/users.py"):
         assert sentinel not in plan.summary
+
+
+# --- The model gets the filtered diff; a partial review says so (issue #88) ---------------
+
+
+async def test_filtered_files_are_not_sent_to_the_model() -> None:
+    store = MemoryJobStore()
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
+    gateway = FakeGateway()
+
+    done = await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(gateway=gateway, publisher=FakePublisher()),
+    )
+
+    assert done is True
+    [request] = gateway.requests
+    assert DIFF_SENTINEL in request.diff_text
+    assert "package-lock.json" not in request.diff_text
+    assert request.diff_text.count("diff --git ") == 1
+
+
+async def test_a_pull_request_of_filtered_files_only_never_calls_the_model() -> None:
+    lockfile_only = GOOD_DIFF[GOOD_DIFF.index("diff --git a/package-lock.json") :]
+    store = MemoryJobStore()
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
+    gateway, publisher = FakeGateway(), FakePublisher()
+
+    done = await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(lockfile_only)),
+        store,
+        review=ReviewStage(gateway=gateway, publisher=publisher),
+    )
+
+    assert done is True
+    assert gateway.requests == []
+    [(_, plan)] = publisher.calls
+    assert plan.conclusion is CheckConclusion.SUCCESS
+    assert "### Files reviewed (0)" in plan.summary
+
+
+class PartialGateway(FakeGateway):
+    """Reviews the pull request but leaves app/users.py out, as an over-budget review does."""
+
+    async def review(self, request: ReviewRequest) -> ReviewResult:
+        result = await super().review(request)
+        return replace(result, not_reviewed=("app/users.py",))
+
+
+async def test_files_left_out_of_the_review_are_listed_in_the_check_run() -> None:
+    store = MemoryJobStore()
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
+    # A finding on a file the model did not see can only be a hallucination: not posted.
+    gateway = PartialGateway((finding("app/users.py", 2),))
+    publisher = FakePublisher()
+
+    done = await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(gateway=gateway, publisher=publisher),
+    )
+
+    assert done is True
+    [(_, plan)] = publisher.calls
+    assert plan.comments == ()
+    assert "Reviewed 0 of 1 files; 1 skipped to fit the model's input budget." in plan.summary
+    assert "### Not reviewed (input budget) (1)\n\n- `app/users.py`" in plan.summary
+    assert "### Files reviewed (0)" in plan.summary

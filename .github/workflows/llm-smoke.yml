@@ -15,7 +15,12 @@ on:
           - tests/fixtures/sql_injection.diff
           - test-prs-dataset/neg-whitelisted-order-by/change.diff
           - test-prs-dataset/hold-neg-safe-loaders-and-escaping/change.diff
+          - test-prs-dataset/fmt-wide-multi-file-change/change.diff
         default: tests/fixtures/sql_injection.diff
+      max_input_tokens:
+        description: Input budget for this run only (empty = the default). 2000 with the fmt-wide fixture shows the "Not reviewed (input budget)" section
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -44,6 +49,7 @@ jobs:
           LLM_PRIMARY_MODEL: ${{ vars.LLM_PRIMARY_MODEL }}
           LLM_PRIMARY_PROVIDER_ORDER: ${{ vars.LLM_PRIMARY_PROVIDER_ORDER }}
           LLM_TIMEOUT_SECONDS: "300"
+          LLM_MAX_INPUT_TOKENS: ${{ inputs.max_input_tokens }}
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
           LLM_PROMPT_VERSION: ${{ inputs.prompt_version != 'default' && inputs.prompt_version || '' }}
           FIXTURE: ${{ inputs.fixture || 'tests/fixtures/sql_injection.diff' }}
@@ -110,7 +116,9 @@ jobs:
                   print(line)
               elif "checked by the verifier and dismissed." in line:
                   print(line)
-              elif section.startswith("### Files reviewed"):
+              elif section.startswith(("### Files reviewed", "### Not reviewed")):
+                  print(line)
+              elif line.startswith("Reviewed ") and "skipped to fit the model's input budget" in line:
                   print(line)
               else:
                   print(f"{line[:2] if line.startswith('- ') else ''}<{len(line)} chars of model text>")

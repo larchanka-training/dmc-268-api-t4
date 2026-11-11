@@ -95,3 +95,5 @@ class ReviewResult:
     # publishing then falls back to the risk the findings imply.
     risk: RiskLevel | None = None
     checklist: tuple[str, ...] = ()
+    # Paths left out of the review so the rest fits the model's input budget (issue #88).
+    not_reviewed: tuple[str, ...] = ()
