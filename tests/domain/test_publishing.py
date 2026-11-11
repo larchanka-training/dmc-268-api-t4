@@ -28,6 +28,8 @@ from domain.publishing import (
     comment_message,
     fingerprint,
     fingerprint_in,
+    suggestion_candidates,
+    with_suggestions,
 )
 
 PATCH = """@@ -10,4 +10,5 @@ def list_users(conn, sort):
@@ -572,3 +574,73 @@ def test_the_plain_summary_has_the_verdict_and_the_model_summary_without_markdow
     assert plan.plain_summary == "💬 Issues worth a look\n\nAdds sorting."
     clean = build_plan([], model_summary="", lines=lines())
     assert clean.plain_summary == "✅ No issues at or above the configured severity"
+
+
+# --- Candidates for the suggestion pass (issue #88) ----------------------------
+
+
+def test_only_findings_that_will_be_posted_are_candidates() -> None:
+    posted_before = finding(12, message="Already posted on this pull request.")
+    will_post = finding(12, message="Will be posted.")
+    anchored = lines().text_at("app/users.py", DiffSide.NEW, 12) or ""
+
+    candidates = suggestion_candidates(
+        [
+            will_post,
+            finding(99, message="Outside the diff."),
+            finding(12, severity=Severity.LOW, message="Below the threshold."),
+            posted_before,
+        ],
+        lines=lines(),
+        posted_fingerprints=frozenset({fingerprint(posted_before, anchored)}),
+    )
+
+    assert candidates == (will_post,)
+
+
+def test_findings_with_a_suggestion_or_on_the_old_side_are_not_candidates() -> None:
+    has_fix = finding(
+        12, message="Has a fix.", suggestion=FindingSuggestion(before=("a",), after=("b",))
+    )
+    old_side = finding(11, side=DiffSide.OLD, message="On a removed line.")
+    bare = finding(13, message="No fix yet.")
+
+    assert suggestion_candidates([has_fix, old_side, bare], lines=lines()) == (bare,)
+
+
+def test_at_most_ten_candidates_most_severe_first() -> None:
+    medium = [finding(12, severity=Severity.MEDIUM, message=f"Medium {n}.") for n in range(8)]
+    critical = [finding(13, severity=Severity.CRITICAL, message=f"Critical {n}.") for n in range(6)]
+
+    candidates = suggestion_candidates([*medium, *critical], lines=lines())
+
+    assert len(candidates) == 10
+    assert [c.severity for c in candidates] == [Severity.CRITICAL] * 6 + [Severity.MEDIUM] * 4
+
+
+def test_findings_over_the_comment_cap_are_not_candidates() -> None:
+    findings = [finding(12, message=f"Finding {n}.") for n in range(5)]
+
+    candidates = suggestion_candidates(
+        findings, lines=lines(), policy=PublishPolicy(max_comments=2)
+    )
+
+    assert len(candidates) == 2
+
+
+def test_suggested_findings_replace_their_candidates_in_place() -> None:
+    first, second, third = (finding(12, message=f"Finding {n}.") for n in range(3))
+    fixed = finding(
+        12, message="Finding 1.", suggestion=FindingSuggestion(before=("a",), after=("b",))
+    )
+
+    merged = with_suggestions([first, second, third], [second], [fixed])
+
+    assert merged == (first, fixed, third)
+
+
+def test_a_new_suggestion_does_not_change_the_fingerprint() -> None:
+    bare = finding(12)
+    fixed = finding(12, suggestion=FindingSuggestion(before=("a",), after=("b",)))
+
+    assert fingerprint(bare, "code") == fingerprint(fixed, "code")

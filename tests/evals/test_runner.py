@@ -106,3 +106,69 @@ async def test_no_message_text_reaches_the_results(sql_case: Case) -> None:
     assert VALID_FINDING["message"] not in rendered
     assert "whitelist the column names" not in rendered
     assert FAKE_KEY_A not in rendered
+
+
+# --- The suggestion pass and the message length (issue #88) ----------------------------------
+
+QUERY = '    rows = conn.execute(f"SELECT id, name, email FROM users ORDER BY {sort}").fetchall()'
+BARE_FINDING = {**VALID_FINDING, "suggestion": None}
+
+
+def suggestion_reply(before: str) -> httpx.Response:
+    entry = {"id": 1, "suggestion": {"before": [before], "after": ["    rows = []"]}}
+    return chat_response(json.dumps({"suggestions": [entry]}))
+
+
+async def test_the_suggestion_pass_runs_on_findings_without_a_fix(sql_case: Case) -> None:
+    runner = runner_for(chat_response(review_json(BARE_FINDING)), suggestion_reply(QUERY))
+
+    record = await runner.run(sql_case)
+
+    assert (record.with_suggestion, record.applicable_suggestions) == (1, 1)
+    assert record.llm_calls == 2
+    assert (record.score.tp, record.score.dropped) == (1, 0)
+    assert record.message_lengths == (len(VALID_FINDING["message"]),)
+
+
+async def test_a_first_pass_suggestion_that_misses_the_diff_is_not_applicable(
+    sql_case: Case,
+) -> None:
+    record = await runner_for(chat_response(review_json(VALID_FINDING))).run(sql_case)
+
+    assert (record.with_suggestion, record.applicable_suggestions) == (1, 0)
+
+
+async def test_a_failed_suggestion_pass_still_scores_the_review(sql_case: Case) -> None:
+    runner = runner_for(chat_response(review_json(BARE_FINDING)), httpx.Response(503))
+
+    record = await runner.run(sql_case)
+
+    assert record.score.status is RunStatus.OK
+    assert (record.score.tp, record.with_suggestion) == (1, 0)
+
+
+async def test_the_suggestion_pass_can_be_switched_off(sql_case: Case) -> None:
+    settings = LLMSettings.from_env({**ENV, "LLM_SUGGESTION_PASS": "false"})
+    transport = httpx.MockTransport(replies(chat_response(review_json(BARE_FINDING))))
+
+    record = await LiveRunner(settings, transport=transport).run(sql_case)
+
+    assert (record.llm_calls, record.with_suggestion) == (1, 0)
+
+
+async def test_the_summary_reports_suggestions_and_the_median_message_length(
+    sql_case: Case,
+) -> None:
+    from evals.report import render_summary, results_json
+
+    runner = runner_for(chat_response(review_json(BARE_FINDING)), suggestion_reply(QUERY))
+    record = await runner.run(sql_case)
+
+    summary = render_summary([record])
+    corpus = results_json([record])["corpus"]
+
+    assert "- findings with a suggestion GitHub can apply: 100.0% (1 of 1)" in summary
+    assert f"- median message length: {len(VALID_FINDING['message'])} characters" in summary
+    assert corpus["applicable_suggestions"] == 1
+    assert corpus["median_message_length"] == len(VALID_FINDING["message"])
+    assert "rows = []" not in summary + json.dumps(results_json([record]))

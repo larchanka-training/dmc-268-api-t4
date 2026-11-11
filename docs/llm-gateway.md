@@ -16,7 +16,7 @@ ReviewService (позже)
 FallbackLLMGateway                                   adapters/llm/gateway.py
       │  для каждого провайдера по порядку:
       │    review_with_provider()
-      │      build_messages()  ── system: prompts/review_v2.md (LLM_PROMPT_VERSION)
+      │      build_messages()  ── system: prompts/review_v3.md (LLM_PROMPT_VERSION)
       │                        └─ user: title/description/diff внутри
       │                                 <<<UNTRUSTED_DIFF>>> … <<<END_UNTRUSTED_DIFF>>>
       │      provider.complete(messages)
@@ -44,7 +44,8 @@ OpenAICompatibleProvider (fallback: ollama, без ключей, без Authoriz
 | `adapters/llm/config.py` | `LLMSettings.from_env()`: разбор и проверка env |
 | `adapters/llm/keys.py` | `KeyPool` (round-robin, cooldown, отключение ключей) и `mask_key` |
 | `adapters/llm/openai_compat.py` | HTTP к `/chat/completions`, ротация ключей, коды ошибок |
-| `adapters/llm/prompt.py`, `prompts/review_v2.md`, `prompts/review_v1.md`, `prompts/summary_v1.md` | системные промпты (v2 по умолчанию, v1 для старых задач, summary-агент режима `file`), разметка untrusted-данных |
+| `adapters/llm/prompt.py`, `prompts/review_v3.md`, `prompts/review_v2.md`, `prompts/review_v1.md`, `prompts/summary_v1.md` | системные промпты (v3 по умолчанию, v2 и v1 для сравнения и старых задач, summary-агент режима `file`), разметка untrusted-данных |
+| `adapters/llm/suggestions.py`, `prompts/suggestion_v1.md` | проход за suggestion (#88): промпт, разбор ответа, проверка `before` по строкам diff; сам вызов — `FallbackLLMGateway.suggest` |
 | `adapters/llm/schema.py` | Pydantic `ReviewOut`/`FindingOut`, отбраковка невалидных finding, мягкий разбор `risk`/`checklist` (схема v2), `to_domain()` |
 | `adapters/llm/gateway.py` | ревью одним провайдером с повтором при плохом JSON, fallback между провайдерами |
 | `adapters/llm/factory.py` | `build_gateway(settings)` |
@@ -79,7 +80,8 @@ result = await gateway.review(ReviewRequest(diff_text=diff, pr_title=title, pr_d
 | `LLM_TEMPERATURE` | `0.0` | от `0` до `2` |
 | `LLM_JSON_MODE` | `true` | добавляет в запрос `response_format: {"type": "json_object"}` |
 | `LLM_MAX_TOKENS` | `16384` | лимит ответа, отправляется как `max_tokens` в каждом запросе, `> 0`. Без него часть провайдеров резервирует под ответ всё окно модели и отклоняет запрос (так было с `qwen3-coder-30b-a3b` на Eurouter). При 4096 JSON-ответ на большой PR обрывался на середине и ревью падало (#55) |
-| `LLM_PROMPT_VERSION` | `v2` | `v1` или `v2`: системный промпт и схема ответа. v2 добавляет `risk` и `checklist` и на 25% короче (#55) |
+| `LLM_PROMPT_VERSION` | `v3` | `v1`, `v2` или `v3`: системный промпт и схема ответа. v2 добавляет `risk` и `checklist` и на 25% короче (#55); v3 = v2 плюс правило короткого `message` (не больше трёх предложений, цель до 300 символов; #88) |
+| `LLM_SUGGESTION_PASS` | `true` | проход за suggestion (#88): один дополнительный вызов на job для находок, которые будут опубликованы без suggestion (не больше 10). `false` выключает проход, находки публикуются как после первого прохода |
 | `LLM_REVIEW_SCOPE` | `pr` | `pr`: один вызов на весь diff; `file`: вызов на каждый файл (не больше 4 одновременно) и summary-агент. На eval `file` не дал прироста recall сверх шума при ~5× входных токенов (#55) |
 | `LLM_MAX_INPUT_TOKENS` | `32000` | жёсткий бюджет входа (рекомендация Миши для `qwen3-coder`), `> 0`. Оценка: символы всех сообщений / 3 (с запасом, код в среднем 3.5-4 символа на токен). Больше бюджета: `LLMInputTooLargeError`, провайдер не вызывается. Уложить контекст в бюджет должен сборщик контекста (шаг `BUILD_CONTEXT`), воркер переводит эту ошибку в `skip_diff_too_large` |
 | `LLM_PRIMARY_PROVIDER_ORDER` | пусто | провайдеры Eurouter через запятую, например `scaleway,ovhcloud`. Уходит в запрос как `provider: {order, allow_fallbacks: false}`: сначала первый, потом следующие, других не берём. Нужен, потому что часть провайдеров из каталога модель отклоняет (у `qwen3-coder-30b-a3b` так делает GreenPT), а без закрепления Eurouter иногда выбирает именно их. Пусто = маршрутизация Eurouter по умолчанию |

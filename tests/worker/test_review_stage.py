@@ -1,6 +1,7 @@
 """worker.process_claimed_job with a ReviewStage: parsed diff → LLM → posted review."""
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 import pytest
 
@@ -20,6 +21,7 @@ from domain.models import (
     DiffSide,
     Finding,
     FindingPosition,
+    FindingSuggestion,
     ReviewResult,
     RiskLevel,
     Severity,
@@ -529,3 +531,98 @@ async def test_the_skipped_check_run_carries_no_diff_or_pull_request_text() -> N
     [(_, plan, _)] = publisher.calls
     for sentinel in (DIFF_SENTINEL, TITLE_SENTINEL, DESCRIPTION_SENTINEL, "app/users.py"):
         assert sentinel not in plan.summary
+
+
+# --- The suggestion pass (issue #88) ----------------------------------------------------
+
+
+class FakeSuggestionWriter:
+    def __init__(self, error: Exception | None = None, drop_one: bool = False) -> None:
+        self.error = error
+        self.drop_one = drop_one
+        self.calls: list[tuple[ReviewRequest, tuple[Finding, ...]]] = []
+
+    async def suggest(
+        self, request: ReviewRequest, findings: Sequence[Finding]
+    ) -> tuple[Finding, ...]:
+        self.calls.append((request, tuple(findings)))
+        if self.error is not None:
+            raise self.error
+        fixed = tuple(
+            replace(
+                found,
+                suggestion=FindingSuggestion(before=(DIFF_SENTINEL,), after=("fixed",)),
+            )
+            for found in findings
+        )
+        return fixed[1:] if self.drop_one else fixed
+
+
+async def _review_with(
+    writer: FakeSuggestionWriter | None, findings: tuple[Finding, ...]
+) -> tuple[bool, FakePublisher]:
+    store = MemoryJobStore()
+    await enqueue(store, make_payload())
+    claimed = await claim(store)
+    publisher = FakePublisher()
+    done = await process_claimed_job(
+        claimed,
+        FakeGitProvider(make_context(GOOD_DIFF)),
+        store,
+        review=ReviewStage(gateway=FakeGateway(findings), publisher=publisher, suggestions=writer),
+    )
+    return done, publisher
+
+
+async def test_the_suggestion_pass_gets_only_the_findings_that_will_be_posted() -> None:
+    writer = FakeSuggestionWriter()
+    posted, outside = finding("app/users.py", 2), finding("app/users.py", 40)
+    quiet = replace(finding("app/users.py", 3), severity=Severity.LOW)
+
+    done, publisher = await _review_with(writer, (posted, outside, quiet))
+
+    assert done is True
+    [(request, asked)] = writer.calls
+    assert asked == (posted,)
+    assert DIFF_SENTINEL in request.diff_text
+    [(_, plan)] = publisher.calls
+    [comment] = plan.comments
+    assert comment.finding.suggestion is not None
+    assert "```suggestion\nfixed\n```" in comment.body
+
+
+async def test_no_candidates_means_the_suggestion_pass_is_not_called() -> None:
+    writer = FakeSuggestionWriter()
+
+    done, publisher = await _review_with(writer, (finding("app/users.py", 40),))
+
+    assert done is True
+    assert writer.calls == []
+    assert publisher.calls[0][1].comments == ()
+
+
+@pytest.mark.parametrize(
+    "writer",
+    [FakeSuggestionWriter(error=RuntimeError("boom")), FakeSuggestionWriter(drop_one=True)],
+    ids=["raises", "wrong length"],
+)
+async def test_a_failed_suggestion_pass_publishes_the_findings_as_they_were(
+    writer: FakeSuggestionWriter, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("WARNING"):
+        done, publisher = await _review_with(
+            writer, (finding("app/users.py", 2), finding("app/users.py", 3))
+        )
+
+    assert done is True
+    [(_, plan)] = publisher.calls
+    assert [c.finding.suggestion for c in plan.comments] == [None, None]
+    [failed] = log_events(caplog, "job.suggestions.failed")
+    assert failed.findings == 2
+
+
+async def test_without_a_suggestion_writer_findings_are_posted_as_the_model_left_them() -> None:
+    done, publisher = await _review_with(None, (finding("app/users.py", 2),))
+
+    assert done is True
+    assert publisher.calls[0][1].comments[0].finding.suggestion is None
