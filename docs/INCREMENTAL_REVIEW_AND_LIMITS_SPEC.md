@@ -126,18 +126,18 @@ The module docstring still says the worker passes an empty `posted_fingerprints`
 
 No new per-PR table: the state is derived from the PR's jobs, read through the existing
 `ix_pr_review_jobs_pr_history` index (`alembic/versions/0001_review_jobs.py:156-159`).
-Migration numbers are not fixed here. PR #64 (open) already adds
-`alembic/versions/0003_pg_stat_statements.py`, so the two migrations of this document take
-the next free revisions after the migrations of PR #64: `0004_incremental_review` and
-`0005_llm_usage_daily` if #64 lands first. #54 rebases on whatever is merged by then and
-numbers them after the last merged revision. Below they are named by suffix only.
+Main already holds `0001`-`0005` (`0003_pg_stat_statements`, PR #64; `0004_trace_context`,
+PR #75; `0005_periodic_task_runs`), so the two migrations of this document are
+`0006_incremental_review` and `0007_llm_usage_daily`. If another migration is merged before
+#54, #54 rebases and takes the next free revisions after the last merged one. Below they
+are named by suffix only.
 
 Migration **`incremental_review`** adds to `pr_review_jobs`:
 
 | Column | Type | Meaning |
 | :--- | :--- | :--- |
 | `reviewed_head_sha` | `CHAR(40) NULL` | The SHA the review actually ran on (`context.head_sha`), set on `COMPLETED` and on the two "head counts as reviewed" skips (§2.2). Differs from `head_sha` when a push landed between enqueue and fetch |
-| `reviewed_base_sha` | `CHAR(40) NULL` | The PR base SHA at that moment |
+| `reviewed_base_sha` | `CHAR(40) NULL` | The base SHA of the fetched PR at that moment; set together with `reviewed_head_sha` |
 | `review_mode` | `VARCHAR(16) NULL` | `full` or `incremental` |
 | `delta_from_sha` | `CHAR(40) NULL` | For `incremental`: the `last_reviewed_sha` the delta started from |
 | `full_reason` | `VARCHAR(32) NULL` | For `full`: why (§3, steps 3 and 6) |
@@ -173,15 +173,16 @@ How a job that ends without a review sets the state:
 
 | `error_kind` | Job status | PR state | `reviewed_head_sha` |
 | :--- | :--- | :--- | :--- |
-| `skip_already_reviewed` | `SKIPPED` | `REVIEWED` | set to `H`: the head counts as reviewed |
-| `skip_no_reviewable_files` | `SKIPPED` | `REVIEWED` | set to `H`: the head counts as reviewed |
+| `skip_already_reviewed` | `SKIPPED` | `REVIEWED` | set to `H` (and `reviewed_base_sha`): the head counts as reviewed |
+| `skip_no_reviewable_files` | `SKIPPED` | `REVIEWED` | set to `H` (and `reviewed_base_sha`): the head counts as reviewed |
 | `skip_diff_too_large` | `SKIPPED` | `BLOCKED` | NULL |
 | `skip_pr_budget` | `SKIPPED` | `BLOCKED` | NULL |
+| `skip_job_budget` | `SKIPPED` | `BLOCKED` | NULL |
 | `quota_exhausted` | `SKIPPED` | `BLOCKED` | NULL |
 
 So `last_reviewed` (§2.1) is the newest job with `reviewed_head_sha IS NOT NULL` and status
 `COMPLETED`, or `SKIPPED` with one of the first two kinds. "Skipped by a limit" below means
-one of the last three.
+one of the last four.
 
 ### 2.3 Transitions
 
@@ -191,8 +192,8 @@ one of the last three.
 | T2 | `NEW` | `synchronize`, `reopened`, `edited` with `changes.base` | — | `STALE` | full (`first_review`) |
 | T3 | `REVIEWED`, `BLOCKED` | `synchronize` | `last_reviewed_sha` is an ancestor of the new head | `STALE` | incremental |
 | T4 | `REVIEWED`, `BLOCKED` | `synchronize` (force-push) | `last_reviewed_sha` is not an ancestor | `STALE` | full (`force_push`) |
-| T5 | `REVIEWED`, `BLOCKED` | `edited` with `changes.base` | base branch changed | `STALE` | full (`base_changed`) |
-| T6 | `REVIEWED` | `reopened`, `ready_for_review` | head equals `last_reviewed_sha` | `REVIEWED` | none: `skip_already_reviewed` |
+| T5 | `REVIEWED`, `BLOCKED` | `edited` with `changes.base`; or `reopened`, `ready_for_review` with the base changed | base changed per §3 step 3a (`base_ref`, or `reviewed_base_sha` when the head did not move); checked before the same-head skip | `STALE` | full (`base_changed`), also when the head equals `last_reviewed_sha` |
+| T6 | `REVIEWED` | `reopened`, `ready_for_review` | head equals `last_reviewed_sha`, base unchanged | `REVIEWED` | none: `skip_already_reviewed` |
 | T7 | `REVIEWED` | `reopened`, `ready_for_review` | head moved | `STALE` | as `synchronize` (T3, T4) |
 | T8 | `BLOCKED` | `reopened`, `ready_for_review` | — | `STALE` | as `synchronize` (T3, T4); the gate (§6.4) runs again and blocks again while the limit holds |
 | T9 | `NEW`, `REVIEWED`, `BLOCKED` | Re-run on the AI review Check Run ([I4]) | PR open | `STALE` | full (`manual_rerun`), even when the head equals `last_reviewed_sha` |
@@ -230,9 +231,9 @@ stateDiagram-v2
     BLOCKED --> STALE: T3 synchronize, ancestor (incremental)
     REVIEWED --> STALE: T4 synchronize, force-push (full)
     BLOCKED --> STALE: T4 synchronize, force-push (full)
-    REVIEWED --> STALE: T5 edited base (full)
-    BLOCKED --> STALE: T5 edited base (full)
-    REVIEWED --> REVIEWED: T6 reopened / ready_for_review, same head (no job)
+    REVIEWED --> STALE: T5 base changed, same or new head (full)
+    BLOCKED --> STALE: T5 base changed, same or new head (full)
+    REVIEWED --> REVIEWED: T6 reopened / ready_for_review, same head and base (no job)
     REVIEWED --> STALE: T7 reopened / ready_for_review, head moved
     BLOCKED --> STALE: T8 reopened / ready_for_review (gate again)
     NEW --> STALE: T9 Re-run (full, manual_rerun)
@@ -305,10 +306,16 @@ review chosen in 3a skips steps 4-6.
    | :--- | :--- |
    | `event_action = 'rerun'` (manual re-run, [I4]) | full, `manual_rerun` |
    | No `last_reviewed` | full, `first_review` |
+   | `event_action = 'edited'`; or the job's `base_ref` differs from `last_reviewed`'s `base_ref`; or `last_reviewed_sha == H` and the base SHA of the fetched PR differs from `last_reviewed.reviewed_base_sha` | full, `base_changed` |
    | `last_reviewed_sha == H` | terminate `SKIPPED`, `skip_already_reviewed`, post nothing, `reviewed_head_sha = H` (§2.2) |
-   | The job's `base_ref` differs from `last_reviewed`'s `base_ref`, or `event_action = 'edited'` | full, `base_changed` |
 
    Otherwise go on to step 4.
+
+   `base_changed` comes before the same-head skip: a PR retargeted to another base keeps
+   its head SHA, but its PR diff is a different one. The base SHA is compared only when the
+   head did not move. When it did, the base branch advancing under the PR is normal, and a
+   merge of it into the PR branch is handled by step 5; comparing the SHA there would turn
+   most pushes into full reviews.
 4. **Fetch the delta**:
 
    ```
@@ -494,12 +501,18 @@ config resolver lands. Scope of a future override: a repository may only lower a
 | L13 | In-flight jobs per installation | 3 | — (exists) | claim (`adapters/db/repository.py:165-167`) | Jobs wait in the queue | — | — |
 | L14 | Debounce of `synchronize` | 20 s | `REVIEW_DEBOUNCE_SECONDS` | enqueue (§2.4, [I3]) | Fewer reviews on push bursts | — | — |
 | L15 | Comments per review | 25 | — (exists) | `domain/publishing.py:88` | The rest counted in the Check Run | — | `max_comments_per_review` |
+| L16 | Tokens per job, all provider calls | 193 536 | `REVIEW_JOB_TOKEN_CAP` | gate before every provider call (§6.4) | Skipped Check Run "this review's token limit reached" | `skip_job_budget` | — |
 
 Defaults reasoning: L9 is about six reviews of a PR at both the 32 000 input and the
 16 384 reply cap, or about thirty reviews of the size the 29-file eval bundle used
 (~8 000 input and ~2 500 output tokens, `docs/specs/llm-gateway.md` § #55); L11 is the configuration.md default; L3 and L4 are the configuration.md defaults;
 L14 covers a typical `git push` burst of a rebase plus a fix-up without delaying a single
-push noticeably.
+push noticeably. L16 is (L7 + L8) × 4 = 48 384 × 4: the most provider calls one job makes in
+the default `LLM_REVIEW_SCOPE=pr` is 4, a first pass and a corrective retry
+(`adapters/llm/gateway.py:86-102`) on the primary and again on the fallback provider
+(`adapters/llm/gateway.py:361-388`; `adapters/llm/factory.py:25-27`). In `LLM_REVIEW_SCOPE=file`
+a job can make up to 4 calls per file plus 2 summary calls (`adapters/llm/gateway.py:276-358`);
+L16 is not raised for it, it is the limit that stops such a job.
 
 ### 6.2 File filters
 
@@ -526,7 +539,8 @@ Check Run listing the skipped counts (no paths of more than 30 files).
    corrective retry, per-file calls, summary agent). Source: the `usage` the provider
    already logs (`adapters/llm/openai_compat.py:164-186`). A reply without `usage` counts
    the gateway's estimate for input (`adapters/llm/prompt.py:216-220`) and 0 for output,
-   and logs `llm.usage.missing`.
+   and logs `llm.usage.missing`. The gateway also reports each call's usage to the gate as
+   it finishes (§6.4, `CallBudget.settle`), so the per-call checks see the job's own spend.
 2. **[L-T2]** TypeSafe (rule screen, verifier) tokens are reported separately
    (`typesafe_input_tokens`, `typesafe_output_tokens`) and do not count against L9 or L11:
    another provider and another bill.
@@ -545,7 +559,7 @@ Check Run listing the skipped counts (no paths of more than 30 files).
      updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
      PRIMARY KEY (installation_id, usage_date)
    );
-   -- on job completion or failure after an LLM call
+   -- on job completion, failure or skip after an LLM call
    INSERT INTO llm_usage_daily AS u (installation_id, usage_date, input_tokens, output_tokens, reviews)
    VALUES (:inst, (now() AT TIME ZONE 'UTC')::date, :in, :out, 1)
    ON CONFLICT (installation_id, usage_date) DO UPDATE
@@ -554,7 +568,8 @@ Check Run listing the skipped counts (no paths of more than 30 files).
          reviews = u.reviews + 1, updated_at = now();
    ```
 
-   A failed job that called the LLM is charged too: the tokens were spent.
+   A failed job that called the LLM, or one stopped mid-way by the gate (§6.4), is charged
+   too: the tokens were spent.
 4. **[L-T4]** Reset: the day is the UTC date of the charge; the budget resets at 00:00 UTC.
    `reset_at` = next 00:00 UTC.
 5. **[L-T5]** Installation = organisation or personal account the App is installed on
@@ -567,21 +582,67 @@ Check Run listing the skipped counts (no paths of more than 30 files).
 ### 6.4 The gate
 
 A new `GATE` step (the step exists in `domain/jobs.py:94`), after the filters and the
-mode choice, before the LLM call:
+mode choice, before the LLM call (§3 step 8), and a per-call check repeated before every
+later provider call of the job.
+
+**The call estimate.** `call_estimate = estimated input tokens of that call
+(adapters/llm/prompt.py:216-220) + LLM_MAX_TOKENS` (L8). The reply reserve is the full
+L8, not a typical reply: the bound below needs every call's estimate to be at least what
+the call can spend.
+
+**The job's own spend.** `job_used` = usage of the job's finished calls (L-T1, settled as
+each call returns) plus `call_estimate` of its calls still in flight. In
+`LLM_REVIEW_SCOPE=file` up to 4 calls run at once (`adapters/llm/gateway.py:52`); each is
+counted at its estimate from the moment it is admitted, an in-memory reservation inside
+the job, until its usage replaces it.
+
+**Before the first call** (the `GATE` step):
 
 1. Still the newest job of the PR: `extend_lease` succeeds (today's check, made explicit).
-2. `estimate = estimated input tokens of the review input + REVIEW_OUTPUT_RESERVE` (4 096).
-3. L10: reviews of this PR < limit. A review is a job of the PR that is `COMPLETED`, or
+2. L10: reviews of this PR < limit. A review is a job of the PR that is `COMPLETED`, or
    `FAILED` after an LLM call (it spent tokens, [L-T3]). `SKIPPED` jobs of any kind,
    `SUPERSEDED` jobs and jobs that failed before the LLM call do not count.
-4. L9: `pr_tokens_used + estimate <= REVIEW_PR_TOKEN_CAP`.
-5. L11: `today.input + today.output + estimate <= budget × (1 + buffer)`.
-6. Any failure → skipped Check Run (§8.3), job `SKIPPED` with the `error_kind` of §6.1,
-   `skipped` counter +1 in `llm_usage_daily`, event `job.gate.blocked`.
+3. The per-call check below for the first call.
 
-**Race:** up to 3 jobs of one installation pass the gate at once (L13), so the day can
-overshoot by at most 3 × (L7 + L8) ≈ 145 000 tokens. Accepted and bounded; the soft buffer
-absorbs it. A reservation scheme is listed in §9.
+**Before every provider call** (first pass, corrective retry, fallback provider, per-file
+call, summary agent), through a `CallBudget` port the worker hands to the gateway
+(`admit(call_estimate)` before the call, `settle(usage)` after it):
+
+1. From the second call on: `extend_lease` succeeds, so a superseded job stops before its
+   next call, not only at the next renewal of today's code (§1.2).
+2. L16: `job_used + call_estimate <= REVIEW_JOB_TOKEN_CAP`.
+3. L9: `pr_tokens_used + job_used + call_estimate <= REVIEW_PR_TOKEN_CAP`, with
+   `pr_tokens_used` read from the database at this check (charged jobs of the PR).
+4. L11: `today.input + today.output + job_used + call_estimate <= budget × (1 + buffer)`,
+   with `today` read from `llm_usage_daily` at this check.
+
+**On failure:**
+
+- Before the first call → skipped Check Run (§8.3), job `SKIPPED` with the `error_kind` of
+  §6.1, `skipped` counter +1 in `llm_usage_daily`, event `job.gate.blocked`.
+- Before a later call → the gateway raises, the job's calls in flight finish and are
+  settled, nothing is posted (partial findings are dropped), the job ends `SKIPPED` with
+  the `error_kind` of the limit that failed, its spent tokens are charged ([L-T3]), the
+  skipped Check Run and `job.gate.blocked` as above. A lost lease ends the job as today
+  (the newer job owns the PR), with the spent tokens charged.
+
+**Overshoot.** Usage reaches `llm_usage_daily` only when a job ends ([L-T3]), so a job sees
+the spend of other in-flight jobs of the installation only after they end. At most 3 jobs
+of one installation run at once (L13). Take `R` = `budget × (1 + buffer)` minus the day's
+charged usage when they start. Every call check keeps each job's own spend within
+`min(L16, R)`, so the three together spend at most `3 × min(L16, R)` and the day ends at most
+`2 × min(L16, R) <= 2 × L16 = 387 072` tokens above `budget × (1 + buffer)`, that is above
+1 100 000 with the defaults. The per-PR cap L9 has no such overshoot: jobs of one PR do not
+run together (supersede, §1.2; the lease check above stops a superseded one before its next
+call), so L9 can be passed only by the call a superseded job already had in flight:
+at most L7 + L8 = 48 384 tokens (four in `LLM_REVIEW_SCOPE=file`).
+
+The bound assumes the input estimate (characters / 3) is not below the provider's count;
+an underestimate adds its error per call. `llm.response.usage` against the estimate shows
+the error; a later fix is a safety factor on the estimate. The soft buffer (L12, 100 000)
+does not absorb the worst case; it covers the common case where jobs spend far less than
+L16 (~10 000 tokens for a review of the eval bundle size). A tighter bound needs shared
+reservations, §9 Q3.
 
 ---
 
@@ -610,9 +671,9 @@ absorbs it. A reservation scheme is listed in §9.
 ### 8.1 #54: backend implementation
 
 1. Migration `incremental_review`: the `pr_review_jobs` columns of §2.1 and
-   `pr_review_comments.defect_key` ([D2]) and `pr_review_comments.anchor_digest` ([I5]). Revision number: the next free one after the
-   migrations of PR #64 (§2.1); rebase on whatever is merged.
-2. Migration `llm_usage_daily` (§6.3), the revision after it.
+   `pr_review_comments.defect_key` ([D2]) and `pr_review_comments.anchor_digest` ([I5]).
+   Revision `0006` (§2.1), or the next free one if main moved; rebase on whatever is merged.
+2. Migration `llm_usage_daily` (§6.3), the revision after it (`0007`).
 3. Ingest: [I1] `edited` with `changes.base`, [I2] `closed` cancel path, [I3] debounce; the
    memory twin (`adapters/jobs/memory.py`) in the same order.
 4. GitHub client: `compare(base_sha, head_sha)` returning `status` and the diff text
@@ -624,11 +685,12 @@ absorbs it. A reservation scheme is listed in §9.
 6. Filters: `generated`, `too_large` reasons; LLM input from kept files only ([L-F1]);
    `skip_no_reviewable_files` ([L-F2]).
 7. Gateway: `ReviewResult.usage` ([L-T1], [L-T2]).
-8. Gate step with L9, L10, L11 and the skipped Check Runs of §8.3; `llm_usage_daily`
-   charging ([L-T3]); the `SKIPPED` status for every `skip_*` and `quota_exhausted` kind
+8. Gate step with L9, L10, L11, L16, the `CallBudget` port (`domain/ports.py`) checked by
+   the gateway before every provider call (§6.4), and the skipped Check Runs of §8.3;
+   `llm_usage_daily` charging ([L-T3]); the `SKIPPED` status for every `skip_*` and `quota_exhausted` kind
    (today `skip_diff_too_large` ends `FAILED`, §1.5). The closed `error_kind` list of
-   `docs/PIPELINE_SPEC.md` §5 gets `skip_pr_budget` and `skip_already_reviewed`, both
-   `SKIPPED`; `skip_no_reviewable_files` is there already (`docs/PIPELINE_SPEC.md:257`) and
+   `docs/PIPELINE_SPEC.md` §5 gets `skip_pr_budget`, `skip_job_budget` and
+   `skip_already_reviewed`, all `SKIPPED`; `skip_no_reviewable_files` is there already (`docs/PIPELINE_SPEC.md:257`) and
    stays. The same PR adds the PR-state mapping of §2.2 to PIPELINE_SPEC.
 9. Dedup by fingerprint or defect key ([D2], [D3]).
 10. Check Run texts of §8.3, including the incremental header and "earlier commits" line.
@@ -636,7 +698,8 @@ absorbs it. A reservation scheme is listed in §9.
     `adapters/llm/config.py`; documented in `docs/configuration.md`.
 12. Events (AGENTS.md rule 9, `docs/observability.md` Events table): `job.mode.chosen`
     (`mode`, `full_reason`, `delta_files`, `pr_files`), `job.gate.blocked` (`limit`,
-    `used`, `estimate`, `limit_value`), `llm.usage.missing`; fields counts only.
+    `used`, `estimate`, `limit_value`, `call_index`: 0 before the first call),
+    `llm.usage.missing`; fields counts only.
 13. API of §8.3 and `docs/openapi.yaml` in the same PR (`docs/PIPELINE_SPEC.md:465-477`).
 14. Fix the stale docstring `domain/publishing.py:17`.
 15. Manual re-run [I4]: the `check_run` `rerequested` route in `api/webhooks/github.py`,
@@ -685,8 +748,9 @@ PostgreSQL as `tests/test_e2e_*.py`).
 24. Chaos: worker killed after the LLM call, before posting → retry does not double-charge
     the day (usage written with the status change, [L-T3]) and does not double-post
     (`docs/PIPELINE_SPEC.md:396-420`).
-25. Chaos: two jobs of one installation pass the gate together at the edge of the budget →
-    overshoot is at most the bound of §6.4.
+25. Chaos: three jobs of one installation pass the gate together at the edge of the budget,
+    each making provider calls up to L16 → the day ends at most `2 × L16` (387 072) tokens
+    above `budget × (1 + buffer)` (§6.4 Overshoot); a single job never passes L11 or L16.
 26. Re-run on the AI review Check Run of an already reviewed head → one full review,
     `full_reason = manual_rerun`, LLM called; the same event for another App's check run,
     another check name or an empty `pull_requests` (fork) → 204, no job.
@@ -718,6 +782,22 @@ PostgreSQL as `tests/test_e2e_*.py`).
 38. Re-run on the Check Run of a closed PR → the PR fetch says `closed` → 204, no job (T17).
 39. Push whose delta holds only lockfiles → `SKIPPED`, `skip_no_reviewable_files`,
     `reviewed_head_sha = H`; the next push is incremental from `H`, not from the older head.
+40. Review `COMPLETED` on head A with base `main` → PR retargeted to `release` (`edited`
+    with `changes.base`), head still A → full review, `full_reason = base_changed`, LLM
+    called, not `skip_already_reviewed`. The same with `reopened` after the retarget →
+    the same result.
+41. `reopened` on head A after the base branch advanced, PR not retargeted → base SHA
+    differs from `reviewed_base_sha` → full, `base_changed`. A `synchronize` to head B after
+    the base advanced, same `base_ref` → incremental (base SHA not compared when the head
+    moved).
+42. L16 per call: `LLM_REVIEW_SCOPE=file`, the per-file calls reach `REVIEW_JOB_TOKEN_CAP`
+    before the last file → no further provider call, nothing posted, `SKIPPED`,
+    `skip_job_budget`, spent tokens charged to `llm_usage_daily` and `pr_review_jobs`.
+43. Per-call L11: the first call passes, the corrective retry's estimate would cross
+    `budget × (1 + buffer)` → no retry call, `SKIPPED`, `quota_exhausted`, first call
+    charged.
+44. A job superseded during its first provider call → no second call (lease check before
+    it), job `SUPERSEDED`, its first call charged.
 
 ### 8.3 #52: console API and Check Run texts
 
@@ -754,6 +834,7 @@ Check Run texts (counts only, no paths beyond the existing file list):
 | `skip_diff_too_large` (L2-L4, L7) | `⏭️ Review skipped: pull request too large` | existing text (`domain/publishing.py:368-387`), plus which limit |
 | `skip_no_reviewable_files` | `⏭️ Review skipped: no reviewable files` | `All {n} changed files are lockfiles, generated, vendored, minified or binary.` |
 | `skip_pr_budget` | `⏸️ Review paused: this pull request's budget is used` | `This pull request used {used:,} of {cap:,} tokens across {reviews} reviews.` |
+| `skip_job_budget` | `⏸️ Review stopped: this review's token limit reached` | `This review used {used:,} of {cap:,} tokens before finishing; nothing was posted. Push a smaller change or ask for a re-run.` |
 | `quota_exhausted` | `⏸️ Review paused: daily budget used` | `The installation used {used:,} of {limit:,} tokens today. Reviews resume at {reset_at} UTC.` |
 
 Conclusion of every skipped run: `skipped`, as PR #63 (`domain/publishing.py:393`).
@@ -781,7 +862,7 @@ Conclusion of every skipped run: `skipped`, as PR #63 (`domain/publishing.py:393
 | :--- | :--- | :--- | :--- |
 | Q1 | Per-PR state table or derived from jobs? | Derived from `pr_review_jobs` plus new columns (§2.1): one source of truth, no sync bug | Lookups get slow; then a `pr_review_state` table |
 | Q2 | Debounce default | 20 s, `synchronize` only | Users complain the bot is slow |
-| Q3 | Gate race | Bounded overshoot (§6.4) instead of reservations | Budgets become money (billing): then reserve with `UPDATE … RETURNING` and settle at completion |
+| Q3 | Gate race | Per-call checks with a per-job cap L16; overshoot at most `2 × L16` = 387 072 tokens above `budget × (1 + buffer)` (§6.4). No shared reservations | Budgets become money (billing), or the overshoot is seen: then reserve each call's estimate in `llm_usage_daily` with `UPDATE … RETURNING` before the call and settle after it, which brings the bound down to the in-flight calls' estimate error |
 | Q4 | Incremental Check Run: delta or whole PR? | Delta summary; earlier findings as a count | Feedback from the console |
 | Q5 | Same-line, same-category defects collapse ([D2]) | Accepted | Precision of the defect key measured on real PRs |
 | Q6 | Rules source | PR head, decision of 20 October (`docs/RULES_FORMAT_SPEC.md:55-75`). No `.review/rules.md` at the head → the built-in default rules apply: levels 1 and 2 of `docs/RULES_FORMAT_SPEC.md` §3 (base safety and base review criteria, in the versioned system prompt), `rules_status = absent` (`docs/RULES_FORMAT_SPEC.md:196`), `rules_digest` NULL | — |
