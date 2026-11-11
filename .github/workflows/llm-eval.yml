@@ -10,7 +10,7 @@ on:
       prompt_version:
         description: System prompt and output schema version
         type: choice
-        options: [default, v1, v2]
+        options: [default, v1, v2, v3]
         default: default
       review_scope:
         description: First-pass LLM calls per pull request (pr = one, file = one per file)
@@ -19,6 +19,11 @@ on:
         default: default
       verifier:
         description: JEV reflection pass
+        type: choice
+        options: ["on", "off"]
+        default: "on"
+      suggestion_pass:
+        description: Suggestion pass over the findings that would be published (issue #88)
         type: choice
         options: ["on", "off"]
         default: "on"
@@ -74,6 +79,7 @@ jobs:
           REFLECTION_KEEP_THRESHOLD: ${{ inputs.keep_threshold }}
           LLM_PROMPT_VERSION: ${{ inputs.prompt_version != 'default' && inputs.prompt_version || '' }}
           LLM_REVIEW_SCOPE: ${{ inputs.review_scope != 'default' && inputs.review_scope || '' }}
+          LLM_SUGGESTION_PASS: ${{ inputs.suggestion_pass == 'off' && 'false' || 'true' }}
           LLM_MAX_TOKENS: ${{ inputs.max_tokens }}
           DATASET_MODE: ${{ inputs.dataset }}
         run: |

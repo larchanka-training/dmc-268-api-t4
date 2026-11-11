@@ -1,5 +1,6 @@
 """Render results. Finding keys and counts only: never a message, a suggestion or a reply."""
 
+import statistics
 from collections.abc import Sequence
 from typing import Any
 
@@ -29,6 +30,11 @@ def _per_case(total: int, runs: int) -> str:
     return "n/a" if runs == 0 else f"{total / runs:.2f}"
 
 
+def median_message_length(records: Sequence[RunRecord]) -> int | None:
+    lengths = [length for record in records for length in record.message_lengths]
+    return round(statistics.median(lengths)) if lengths else None
+
+
 def _volume_lines(records: Sequence[RunRecord]) -> list[str]:
     """How much the model said and what it cost: findings, verifier drops, input tokens."""
     runs = len(records)
@@ -41,6 +47,9 @@ def _volume_lines(records: Sequence[RunRecord]) -> list[str]:
     misses = sum(near_misses(record.case, record.score) for record in records)
     suggested = sum(record.with_suggestion for record in records)
     suggested_share = "n/a" if kept == 0 else _percent(suggested / kept)
+    applicable = sum(record.applicable_suggestions for record in records)
+    applicable_share = "n/a" if kept == 0 else _percent(applicable / kept)
+    median_length = median_message_length(records)
     return [
         f"- findings per case: **{_per_case(kept, runs)}** "
         f"(before the verifier {_per_case(before, runs)})",
@@ -49,6 +58,9 @@ def _volume_lines(records: Sequence[RunRecord]) -> list[str]:
         f"({tokens} total over {calls} LLM call(s))",
         f"- near misses (right defect, wrong line or category): {misses}",
         f"- findings with a suggested change: {suggested_share} ({suggested} of {kept})",
+        f"- findings with a suggestion GitHub can apply: {applicable_share} "
+        f"({applicable} of {kept})",
+        f"- median message length: {'n/a' if median_length is None else median_length} characters",
     ]
 
 
@@ -144,6 +156,8 @@ def results_json(records: Sequence[RunRecord]) -> dict[str, Any]:
             "llm_calls": sum(r.llm_calls for r in records),
             "near_misses": sum(near_misses(r.case, r.score) for r in records),
             "with_suggestion": sum(r.with_suggestion for r in records),
+            "applicable_suggestions": sum(r.applicable_suggestions for r in records),
+            "median_message_length": median_message_length(records),
         },
         "cases": [
             {
@@ -163,6 +177,7 @@ def results_json(records: Sequence[RunRecord]) -> dict[str, Any]:
                 "llm_calls": record.llm_calls,
                 "near_misses": near_misses(record.case, record.score),
                 "with_suggestion": record.with_suggestion,
+                "applicable_suggestions": record.applicable_suggestions,
                 "findings": [
                     {
                         "path": scored.finding.path,

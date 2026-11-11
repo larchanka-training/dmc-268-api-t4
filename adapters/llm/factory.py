@@ -11,7 +11,9 @@ from adapters.llm.openai_compat import OpenAICompatibleProvider
 from adapters.llm.reflection import JevVerifier
 from adapters.llm.rule_screen import JevRuleScreen
 from adapters.observability import metrics
-from domain.ports import LLMGateway
+
+# What a chat provider is called for; each gets its own request, latency and token series.
+CHAT_PURPOSES = ("review", "correction", "summary", "suggestion")
 
 
 def build_gateway(
@@ -20,8 +22,10 @@ def build_gateway(
     transport: httpx.AsyncBaseTransport | None = None,
     clock: Clock = time.monotonic,
     wrap_provider: Callable[[ChatProvider], ChatProvider] | None = None,
-) -> LLMGateway:
-    """Wire the review pipeline; wrap_provider lets the eval harness observe each provider."""
+) -> FallbackLLMGateway:
+    """Wire the review pipeline; wrap_provider lets the eval harness observe each provider.
+
+    The gateway is both domain.ports.LLMGateway and domain.ports.SuggestionWriter."""
     configured = [settings.primary]
     if settings.fallback is not None:
         configured.append(settings.fallback)
@@ -102,7 +106,7 @@ def _init_metrics(providers: Sequence[ChatProvider], settings: LLMSettings) -> N
     Metrics): each chat provider for the review, its correction and the summary, and
     TypeSafe for the rule screen and the verifier when it is on."""
     callers: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = [
-        (provider.name, provider.model, ("review", "correction", "summary"), metrics.LLM_OUTCOMES)
+        (provider.name, provider.model, CHAT_PURPOSES, metrics.LLM_OUTCOMES)
         for provider in providers
     ]
     if settings.reflection.is_active:

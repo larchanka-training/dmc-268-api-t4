@@ -14,12 +14,19 @@ from adapters.llm.factory import build_gateway
 from adapters.llm.gateway import ChatProvider
 from adapters.llm.prompt import ChatMessage, estimate_tokens
 from adapters.llm.schema import InvalidReviewJSONError, parse_review
+from adapters.llm.suggestions import is_applicable
+from domain.diff import parse_diff
+from domain.diff_filter import filter_files
 from domain.errors import AllProvidersFailedError, LLMGatewayError, LLMOutputError
 from domain.models import Finding
 from domain.ports import ReviewRequest
+from domain.publishing import CommentableLines, suggestion_candidates, with_suggestions
 from evals.diffinfo import changed_lines
 from evals.models import Case, PredictedFinding
 from evals.scoring import CaseScore, ReviewOutcome, RunStatus, score_case
+
+# Replies shaped like a review, whose dropped findings the eval counts.
+FIRST_PASS_PURPOSES = frozenset({"review", "correction"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +44,10 @@ class RunRecord:
     llm_calls: int = 0
     # Published findings that carry a suggested change: a count, never the change itself.
     with_suggestion: int = 0
+    # Of those, the ones GitHub would render as an applicable ```suggestion block.
+    applicable_suggestions: int = 0
+    # Length of each finding's message in characters: sizes, never the text.
+    message_lengths: tuple[int, ...] = ()
 
 
 class _Recorder:
@@ -72,11 +83,18 @@ class _RecordingProvider:
     def model(self) -> str:
         return self._inner.model
 
-    async def complete(self, messages: Sequence[ChatMessage], *, purpose: str = "review") -> str:
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        purpose: str = "review",
+        max_tokens: int | None = None,
+    ) -> str:
         self._recorder.calls += 1
         self._recorder.input_tokens += estimate_tokens(list(messages))
-        reply = await self._inner.complete(messages, purpose=purpose)
-        self._recorder.count_dropped(reply)
+        reply = await self._inner.complete(messages, purpose=purpose, max_tokens=max_tokens)
+        if purpose in FIRST_PASS_PURPOSES:
+            self._recorder.count_dropped(reply)
         return reply
 
 
@@ -109,6 +127,7 @@ class LiveRunner:
         self, settings: LLMSettings, *, transport: httpx.AsyncBaseTransport | None = None
     ) -> None:
         self._recorder = _Recorder()
+        self._suggestion_pass = settings.suggestion_pass
         self._gateway = build_gateway(
             settings,
             transport=transport,
@@ -135,9 +154,17 @@ class LiveRunner:
                 llm_calls=self._recorder.calls,
             )
         dropped = self._recorder.dropped
+        lines = CommentableLines.from_files(filter_files(parse_diff(diff_text)).kept)
+        findings = result.findings
+        if self._suggestion_pass:
+            # The worker's POSTPROCESS step: a fix for what the default policy would post.
+            candidates = suggestion_candidates(findings, lines=lines)
+            findings = with_suggestions(
+                findings, candidates, await self._gateway.suggest(request, candidates)
+            )
         outcome = ReviewOutcome(
             status=RunStatus.OK,
-            findings=tuple(predicted(finding) for finding in result.findings),
+            findings=tuple(predicted(finding) for finding in findings),
             dropped=dropped,
         )
         return RunRecord(
@@ -149,5 +176,7 @@ class LiveRunner:
             verifier_rejected=result.rejected_by_verifier,
             input_tokens=self._recorder.input_tokens,
             llm_calls=self._recorder.calls,
-            with_suggestion=sum(finding.suggestion is not None for finding in result.findings),
+            with_suggestion=sum(finding.suggestion is not None for finding in findings),
+            applicable_suggestions=sum(is_applicable(finding, lines) for finding in findings),
+            message_lengths=tuple(len(finding.message) for finding in findings),
         )

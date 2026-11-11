@@ -355,10 +355,10 @@ async def test_the_pr_scope_sends_one_call_for_many_files() -> None:
 # --- Settings -------------------------------------------------------------------------------
 
 
-def test_prompt_version_and_scope_default_to_v2_and_pr() -> None:
+def test_prompt_version_and_scope_default_to_v3_and_pr() -> None:
     settings = LLMSettings.from_env(ENV)
 
-    assert (settings.prompt_version, settings.review_scope) == ("v2", ReviewScope.PR)
+    assert (settings.prompt_version, settings.review_scope) == ("v3", ReviewScope.PR)
 
 
 def test_prompt_version_and_scope_are_read_from_the_environment() -> None:

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from domain.alerts import Alert
 from domain.auth import Session, SignInAttempt
-from domain.models import ReviewResult
+from domain.models import Finding, ReviewResult
 from domain.publishing import PublishPlan
 from domain.repositories import Repository
 from domain.repository_rules import ParsedRules
@@ -40,6 +40,15 @@ class ReviewRequest:
 
 class LLMGateway(Protocol):
     async def review(self, request: ReviewRequest) -> ReviewResult: ...
+
+
+class SuggestionWriter(Protocol):
+    async def suggest(
+        self, request: ReviewRequest, findings: Sequence[Finding]
+    ) -> tuple[Finding, ...]:
+        """The same findings in the same order; some gain a suggestion that applies to
+        the diff as it is. Fail-open: on any error the findings come back unchanged."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)

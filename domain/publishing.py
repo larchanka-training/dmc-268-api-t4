@@ -293,23 +293,29 @@ def dismissed_line(dismissed: int) -> str:
     return f"{counted} {DISMISSED_NOTE}"
 
 
-def build_plan(
+@dataclass(frozen=True, slots=True)
+class Selection:
+    """The filters of the module docstring, stage by stage; `kept` is what gets posted."""
+
+    received: tuple[Finding, ...]
+    in_diff: tuple[Finding, ...]
+    loud_enough: tuple[Finding, ...]
+    fresh: tuple[tuple[Finding, str], ...]
+    kept: tuple[tuple[Finding, str], ...]
+
+
+def select_findings(
     findings: Iterable[Finding],
     *,
-    model_summary: str,
     lines: CommentableLines,
     policy: PublishPolicy = DEFAULT_POLICY,
     posted_fingerprints: frozenset[str] = frozenset(),
-    redact: Redactor = _no_redaction,
-    model_risk: RiskLevel | None = None,
-    checklist: tuple[str, ...] = (),
-    dismissed_by_verifier: int = 0,
-) -> PublishPlan:
+) -> Selection:
     received = tuple(findings)
-    in_diff = [finding for finding in received if lines.contains(finding.position)]
-    loud_enough = [
+    in_diff = tuple(finding for finding in received if lines.contains(finding.position))
+    loud_enough = tuple(
         finding for finding in in_diff if at_least(finding.severity, policy.min_severity)
-    ]
+    )
 
     fresh: list[tuple[Finding, str]] = []
     seen: set[str] = set()
@@ -325,7 +331,68 @@ def build_plan(
         fresh.append((finding, digest))
 
     fresh.sort(key=lambda pair: (_SEVERITY_RANK[pair[0].severity], pair[0].position.path))
-    kept = fresh[: policy.max_comments]
+    return Selection(
+        received=received,
+        in_diff=in_diff,
+        loud_enough=loud_enough,
+        fresh=tuple(fresh),
+        kept=tuple(fresh[: policy.max_comments]),
+    )
+
+
+# The suggestion pass (issue #88) asks for a fix for at most this many findings per job.
+SUGGESTION_CANDIDATES_MAX = 10
+
+
+def suggestion_candidates(
+    findings: Iterable[Finding],
+    *,
+    lines: CommentableLines,
+    policy: PublishPolicy = DEFAULT_POLICY,
+    posted_fingerprints: frozenset[str] = frozenset(),
+    limit: int = SUGGESTION_CANDIDATES_MAX,
+) -> tuple[Finding, ...]:
+    """The findings worth one more LLM call for a ready fix, most severe first.
+
+    Only what will be posted inline, has no suggestion yet and sits on the new side: a
+    GitHub suggestion replaces new-side lines, and a fix nobody sees is wasted tokens.
+    """
+    selection = select_findings(
+        findings, lines=lines, policy=policy, posted_fingerprints=posted_fingerprints
+    )
+    wanted = (
+        finding
+        for finding, _ in selection.kept
+        if finding.suggestion is None and finding.position.side is DiffSide.NEW
+    )
+    return tuple(wanted)[:limit]
+
+
+def with_suggestions(
+    findings: Iterable[Finding], candidates: Iterable[Finding], suggested: Iterable[Finding]
+) -> tuple[Finding, ...]:
+    """`findings` in their order, each candidate replaced by its `suggested` counterpart."""
+    replacements = dict(zip(candidates, suggested, strict=True))
+    return tuple(replacements.get(finding, finding) for finding in findings)
+
+
+def build_plan(
+    findings: Iterable[Finding],
+    *,
+    model_summary: str,
+    lines: CommentableLines,
+    policy: PublishPolicy = DEFAULT_POLICY,
+    posted_fingerprints: frozenset[str] = frozenset(),
+    redact: Redactor = _no_redaction,
+    model_risk: RiskLevel | None = None,
+    checklist: tuple[str, ...] = (),
+    dismissed_by_verifier: int = 0,
+) -> PublishPlan:
+    selection = select_findings(
+        findings, lines=lines, policy=policy, posted_fingerprints=posted_fingerprints
+    )
+    received, in_diff, loud_enough = selection.received, selection.in_diff, selection.loud_enough
+    fresh, kept = selection.fresh, selection.kept
     comments = tuple(_plan_comment(finding, digest, lines, redact) for finding, digest in kept)
 
     blocking = policy.request_changes_at is not None and any(
@@ -437,7 +504,7 @@ _VERDICT_LABEL = {
 def _plan_comment(
     finding: Finding, digest: str, lines: CommentableLines, redact: Redactor
 ) -> PlannedComment:
-    start_line = _suggestion_start(finding, lines)
+    start_line = suggestion_start(finding, lines)
     return PlannedComment(
         finding=finding,
         fingerprint=digest,
@@ -446,7 +513,7 @@ def _plan_comment(
     )
 
 
-def _suggestion_start(finding: Finding, lines: CommentableLines) -> int | None:
+def suggestion_start(finding: Finding, lines: CommentableLines) -> int | None:
     """The first line a ```suggestion block would replace, or None if it cannot be one.
 
     A GitHub suggestion replaces exactly the commented lines with its content, so it is

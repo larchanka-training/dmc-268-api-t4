@@ -27,8 +27,8 @@ DEFAULT_REFLECTION_TIMEOUT_SECONDS = 15.0
 DEFAULT_RULES_SCREEN_THRESHOLD = 0.7
 
 # The system prompt and output schema travel together (PIPELINE_SPEC.md §10).
-PROMPT_VERSIONS = ("v1", "v2")
-DEFAULT_PROMPT_VERSION = "v2"
+PROMPT_VERSIONS = ("v1", "v2", "v3")
+DEFAULT_PROMPT_VERSION = "v3"
 
 
 class ReviewScope(StrEnum):
@@ -86,6 +86,8 @@ class LLMSettings:
     reflection: ReflectionSettings = field(default_factory=ReflectionSettings)
     prompt_version: str = DEFAULT_PROMPT_VERSION
     review_scope: ReviewScope = DEFAULT_REVIEW_SCOPE
+    # One extra call that writes a fix for published findings without one (issue #88).
+    suggestion_pass: bool = True
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "LLMSettings":
@@ -162,6 +164,7 @@ class _EnvReader:
                     DEFAULT_REVIEW_SCOPE.value,
                 )
             ),
+            suggestion_pass=self._bool("LLM_SUGGESTION_PASS", default=True),
         )
 
     def _reflection(self) -> ReflectionSettings:

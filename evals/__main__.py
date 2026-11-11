@@ -66,6 +66,7 @@ def describe(settings: LLMSettings, *, bundle: bool) -> str:
     verifier = f"on, keep >= {reflection.keep_threshold}" if reflection.is_active else "off"
     return (
         f"prompt {settings.prompt_version}, scope {settings.review_scope}, verifier {verifier}, "
+        f"suggestion pass {'on' if settings.suggestion_pass else 'off'}, "
         f"max_tokens {settings.max_tokens}, dataset {'bundle' if bundle else 'cases'}"
     )
 

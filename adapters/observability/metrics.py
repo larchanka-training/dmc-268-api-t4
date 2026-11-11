@@ -277,7 +277,7 @@ WORKER_REGISTRY.register(FORGE_RATE_LIMIT)
 
 # The LLM gateway (adapters/llm/), in the worker. One request is one HTTP call: a key
 # rotation retries with the next key, so it counts twice.
-LLM_PURPOSES = ("review", "correction", "summary", "rule_screen", "verify")
+LLM_PURPOSES = ("review", "correction", "summary", "suggestion", "rule_screen", "verify")
 LLM_OUTCOMES = ("ok", "rate_limited", "key_rejected", "error")
 TOKEN_DIRECTIONS = ("input", "output")
 LLM_REQUESTS = Counter(

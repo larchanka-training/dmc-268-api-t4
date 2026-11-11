@@ -198,6 +198,7 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `step.finished` | info | A pipeline step ended (the `Observer`, `adapters/observability/observer.py`), with its row, span and `review_step_duration_seconds` | `job_id`, `step`, `outcome` (`OK`, `FAILED`), `duration_ms`; `error_kind` when failed |
 | `job.lease.renew_failed` | warning | The lease heartbeat could not reach Postgres; it tries again next tick (every 60 s), and the reaper takes the job only after ten misses | `job_id`, `provider`, `repo`, `pr_number`, `error_type` |
 | `job.findings.not_kept` | error | Findings were posted but not stored | `job_id`, `provider`, `repo`, `pr_number`, `findings`, `error_type` |
+| `job.suggestions.failed` | warning | The suggestion pass raised or returned a different number of findings; the review is published without new suggestions | `job_id`, `provider`, `repo`, `pr_number`, `findings`, `error_type` |
 | `github.token.minted` | info | An installation token was minted | `provider`, `installation_id` |
 | `github.pull_request.fetched` | info | PR detail, commits and diff fetched | `provider`, `installation_id`, `repo`, `pr_number`, `sha`, `commits`, `dropped_commits`, `diff_bytes`, `duration_ms` |
 | `github.commits.page_cap` | warning | The commit listing stopped at the page cap | `provider`, `pages`, `commits` |
@@ -228,6 +229,9 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `llm.summary.failed` | warning | Per-file review: one provider's summary call failed; the next is tried | `provider`, `model`, `error_type` |
 | `llm.summary.unavailable` | warning | Per-file review: the summary agent failed on every provider; the merged file summaries are used | — |
 | `llm.summary.finished` | info | Per-file review: the summary agent answered | `provider`, `model`, `duration_ms`, `files`, `risk`, `checklist`, `risk_invalid`, `checklist_invalid`, `checklist_trimmed` |
+| `llm.suggestions.skipped` | warning | Suggestion pass: its input is over budget; the findings are published as they are | `input_tokens`, `max_input_tokens` |
+| `llm.suggestions.failed` | warning | Suggestion pass: a provider's call failed or its reply was not the suggestions JSON (`provider`, `model` set; the next provider is tried), or the pass failed as a whole; the findings are published as they are | `error_type`, `findings`; `provider`, `model` for one provider's failure |
+| `llm.suggestions.finished` | info | Suggestion pass: the model answered | `provider`, `model`, `duration_ms`, `findings` (asked about), `kept` (suggestions attached), `dropped` (suggestions that do not match the diff, plus invalid entries) |
 | `llm.provider.fallback` | warning | A provider failed; the next one is tried | `provider`, `next_provider`, `reason` |
 | `llm.call.failed` | warning | Every provider failed (`AllProvidersFailedError`); the job is retried | `reason`: each provider and its reason, never a response body |
 | `llm.key.rate_limited` | warning | A key got 429 and cools down | `provider`, `key_masked`, `cooldown_seconds` |
@@ -412,7 +416,7 @@ DB sampler and `llm_daily_budget_usd` in one process only.
 | `review_duration_seconds` | histogram | `status` | **Enqueue → terminal status** per job, so queue wait counts. Buckets include 60, 120, 300, 600 and 900 s, so the latency SLO threshold sits on a bucket edge |
 | `jobs_finished_total` | counter | `status` (`COMPLETED`, `FAILED`, `RETRYING`: one per attempt), `error_kind` (empty when completed) | Forge outage vs bug |
 | `lease_expiries_total` | counter | — | Counted from the reaper's result. A running job renews its 600 s lease every 60 s (a heartbeat, WORKFLOW_DESIGN.md §6), so an expiry means a worker died or could not reach Postgres for ten renewals in a row, not a slow LLM call |
-| `llm_requests_total` | counter | `provider`, `model`, `purpose`, `outcome` | Provider failures, fallbacks. One per HTTP request, so a key rotation counts twice. `purpose` is `review`, `correction`, `summary` (the per-file mode's summary call), `rule_screen` or `verify`: one review makes several calls. `outcome` is `ok`, `rate_limited` (429, key cooled down), `key_rejected` (401/403, key disabled) or `error`; TypeSafe's (`provider="typesafe"`) are `ok` or `error` |
+| `llm_requests_total` | counter | `provider`, `model`, `purpose`, `outcome` | Provider failures, fallbacks. One per HTTP request, so a key rotation counts twice. `purpose` is `review`, `correction`, `summary` (the per-file mode's summary call), `suggestion` (the suggestion pass, issue #88), `rule_screen` or `verify`: one review makes several calls. `outcome` is `ok`, `rate_limited` (429, key cooled down), `key_rejected` (401/403, key disabled) or `error`; TypeSafe's (`provider="typesafe"`) are `ok` or `error` |
 | `llm_tokens_total` | counter | `provider`, `model`, `purpose`, `direction` | The bill, before it arrives |
 | `llm_request_duration_seconds` | histogram | `provider`, `model`, `purpose` | Request to reply, per HTTP request that got one. Failures are only counted (`llm_requests_total`): a 429 takes milliseconds and would pull the latency down, and a timeout is `LLM_TIMEOUT_SECONDS` by definition |
 | `llm_key_rotations_total` | counter | `provider` | 429 pressure |
@@ -537,6 +541,8 @@ review.job                         (root, worker; continues the webhook's trace)
 │   │   └── http.client POST …     (httpx, automatic)
 │   └── llm.verify                 findings_in, findings_rejected, outcome (TypeSafe)
 ├── postprocess                    findings_total, already_posted (the plan: dedup against posted findings)
+│   └── llm.suggest                findings_in, suggestions_added, outcome (one llm.attempt, purpose suggestion); the step also
+│                                  records suggestions_requested, suggestions_added
 ├── post_feedback                  comments_posted, check_run_updated
 └── meter                          (planned) tokens_billed; db spans (automatic)
 ```

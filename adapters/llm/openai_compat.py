@@ -63,10 +63,17 @@ class OpenAICompatibleProvider:
     def model(self) -> str:
         return self._model
 
-    async def complete(self, messages: Sequence[ChatMessage], *, purpose: str = "review") -> str:
-        """The reply text. ``purpose`` (review, correction, summary) labels the request's
-        metrics and span (docs/observability.md § Review pipeline)."""
-        body = self._request_body(messages)
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        purpose: str = "review",
+        max_tokens: int | None = None,
+    ) -> str:
+        """The reply text. ``purpose`` (review, correction, summary, suggestion) labels the
+        request's metrics and span (docs/observability.md § Review pipeline); ``max_tokens``
+        lowers the reply budget for this call only."""
+        body = self._request_body(messages, max_tokens)
         async with httpx.AsyncClient(
             transport=self._transport, timeout=httpx.Timeout(self._timeout_seconds)
         ) as client:
@@ -120,12 +127,14 @@ class OpenAICompatibleProvider:
                 span.set_data("outcome", outcome)
                 metrics.count_llm_request(self._name, self._model, purpose, outcome)
 
-    def _request_body(self, messages: Sequence[ChatMessage]) -> dict[str, Any]:
+    def _request_body(
+        self, messages: Sequence[ChatMessage], max_tokens: int | None = None
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self._model,
             "messages": list(messages),
             "temperature": self._temperature,
-            "max_tokens": self._max_tokens,
+            "max_tokens": self._max_tokens if max_tokens is None else max_tokens,
         }
         if self._json_mode:
             body["response_format"] = {"type": "json_object"}

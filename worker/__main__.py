@@ -46,8 +46,11 @@ def build_review_from_env() -> ReviewStage:
     """The LLM gateway and the GitHub publisher. A missing LLM or GitHub
     variable fails here, at startup, naming the variable."""
     app_settings = GitHubAppSettings.from_env()
+    llm_settings = LLMSettings.from_env()
+    gateway = build_gateway(llm_settings)
     return ReviewStage(
-        gateway=build_gateway(LLMSettings.from_env()),
+        gateway=gateway,
+        suggestions=gateway if llm_settings.suggestion_pass else None,
         publisher=GitHubReviewPublisher(app_settings, GitHubAppAuth(app_settings, SystemClock())),
     )
 

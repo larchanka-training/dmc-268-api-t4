@@ -39,6 +39,7 @@ from domain.diff_filter import filter_files
 from domain.errors import LLMInputTooLargeError, classify
 from domain.findings import NewPublishedFinding, published_findings
 from domain.jobs import LEASE_SECONDS, JobStep
+from domain.models import Finding
 from domain.ports import (
     ClaimedJob,
     GitProvider,
@@ -52,6 +53,7 @@ from domain.ports import (
     ReviewPublisher,
     ReviewRequest,
     StepRecorder,
+    SuggestionWriter,
 )
 from domain.publishing import (
     DEFAULT_POLICY,
@@ -59,6 +61,8 @@ from domain.publishing import (
     PublishPolicy,
     build_plan,
     build_skipped_plan,
+    suggestion_candidates,
+    with_suggestions,
 )
 
 
@@ -75,6 +79,9 @@ class ReviewStage:
     # Where published findings are kept, and what tells a re-review which ones the
     # pull request already has. Without it every review posts every finding again.
     comments: ReviewCommentStore | None = None
+    # Writes a ready fix for findings about to be posted without one (issue #88).
+    # Without it findings are posted as the first pass left them.
+    suggestions: SuggestionWriter | None = None
 
 
 #: The lease is the job's `locked_until`: "this worker holds the job until then". When
@@ -254,15 +261,14 @@ async def _process(
             if not await _extend_lease(jobs, claimed):
                 return False
             target = _pull_request_target(claimed, context.head_sha)
+            request = ReviewRequest(
+                diff_text=context.diff_text,
+                pr_title=context.title,
+                pr_description=context.description,
+            )
             async with observer.step(JobStep.LLM_CALL) as step:
                 try:
-                    result = await review.gateway.review(
-                        ReviewRequest(
-                            diff_text=context.diff_text,
-                            pr_title=context.title,
-                            pr_description=context.description,
-                        )
-                    )
+                    result = await review.gateway.review(request)
                 except LLMInputTooLargeError as too_large:
                     # The job still fails as skip_diff_too_large below; the check run
                     # only tells the author why nothing else appears.
@@ -283,10 +289,24 @@ async def _process(
                             repo_id=payload.repo_id,
                             pr_number=payload.pr_number,
                         )
+                lines = CommentableLines.from_files(filtered.kept)
+                findings = result.findings
+                if review.suggestions is not None:
+                    candidates = suggestion_candidates(
+                        findings, lines=lines, policy=review.policy, posted_fingerprints=posted
+                    )
+                    suggested = await _suggest(
+                        review.suggestions, request, candidates, claimed, log
+                    )
+                    findings = with_suggestions(findings, candidates, suggested)
+                    step.set(
+                        suggestions_requested=len(candidates),
+                        suggestions_added=sum(f.suggestion is not None for f in suggested),
+                    )
                 plan = build_plan(
-                    result.findings,
+                    findings,
                     model_summary=result.summary,
-                    lines=CommentableLines.from_files(filtered.kept),
+                    lines=lines,
                     policy=review.policy,
                     posted_fingerprints=posted,
                     model_risk=result.risk,
@@ -389,6 +409,45 @@ def _pull_request_target(claimed: ClaimedJob, head_sha: str) -> PullRequestTarge
         number=payload.pr_number,
         head_sha=head_sha,
     )
+
+
+async def _suggest(
+    writer: SuggestionWriter,
+    request: ReviewRequest,
+    candidates: tuple[Finding, ...],
+    claimed: ClaimedJob,
+    log: logging.Logger,
+) -> tuple[Finding, ...]:
+    """The candidates with the fixes the suggestion pass wrote for them.
+
+    Fail-open: the pass is an extra, so any error leaves the findings as they were and
+    the review is published without the new suggestions.
+    """
+    if not candidates:
+        return candidates
+    try:
+        suggested = await writer.suggest(request, candidates)
+    except Exception as err:
+        log.warning(
+            "job.suggestions.failed",
+            extra={
+                **_job_fields(claimed),
+                "findings": len(candidates),
+                "error_type": type(err).__name__,
+            },
+        )
+        return candidates
+    if len(suggested) != len(candidates):
+        log.warning(
+            "job.suggestions.failed",
+            extra={
+                **_job_fields(claimed),
+                "findings": len(candidates),
+                "error_type": "LengthMismatch",
+            },
+        )
+        return candidates
+    return suggested
 
 
 async def _publish_skipped(

@@ -7,6 +7,7 @@ environment, ``smoke`` in llm-smoke.yml.
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import logging
 import sys
@@ -24,7 +25,12 @@ from domain.diff_filter import filter_files
 from domain.errors import LLMConfigurationError, LLMGatewayError
 from domain.models import ReviewResult
 from domain.ports import ReviewRequest
-from domain.publishing import CommentableLines, build_plan
+from domain.publishing import (
+    CommentableLines,
+    build_plan,
+    suggestion_candidates,
+    with_suggestions,
+)
 
 EXIT_CONFIG_ERROR = 2
 EXIT_REVIEW_FAILED = 1
@@ -51,9 +57,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 async def _review(settings: LLMSettings, request: ReviewRequest) -> ReviewResult:
+    """The first pass, the verifier and, like the worker, the suggestion pass."""
+    gateway = build_gateway(settings)
     # A transaction to hang the gateway's spans on; a no-op without a DSN.
     with sentry_sdk.start_transaction(name="llm.smoke", op="llm.smoke"):
-        return await build_gateway(settings).review(request)
+        result = await gateway.review(request)
+        if not settings.suggestion_pass:
+            return result
+        candidates = suggestion_candidates(result.findings, lines=commentable_lines(request))
+        suggested = await gateway.suggest(request, candidates)
+        return dataclasses.replace(
+            result, findings=with_suggestions(result.findings, candidates, suggested)
+        )
+
+
+def commentable_lines(request: ReviewRequest) -> CommentableLines:
+    return CommentableLines.from_files(filter_files(parse_diff(request.diff_text)).kept)
 
 
 def main(argv: list[str] | None = None) -> int:

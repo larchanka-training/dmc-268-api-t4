@@ -6,7 +6,7 @@ on:
       prompt_version:
         description: System prompt and output schema version (default = adapters/llm/config.py)
         type: choice
-        options: [default, v1, v2]
+        options: [default, v1, v2, v3]
         default: default
       fixture:
         description: Diff to review (negative controls show how the Check Run reads when the verifier dismisses a finding)
@@ -85,6 +85,12 @@ jobs:
           print(f"- provider: `{result['provider']}`")
           print(f"- model: `{result['model']}`")
           print(f"- findings: **{len(findings)}**")
+          # Counts and sizes only: the suggestion and the message text stay out of the log.
+          suggested = sum(1 for f in findings if f["suggestion"] is not None)
+          print(f"- findings with a suggested change: **{suggested}**")
+          lengths = sorted(len(f["message"]) for f in findings)
+          if lengths:
+              print(f"- message length, characters: {', '.join(map(str, lengths))}")
           if findings:
               print()
               print("| severity | category | count |")

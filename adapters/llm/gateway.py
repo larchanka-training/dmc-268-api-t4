@@ -32,6 +32,12 @@ from adapters.llm.schema import (
     parse_review,
     parse_summary,
 )
+from adapters.llm.suggestions import (
+    SUGGESTION_MAX_TOKENS,
+    apply_suggestions,
+    build_suggestion_messages,
+    parse_suggestions,
+)
 from domain.diff import DiffLineKind, parse_diff, split_by_file
 from domain.errors import (
     AllProvidersFailedError,
@@ -43,11 +49,12 @@ from domain.errors import (
 )
 from domain.models import RISK_ORDER, Finding, ReviewResult, VerificationOutcome
 from domain.ports import ReviewRequest
+from domain.publishing import CommentableLines
 
 logger = logging.getLogger("adapters.llm")
 
 # Prompt versions whose output schema carries risk and checklist (schema v2, issue #55).
-PROMPTS_WITH_RISK = frozenset({"v2"})
+PROMPTS_WITH_RISK = frozenset({"v2", "v3"})
 
 # Per-file review: calls in flight at once, so a 30-file pull request does not open 30
 # connections to one provider key.
@@ -61,8 +68,15 @@ class ChatProvider(Protocol):
     @property
     def model(self) -> str: ...
 
-    async def complete(self, messages: Sequence[ChatMessage], *, purpose: str = "review") -> str:
-        """``purpose`` (review, correction, summary) labels the request's metrics and span."""
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        purpose: str = "review",
+        max_tokens: int | None = None,
+    ) -> str:
+        """``purpose`` (review, correction, summary, suggestion) labels the request's
+        metrics and span; ``max_tokens`` lowers the reply budget for this call only."""
         ...
 
 
@@ -241,6 +255,80 @@ class FallbackLLMGateway:
             verification=report.outcome,
             rejected_by_verifier=report.rejected,
         )
+
+    async def suggest(
+        self, request: ReviewRequest, findings: Sequence[Finding]
+    ) -> tuple[Finding, ...]:
+        """domain.ports.SuggestionWriter: one call that writes a fix for each finding.
+
+        A suggestion is kept only when its `before` is the diff's own lines at the
+        finding's position. Fail-open like the verifier: whatever goes wrong, the findings
+        come back as they were and the review is published without the new suggestions.
+        """
+        unchanged = tuple(findings)
+        if not unchanged:
+            return unchanged
+        with sentry_sdk.start_span(op="llm.suggest", name="llm.suggest") as span:
+            span.set_data("findings_in", len(unchanged))
+            try:
+                suggested, added = await self._suggest(request.diff_text, unchanged)
+            except Exception as exc:
+                logger.warning(
+                    "llm.suggestions.failed",
+                    extra={"error_type": type(exc).__name__, "findings": len(unchanged)},
+                )
+                span.set_data("outcome", "failed")
+                return unchanged
+            span.set_data("suggestions_added", added)
+            span.set_data("outcome", "ok")
+            return suggested
+
+    async def _suggest(
+        self, diff_text: str, findings: tuple[Finding, ...]
+    ) -> tuple[tuple[Finding, ...], int]:
+        files = parse_diff(diff_text)
+        messages = build_suggestion_messages(findings, files)
+        estimated = estimate_tokens(messages)
+        if estimated > self._max_input_tokens:
+            logger.warning(
+                "llm.suggestions.skipped",
+                extra={"input_tokens": estimated, "max_input_tokens": self._max_input_tokens},
+            )
+            return findings, 0
+        lines = CommentableLines.from_files(files)
+        for provider in self._providers:
+            started = time.monotonic()
+            try:
+                parsed = parse_suggestions(
+                    await provider.complete(
+                        messages, purpose="suggestion", max_tokens=SUGGESTION_MAX_TOKENS
+                    )
+                )
+            except (LLMGatewayError, InvalidReviewJSONError) as exc:
+                logger.warning(
+                    "llm.suggestions.failed",
+                    extra={
+                        "provider": provider.name,
+                        "model": provider.model,
+                        "error_type": type(exc).__name__,
+                        "findings": len(findings),
+                    },
+                )
+                continue
+            applied = apply_suggestions(findings, parsed, lines)
+            logger.info(
+                "llm.suggestions.finished",
+                extra={
+                    "provider": provider.name,
+                    "model": provider.model,
+                    "duration_ms": round((time.monotonic() - started) * 1000),
+                    "findings": len(findings),
+                    "kept": applied.added,
+                    "dropped": applied.rejected + parsed.invalid_entries,
+                },
+            )
+            return applied.findings, applied.added
+        return findings, 0
 
     async def _screen_rules(self, rules: Sequence[Rule]) -> RuleScreenReport:
         unchanged = tuple(rules)
