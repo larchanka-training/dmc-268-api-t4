@@ -17,3 +17,6 @@ repos:
           - fastapi>=0.110.0
           - "pyjwt[crypto]>=2.9"
           - "sqlalchemy[asyncio]>=2.0"
+          - "sentry-sdk>=2.73.0"
+          - "structlog>=26.1.0"
+          - "prometheus-client>=0.26.0"

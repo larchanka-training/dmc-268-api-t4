@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 from domain.auth import Session
 from domain.errors import ForgePermissionError
+from domain.models import Category
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
     from domain.ports import JobHistory, RepositoryContents, ReviewJob, RulesParser
@@ -40,11 +41,96 @@ class RulesStatus(StrEnum):
     IGNORED_FORBIDDEN = "ignored:forbidden"
 
 
+# docs/RULES_FORMAT_SPEC.md §2.2: recognised section titles, matched case-insensitively
+# after trimming, and the category each one's rules are for. `Style` is the only way to
+# ask for maintainability (style) comments.
+SECTION_CATEGORIES: dict[str, Category] = {
+    "security": Category.SECURITY,
+    "correctness": Category.CORRECTNESS,
+    "performance": Category.PERFORMANCE,
+    "concurrency": Category.CONCURRENCY,
+    "style": Category.MAINTAINABILITY,
+}
+IGNORE_SECTION = "ignore"
+
+
+def section_category(title: str) -> Category | None:
+    """The category a recognised section is for; None for "other guidance" and Ignore."""
+    return SECTION_CATEGORIES.get(title.strip().casefold())
+
+
+def is_ignore_section(title: str) -> bool:
+    return title.strip().casefold() == IGNORE_SECTION
+
+
+class IgnoreKind(StrEnum):
+    """The two `# Ignore` directives of docs/RULES_FORMAT_SPEC.md §2.3."""
+
+    PATH = "path"
+    CATEGORY = "category"
+
+
+class RulesDiagnosticCode(StrEnum):
+    """Why the parser dropped a list item, or a note on how it reads one.
+
+    Codes only: the console words them. A diagnostic never carries text from the file.
+    """
+
+    # A section whose title is not recognised (§2.2): its rules go to the model as
+    # "other guidance", with no category implied. Not a problem, only a note.
+    SECTION_OTHER = "section_other"
+    # §6 layer 2: the rule, or the title of its section, looks like an attempt to steer
+    # the model.
+    RULE_SUSPICIOUS = "rule_suspicious"
+    # §4: past 50 rules or 8000 characters of rule text in total.
+    RULE_OVER_LIMIT = "rule_over_limit"
+    # §2.3: an Ignore item that is neither `path: <glob>` nor `category: <name>`.
+    IGNORE_INVALID = "ignore_invalid"
+    IGNORE_UNKNOWN_CATEGORY = "ignore_unknown_category"
+    # §3: security findings cannot be muted.
+    IGNORE_SECURITY = "ignore_security"
+    # §4: past 100 directives.
+    IGNORE_OVER_LIMIT = "ignore_over_limit"
+
+    @property
+    def dropped(self) -> bool:
+        """Whether the item it marks is left out of the review."""
+        return self is not RulesDiagnosticCode.SECTION_OTHER
+
+
+@dataclass(frozen=True, slots=True)
+class RulesDiagnostic:
+    """A note on lines `line_start..line_end` (1-based, inclusive) of the file.
+
+    Lines are counted the way an editor counts them: `\\n`, `\\r\\n` and a lone `\\r`
+    each end a line.
+    """
+
+    code: RulesDiagnosticCode
+    line_start: int
+    line_end: int
+
+
 @dataclass(frozen=True, slots=True)
 class PreviewRule:
     id: str
     section: str
     text: str
+    # The category of a recognised section (§2.2); None for "other guidance".
+    category: Category | None
+    # Where the list item sits in the file, 1-based and inclusive, so the console can
+    # point at the rule a finding cites.
+    line_start: int
+    line_end: int
+
+
+@dataclass(frozen=True, slots=True)
+class IgnoreDirective:
+    kind: IgnoreKind
+    # A gitignore-style glob for PATH, a Category value (never security) for CATEGORY.
+    value: str
+    line_start: int
+    line_end: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +138,9 @@ class ParsedRules:
     rules: tuple[PreviewRule, ...] = ()
     dropped_suspicious: int = 0
     dropped_over_limit: int = 0
+    ignore: tuple[IgnoreDirective, ...] = ()
+    # In file order.
+    diagnostics: tuple[RulesDiagnostic, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

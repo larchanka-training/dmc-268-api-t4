@@ -16,6 +16,7 @@ from domain.ports import (
     JobEventsSource,
     JobHistory,
     ReviewCommentStore,
+    RulesParser,
     SessionStore,
     SignInAttemptStore,
 )
@@ -64,6 +65,8 @@ class Services:
     job_events: JobEventsSource
     jobs: JobHistory
     findings: ReviewCommentStore
+    # The parser reviews use; the playground's rules editor parses through it too.
+    rules_parser: RulesParser
     # None only in tests that do not wire the forge; the rules route answers 502.
     job_rules: JobRulesService | None = None
     # Same: without the forge the context routes answer 502.

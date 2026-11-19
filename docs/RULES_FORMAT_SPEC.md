@@ -48,6 +48,13 @@ rules. Where this document says **(PR #40)**, it confirms that behaviour as the
 specification; the rest is new. How the rules block sits among the other prompt blocks
 is in [CONTEXT_AND_VERIFICATION_SPEC.md § Prompt assembly](./CONTEXT_AND_VERIFICATION_SPEC.md#2-prompt-assembly-c7).
 
+The parser also recognises the sections of §2.2 and reads `# Ignore` items as directives
+(§2.3), so they never reach the prompt. It records the lines of every rule and directive
+and gives each dropped item a diagnostic code; the playground's rules editor shows these
+(`POST /playground/rules/parse`, issue #53). The directives are parsed and validated but
+**not applied yet**: neither the `RULES_IGNORE` diff filter nor the category mute is
+wired.
+
 Decisions are marked **[R1]**–**[R12]**.
 
 ---
