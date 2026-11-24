@@ -132,6 +132,8 @@ services:
       GRAFANA_CLOUD_LOKI_URL: http://loki:3100/loki/api/v1/push
       GRAFANA_CLOUD_LOKI_USER: lab
       GRAFANA_CLOUD_TOKEN: lab
+      # config.alloy ships this project's caddy and postgres logs, and no other container's.
+      COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME}
       # lab.py creates the dmc268_exporter role with it.
       POSTGRES_EXPORTER_PASSWORD: exporter-lab
     volumes:

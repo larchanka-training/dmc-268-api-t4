@@ -1016,7 +1016,20 @@ UPDATE pr_review_jobs
   creates. `CREATE EXTENSION` succeeds without the preload, so the two land in
   either order; the view returns rows once both have. The exporter's read-only role
   `dmc268_exporter` (`pg_monitor`) is not a migration: its password is a deploy
-  secret, so it is created once by hand (tasks/observability-checklist.md, phase 3).
+  secret, so it is created once by hand (docs/tasks/observability-checklist.md, phase 3).
+* **`pr_review_jobs.trace_context` (`0004`).** JSONB, nullable: the enqueuing
+  request's `sentry-trace` and `baggage` headers, so the worker continues the webhook's
+  trace as the `review.job` span ([observability.md § Review
+  pipeline](./observability.md)). NULL with Sentry off and for jobs enqueued before
+  the column. The claim returns it with the job; no index, nothing filters on it.
+* **`periodic_task_runs` (`0005`).** `task VARCHAR(64)` primary key, `last_success_at
+  TIMESTAMPTZ`, `interval_seconds DOUBLE PRECISION`, both NOT NULL. The leader worker
+  upserts a row after each successful tick of a periodic task (today only `reaper`); the
+  API's DB sampler exports it as `periodic_task_last_success_timestamp` and
+  `periodic_task_interval_seconds` for "Periodic task stale". In Postgres, not in a
+  process, so the timestamp survives restarts; the interval is stored with it so the
+  API needs no copy of the worker's configuration. Until `0005` is applied the sampler's
+  periodic read fails on its own and the queue gauges keep reporting.
 * **Table growth.** `pr_review_jobs` is append-mostly and unbounded. The partial
   indexes keep queue operations flat, but the table itself needs a retention policy
   — monthly partitioning on `created_at`, or a purge of terminal rows older than N

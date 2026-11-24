@@ -1,0 +1,17 @@
+# The "No throughput" drill (docs/observability.md § Phase 5; checklist, phase 5). The
+# same rule with a 15-minute lookback and no working-hours mute (its name is not matched
+# by the mute's route), so it fires within a quiet period instead of after 4 hours of
+# lost reviews. Pushed once with `sync --only drill`; the next normal `rules` sync
+# removes it, because its group is not in the files above.
+groups:
+  - name: drill
+    interval: 1m
+    rules:
+      - alert: NoThroughputDrill
+        expr: |
+          sum(increase(webhook_deliveries_total{outcome="enqueued"}[15m])) == 0
+          unless on() (up{job="api"} == 0)
+        labels: {domain: business, severity: warning, owner: unassigned}
+        annotations:
+          summary: "Drill: no review was enqueued in 15 minutes."
+          runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#no-throughput

@@ -7,6 +7,7 @@ import httpx
 
 from adapters.github.app_auth import GitHubAppAuth
 from adapters.github.config import PROVIDER_NAME, GitHubAppSettings
+from adapters.github.rate_limit import RATE_LIMIT_HOOKS
 from domain.errors import ForgeUnavailableError, InstallationGoneError
 from domain.repositories import Repository
 
@@ -47,7 +48,9 @@ class GitHubInstallationGateway:
         repositories: list[Repository] = []
         total: int | None = None
         async with httpx.AsyncClient(
-            timeout=self._settings.timeout_seconds, transport=self._transport
+            timeout=self._settings.timeout_seconds,
+            transport=self._transport,
+            event_hooks=RATE_LIMIT_HOOKS,
         ) as client:
             for page_number in range(1, MAX_PAGES + 1):
                 body = await self._fetch_page(client, url, headers, installation_id, page_number)

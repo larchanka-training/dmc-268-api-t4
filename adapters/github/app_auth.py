@@ -12,6 +12,7 @@ import httpx
 import jwt
 
 from adapters.github.config import PROVIDER_NAME, GitHubAppSettings
+from adapters.github.rate_limit import RATE_LIMIT_HOOKS
 from domain.errors import ForgeUnavailableError, InstallationGoneError
 from domain.ports import Clock
 
@@ -84,7 +85,9 @@ class GitHubAppAuth:
             "X-GitHub-Api-Version": "2022-11-28",
         }
         async with httpx.AsyncClient(
-            timeout=self._settings.timeout_seconds, transport=self._transport
+            timeout=self._settings.timeout_seconds,
+            transport=self._transport,
+            event_hooks=RATE_LIMIT_HOOKS,
         ) as client:
             try:
                 response = await client.post(url, headers=headers)

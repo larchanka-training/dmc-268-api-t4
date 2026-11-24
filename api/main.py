@@ -173,8 +173,12 @@ def create_app(
     app.state.alert_relay = alert_relay
 
     @app.exception_handler(ApiError)
-    async def handle_api_error(_: Request, error: Exception) -> JSONResponse:
+    async def handle_api_error(request: Request, error: Exception) -> JSONResponse:
         assert isinstance(error, ApiError)
+        if error.status_code == 404 and request.path_params:
+            # An id in the path that is not there, or not the caller's: enumeration
+            # looks like a run of these (docs/observability.md § Metrics).
+            metrics.count_security_event("id_not_found")
         return api_error_response(error)
 
     @app.middleware("http")
@@ -213,7 +217,7 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     the app enqueues into PostgreSQL and a separate worker process consumes
     (`dispatch_inline=False`, engine disposed on app shutdown); without it,
     dev mode keeps the in-memory queue and the API claims inline
-    (tasks/plan-pg-queue.md)."""
+    (docs/tasks/plan-pg-queue.md)."""
     # Before the app exists, so the SDK's FastAPI integration instruments it.
     init_sentry(SentrySettings.from_env())
     clock = SystemClock()
@@ -235,7 +239,7 @@ def build_app(transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         dispatch_inline = False
     else:
         # No DATABASE_URL: dev mode keeps the in-memory queue (the
-        # PostgreSQL path exists — tasks/plan-pg-queue.md) and the API
+        # PostgreSQL path exists — docs/tasks/plan-pg-queue.md) and the API
         # claims inline; no worker process is used.
         logger.info("queue.in_memory")
         jobs = queue_stats = MemoryJobStore(clock=clock)

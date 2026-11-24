@@ -81,6 +81,17 @@ services:
       # on every deploy and, soon, the Let's Encrypt rate limit.
       - caddy_data:/data
       - caddy_config:/config
+    # Docker keeps a container's stderr in a json-file with no limit by default. Caddy's
+    # error lines carry the visitor's IP and the full URL, the OAuth code included: Alloy
+    # cuts the query only from the copy it ships (docs/privacy-policy.md). So keep at most
+    # 3 files of 10 MB here, deleting the oldest. Alloy reads through Docker's API, which
+    # follows the rotation. Changing these options recreates Caddy on the next deploy, a
+    # second or so offline.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # Grafana Alloy (docs/observability.md § Metrics, § System): scrapes api, worker and
   # caddy, runs the host, container and Postgres exporters, tails ./logs and pushes both
@@ -105,6 +116,8 @@ services:
       GRAFANA_CLOUD_LOKI_URL: ${GRAFANA_CLOUD_LOKI_URL:-}
       GRAFANA_CLOUD_LOKI_USER: ${GRAFANA_CLOUD_LOKI_USER:-}
       GRAFANA_CLOUD_TOKEN: ${GRAFANA_CLOUD_TOKEN:-}
+      # config.alloy ships this project's caddy and postgres logs, and no other container's.
+      COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME}
       POSTGRES_EXPORTER_PASSWORD: ${POSTGRES_EXPORTER_PASSWORD:-}
     # No ports: its UI listens on the container's loopback. Every mount is read-only but
     # the WAL. Reading the Docker and containerd sockets is root-equivalent, a deliberate

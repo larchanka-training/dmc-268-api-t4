@@ -1,14 +1,16 @@
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import httpx
 
 from adapters.llm.config import LLMSettings, ProviderSettings
 from adapters.llm.gateway import ChatProvider, FallbackLLMGateway
+from adapters.llm.jev import TYPESAFE
 from adapters.llm.keys import Clock, KeyPool
 from adapters.llm.openai_compat import OpenAICompatibleProvider
 from adapters.llm.reflection import JevVerifier
 from adapters.llm.rule_screen import JevRuleScreen
+from adapters.observability import metrics
 from adapters.resilience import default_resilience
 from domain.ports import LLMGateway
 
@@ -31,6 +33,7 @@ def build_gateway(
     ]
     if wrap_provider is not None:
         providers = [wrap_provider(provider) for provider in providers]
+    _init_metrics(providers, settings)
     return FallbackLLMGateway(
         providers,
         max_input_tokens=settings.max_input_tokens,
@@ -96,3 +99,18 @@ def _build_provider(
         transport=transport,
         resilience=default_resilience(provider.name) if resilient else None,
     )
+
+
+def _init_metrics(providers: Sequence[ChatProvider], settings: LLMSettings) -> None:
+    """Start every LLM series the gateway can produce at 0 (docs/observability.md §
+    Metrics): each chat provider for the review, its correction and the summary, and
+    TypeSafe for the rule screen and the verifier when it is on."""
+    callers: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = [
+        (provider.name, provider.model, ("review", "correction", "summary"), metrics.LLM_OUTCOMES)
+        for provider in providers
+    ]
+    if settings.reflection.is_active:
+        callers.append(
+            (TYPESAFE, settings.reflection.model, ("rule_screen", "verify"), ("ok", "error"))
+        )
+    metrics.init_llm_metrics(callers)

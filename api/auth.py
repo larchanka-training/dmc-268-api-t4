@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 
+from adapters.observability import metrics
 from api.deps import (
     NO_STORE,
     OAUTH_COOKIE,
@@ -110,6 +111,7 @@ async def complete_sign_in(
     attempt = await service.attempts.take(attempt_id) if attempt_id else None
     if attempt is None or not attempt.matches(state or ""):
         logger.info("auth.sign_in.rejected", extra={"result": SignInResult.STATE_MISMATCH.value})
+        metrics.count_security_event("oauth_state_mismatch")
         return _callback_redirect(SignInResult.STATE_MISMATCH, None)
 
     # 2. The user cancelled on GitHub.

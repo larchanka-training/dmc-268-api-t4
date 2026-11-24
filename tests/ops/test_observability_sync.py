@@ -8,14 +8,13 @@ from typing import Any
 
 import httpx
 import pytest
-import yaml
 
 from ops.observability import sync
 from ops.observability.sync import Settings, SyncError, run
 
 TOKEN = "glsa_" + "S3cr3t" * 6
 SM_TOKEN = "sm-" + "T0k3n" * 6
-NAMESPACE = "/api/convert/prometheus/config/v1/rules/DMC-268%20alerts"
+RULE_GROUPS = "/api/v1/provisioning/folder/dmc268-alerts/rule-groups"
 
 
 @dataclass
@@ -46,19 +45,29 @@ class FakeGrafana:
         method, path = request.method, request.url.raw_path.decode().split("?")[0]
         if method == "GET":
             return self._get(path, request)
+        if (method, path) == ("POST", "/api/folders") and self.folder:
+            return httpx.Response(412, json={"message": "the folder has been changed"})
         return httpx.Response(200, json={})
 
     def _get(self, path: str, request: httpx.Request) -> httpx.Response:
-        if path == "/api/folders/dmc268":
-            return httpx.Response(200 if self.folder else 404, json={})
         if path == "/api/v1/provisioning/contact-points":
             return httpx.Response(200, json=[{"name": "telegram"}] if self.contact_point else [])
         if path.startswith("/api/v1/provisioning/mute-timings/"):
             found = path.rsplit("/", 1)[1] in self.mute_timings
             return httpx.Response(200 if found else 404, json={})
-        if path == NAMESPACE:
-            groups = [{"name": name} for name in self.rule_groups]
-            return httpx.Response(200, json={"DMC-268 alerts": groups})
+        if path == "/api/v1/provisioning/alert-rules":
+            rules = [
+                {
+                    "uid": f"old-{name}",
+                    "title": "Old",
+                    "folderUID": "dmc268-alerts",
+                    "ruleGroup": name,
+                }
+                for name in self.rule_groups
+            ]
+            # Somebody else's rule, in another folder: never touched.
+            rules.append({"uid": "theirs", "folderUID": "other", "ruleGroup": "retired"})
+            return httpx.Response(200, json=rules)
         if path == "/api/v1/probe/list":
             return httpx.Response(200, json=self.probes)
         if path == "/api/v1/check/list":
@@ -108,6 +117,31 @@ def test_settings_come_from_the_environment_and_hide_the_tokens() -> None:
     assert TOKEN not in repr(settings)
 
 
+def test_a_bare_host_gets_https_and_a_trailing_slash_goes() -> None:
+    settings = Settings.from_env(
+        {
+            "GRAFANA_URL": "stack.grafana.net",
+            "GRAFANA_SM_URL": "synthetic-monitoring-api-eu-west-2.grafana.net/",
+            "SENTRY_ORG_URL": "http://acme.sentry.io/",
+        }
+    )
+
+    assert settings.grafana_url == "https://stack.grafana.net"
+    assert settings.sm_url == "https://synthetic-monitoring-api-eu-west-2.grafana.net"
+    assert settings.sentry_org_url == "http://acme.sentry.io"
+
+
+def test_a_transport_failure_names_the_api_and_the_call_but_never_the_token() -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    with pytest.raises(SyncError) as raised:
+        run(SETTINGS, ("synthetics",), transport=httpx.MockTransport(refuse), report=lambda _: None)
+
+    assert "GET synthetic-monitoring/api/v1/probe/list failed: ConnectError" in str(raised.value)
+    assert SM_TOKEN not in str(raised.value)
+
+
 def test_dashboards_go_into_their_folder_and_overwrite() -> None:
     grafana = FakeGrafana()
 
@@ -130,31 +164,79 @@ def test_dashboards_go_into_their_folder_and_overwrite() -> None:
     assert sentry["query"] == "https://acme.de.sentry.io"
 
 
-def test_an_existing_folder_is_not_created_again() -> None:
+def test_an_existing_folder_is_kept_and_the_dashboards_still_pushed() -> None:
+    """Grafana 13 answers 412 to a folder uid that exists (409 before)."""
     grafana = FakeGrafana(folder=True)
+
+    lines = sync_with(grafana, "dashboards")
+
+    assert "  folder DMC-268 exists" in lines
+    assert len([r for r in grafana.requests if r.url.path == "/api/dashboards/db"]) == 4
+
+
+def test_the_folder_is_never_looked_up_first() -> None:
+    """Below Admin, a lookup of a missing folder is 403, not 404 (seen with Editor)."""
+    grafana = FakeGrafana()
 
     sync_with(grafana, "dashboards")
 
-    assert ("POST", "/api/folders") not in grafana.writes()
+    assert not [r for r in grafana.requests if r.method == "GET" and "folders" in r.url.path]
 
 
-def test_rules_are_imported_group_by_group_and_a_removed_group_is_deleted() -> None:
+def test_rules_are_written_group_by_group_and_a_removed_group_is_deleted() -> None:
     grafana = FakeGrafana(rule_groups=["api", "retired"])
 
     sync_with(grafana, "rules")
 
-    imports = [r for r in grafana.requests if r.method == "POST"]
-    groups = [yaml.safe_load(r.content) for r in imports]
-    assert [g["name"] for g in groups] == [
-        "api", "business", "db", "edge", "host", "monitoring", "worker",
-    ]  # fmt: skip
-    assert all(
-        r.headers["X-Grafana-Alerting-Datasource-UID"] == "grafanacloud-prom" for r in imports
+    assert ("POST", "/api/folders") in grafana.writes()  # the rules' folder
+    puts = [r for r in grafana.requests if r.method == "PUT"]
+    groups = [json.loads(r.content) for r in puts]
+    names = ["api", "business", "db", "edge", "host", "monitoring", "worker"]
+    assert [g["title"] for g in groups] == names
+    assert [r.url.path for r in puts] == [f"{RULE_GROUPS}/{name}" for name in names]
+    assert {g["interval"] for g in groups} == {60}
+    rules = [rule for g in groups for rule in g["rules"]]
+    assert len(rules) == 24
+    assert len({rule["uid"] for rule in rules}) == 24  # "Target down" is in three groups
+    assert {rule["data"][0]["datasourceUid"] for rule in rules} == {"grafanacloud-prom"}
+    deletes = [path for method, path in grafana.writes() if method == "DELETE"]
+    assert deletes == ["/api/v1/provisioning/alert-rules/old-retired"]
+
+
+def test_a_rule_fires_once_per_returned_series_as_in_prometheus() -> None:
+    """The form Grafana's own import of Prometheus rules produces (Grafana 13.2)."""
+    source = {
+        "alert": "TargetDown",
+        "expr": 'up{job="api"} == 0',
+        "for": "2m",
+        "labels": {"domain": "api", "severity": "critical"},
+        "annotations": {"summary": "The API answers no scrape."},
+    }
+
+    rule = sync.grafana_rule(source, "api", "grafanacloud-prom")
+
+    query, math, threshold = rule["data"]
+    assert query["model"]["expr"] == 'up{job="api"} == 0'
+    assert query["model"]["instant"] is True
+    assert query["relativeTimeRange"] == {"from": 660, "to": 60}  # a minute in the past
+    assert math["model"]["expression"] == "is_number($query) || is_nan($query) || is_inf($query)"
+    assert threshold["model"]["expression"] == "prometheus_math"
+    assert threshold["model"]["conditions"][0]["evaluator"] == {"type": "gt", "params": [0]}
+    assert rule["condition"] == "threshold"
+    assert rule["noDataState"] == "OK"
+    assert rule["missingSeriesEvalsToResolve"] == 1
+    assert (rule["uid"], rule["for"], rule["labels"]) == (
+        "dmc268-api-targetdown",
+        "2m",
+        source["labels"],
     )
-    assert all(r.headers["Content-Type"] == "application/yaml" for r in imports)
-    assert sum(len(g["rules"]) for g in groups) == 24
-    assert ("DELETE", f"{NAMESPACE}/retired") in grafana.writes()
-    assert ("DELETE", f"{NAMESPACE}/api") not in grafana.writes()
+
+
+def test_a_long_rule_uid_is_hashed_into_forty_characters() -> None:
+    uid = sync.rule_uid("monitoring", "A" * 40)
+
+    assert len(uid) <= 40
+    assert uid == sync.rule_uid("monitoring", "A" * 40)
 
 
 def test_the_contact_point_is_created_once_with_placeholders_and_editable() -> None:
@@ -311,3 +393,39 @@ def test_main_reports_a_failure_on_stderr_and_exits_1(
 def test_main_refuses_an_unknown_part() -> None:
     with pytest.raises(SystemExit):
         sync.main(["--only", "dashbords"])
+
+
+def test_the_drill_is_pushed_alone_and_deletes_nothing() -> None:
+    grafana = FakeGrafana(rule_groups=["api"])
+
+    sync_with(grafana, "drill")
+
+    puts = [r for r in grafana.requests if r.method == "PUT"]
+    assert [r.url.path for r in puts] == [f"{RULE_GROUPS}/drill"]
+    [rule] = json.loads(puts[0].content)["rules"]
+    assert rule["title"] == "NoThroughputDrill"
+    assert not [path for method, path in grafana.writes() if method == "DELETE"]
+
+
+def test_the_next_rules_sync_removes_the_drill() -> None:
+    grafana = FakeGrafana(rule_groups=["drill"])
+
+    sync_with(grafana, "rules")
+
+    assert ("DELETE", "/api/v1/provisioning/alert-rules/old-drill") in grafana.writes()
+
+
+def test_a_full_sync_leaves_the_drill_out() -> None:
+    grafana = FakeGrafana()
+
+    sync_with(grafana)
+
+    assert f"{RULE_GROUPS}/drill" not in [r.url.path for r in grafana.requests]
+
+
+def test_main_accepts_the_drill_part(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(sync, "run", lambda settings, parts, **_: calls.append(tuple(parts)))
+
+    assert sync.main(["--only", "drill"]) == 0
+    assert calls == [("drill",)]

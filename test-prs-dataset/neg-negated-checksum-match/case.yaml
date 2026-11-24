@@ -1,0 +1,8 @@
+id: neg-negated-checksum-match
+intent: "negative control: a negated grep decides whether a config changed, and fails safe"
+pattern: "looks like a missed update, is not (`! grep -qxF` over the server's checksums: no line, an empty list included, means changed)"
+metrics: negative control
+fixture: change.diff
+title: "Reload nginx only when its config changed"
+description: "Compares the config's checksum with the server's before uploading it, so a deploy that leaves nginx.conf alone skips the reload."
+expected: []

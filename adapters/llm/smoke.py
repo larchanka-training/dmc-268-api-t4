@@ -1,4 +1,9 @@
-"""Manual smoke check against a live provider. Never run from tests or CI."""
+"""Manual smoke check against a live provider. Never run from tests or CI.
+
+With SENTRY_DSN set, the review is one ``llm.smoke`` transaction, so the gateway's
+``llm.*`` spans reach Sentry (docs/observability.md § Review pipeline); ENV names the
+environment, ``smoke`` in llm-smoke.yml.
+"""
 
 import argparse
 import asyncio
@@ -8,8 +13,12 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
+import sentry_sdk
+
 from adapters.llm.config import LLMSettings
 from adapters.llm.factory import build_gateway
+from adapters.observability.config import SentrySettings
+from adapters.observability.sentry import init_sentry
 from domain.diff import parse_diff
 from domain.diff_filter import filter_files
 from domain.errors import LLMConfigurationError, LLMGatewayError
@@ -41,9 +50,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+async def _review(settings: LLMSettings, request: ReviewRequest) -> ReviewResult:
+    # A transaction to hang the gateway's spans on; a no-op without a DSN.
+    with sentry_sdk.start_transaction(name="llm.smoke", op="llm.smoke"):
+        return await build_gateway(settings).review(request)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    init_sentry(SentrySettings.from_env())
     try:
         settings = LLMSettings.from_env()
     except LLMConfigurationError as exc:
@@ -69,10 +85,12 @@ def main(argv: list[str] | None = None) -> int:
         rules_markdown=rules_markdown,
     )
     try:
-        result = asyncio.run(build_gateway(settings).review(request))
+        result = asyncio.run(_review(settings, request))
     except LLMGatewayError as exc:
         print(f"review failed: {exc}", file=sys.stderr)
         return EXIT_REVIEW_FAILED
+    finally:
+        sentry_sdk.flush()
     print(json.dumps(asdict(result), indent=2, ensure_ascii=False))
     if args.check_run is not None:
         args.check_run.write_text(check_run_summary(result, diff_text), encoding="utf-8")

@@ -1,6 +1,6 @@
 # Todo — GitHub Webhook + VCS client + diff parser (Context Level 1)
 
-Plan: [tasks/plan.md](plan.md)
+Plan: [docs/tasks/plan.md](plan.md)
 
 - [x] 1. Domain: diff parser + chunking — `domain/diff.py`, `DiffFormatError`
       in `domain/errors.py`, tests `tests/domain/test_diff_parser.py`

@@ -37,11 +37,15 @@ follows them through every hop:
 - Alloy's components;
 - all seven targets and this run's values in Prometheus;
 - the same job in the API's and the worker's log lines in Loki;
+- Caddy's and Postgres's lines in Loki, from Docker: with the API stopped for a moment,
+  Caddy's error line for `/api/auth/callback?code=…` arrives as `?redacted`, and the
+  code is in no line;
 - the relay: a signed Sentry alert ends as `alert.dropped` (the placeholder for the
   bot), an unsigned one is 401, an hour-old one is dropped as stale and counted;
 - Sentry: a transaction per webhook request, with environment and release `lab`, without
   the signature header or the body; none for `/health` or the relay; the PR title in no
-  Sentry payload;
+  Sentry payload; the claimed job as a `review.job` transaction in its webhook's trace,
+  with its steps as spans;
 - every alert rule loaded and evaluating in Grafana, and the four dashboards there.
 
 It also checks that metrics are not public through Caddy, that there are no `_created`

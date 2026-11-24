@@ -130,6 +130,9 @@ class _ReapStore:
         self.reaped.set()
         return 0
 
+    async def record_periodic_run(self, task: str, interval_seconds: float) -> None:
+        return None
+
 
 async def test_reaper_failures_log_one_warning_and_one_recovery(
     caplog: pytest.LogCaptureFixture,

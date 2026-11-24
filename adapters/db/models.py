@@ -14,6 +14,7 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -137,6 +138,9 @@ class ReviewJobORM(Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
     error_log: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The enqueuing request's trace (sentry-trace and baggage headers), continued by
+    # the worker as the review.job span (migration 0004; docs/observability.md).
+    trace_context: Mapped[dict[str, str] | None] = mapped_column(JSONB, nullable=True)
 
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -338,3 +342,16 @@ class ReviewStepORM(Base):
         # Latency aggregates per stage, e.g. p95 of LLM_CALL this week.
         Index("ix_pr_review_steps_step_started", "step", "started_at"),
     )
+
+
+class PeriodicTaskRunORM(Base):
+    """A periodic task's last success, upserted by the leader worker after each tick
+    (migration 0005; docs/observability.md § Application, "DB sampler"). The API's DB
+    sampler exports it, so "Periodic task stale" survives restarts of either process."""
+
+    __tablename__ = "periodic_task_runs"
+
+    task: Mapped[str] = mapped_column(String(64), primary_key=True)
+    last_success_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # The configured interval: the alert waits two of them plus the sampler's delay.
+    interval_seconds: Mapped[float] = mapped_column(Float, nullable=False)

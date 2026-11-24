@@ -32,8 +32,8 @@ groups:
           summary: The reaper took back an expired lease in the last hour.
           runbook_url: https://github.com/larchanka-training/dmc-268-api-t4/blob/main/docs/runbooks.md#lease-expiry
 
-      # The 180 s covers the sampler and scrape delay. Quiet until phase 5 adds the
-      # metrics (periodic_task_runs).
+      # The 180 s covers the sampler and scrape delay. The series come from
+      # periodic_task_runs, one per task the leader records.
       - alert: PeriodicTaskStale
         expr: |
           time() - periodic_task_last_success_timestamp

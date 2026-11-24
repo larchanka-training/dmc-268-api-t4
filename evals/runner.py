@@ -72,10 +72,10 @@ class _RecordingProvider:
     def model(self) -> str:
         return self._inner.model
 
-    async def complete(self, messages: Sequence[ChatMessage]) -> str:
+    async def complete(self, messages: Sequence[ChatMessage], *, purpose: str = "review") -> str:
         self._recorder.calls += 1
         self._recorder.input_tokens += estimate_tokens(list(messages))
-        reply = await self._inner.complete(messages)
+        reply = await self._inner.complete(messages, purpose=purpose)
         self._recorder.count_dropped(reply)
         return reply
 

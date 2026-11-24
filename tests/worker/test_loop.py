@@ -115,6 +115,17 @@ async def _wait_completed(store: SignallingStore, count: int) -> None:
     await asyncio.wait_for(waiter(), timeout=1.0)
 
 
+async def _wait_claims(store: SignallingStore, count: int) -> None:
+    """The loop claims again once a job's run has fully ended, the lease heartbeat
+    stopped included, so the idle claim can land a few event-loop turns later."""
+
+    async def waiter() -> None:
+        while store.claim_attempts < count:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(waiter(), timeout=1.0)
+
+
 async def _status(store: JobRepository, job_id: str) -> ReviewJobStatus:
     job = await store.get(job_id)
     assert job is not None
@@ -167,6 +178,7 @@ async def test_worker_loop_drains_queued_jobs_then_goes_idle() -> None:
     loop_task = asyncio.create_task(worker_loop(store, vcs, "w-0", wake, stop, poll_interval=60))
     try:
         await _wait_completed(store, 3)
+        await _wait_claims(store, 4)
 
         # Drained every claimable job with one slot, then attempted one
         # more claim (nothing eligible) before parking: 3 wins + 1 idle.
