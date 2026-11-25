@@ -50,6 +50,7 @@ from api.github_setup import router as github_setup_router
 from api.internal_alerts import AlertRelay
 from api.internal_alerts import router as internal_alerts_router
 from api.jobs import router as jobs_router
+from api.playground import router as playground_router
 from api.repositories import router as repositories_router
 from api.webhooks.github import GitHubWebhookDeps
 from api.webhooks.github import router as github_webhook_router
@@ -62,6 +63,7 @@ from domain.ports import (
     JobStore,
     QueueStats,
     ReviewCommentStore,
+    RulesParser,
     SessionStore,
     SignInAttemptStore,
 )
@@ -143,6 +145,7 @@ def create_app(
     metrics_port: int | None = None,
     queue_stats: QueueStats | None = None,
     alert_relay: AlertRelay | None = None,
+    rules_parser: RulesParser | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="DMC-268 API",
@@ -160,6 +163,7 @@ def create_app(
         job_events=job_events if job_events is not None else InMemoryJobEventsSource(),
         jobs=jobs,
         findings=findings if findings is not None else MemoryReviewCommentStore(jobs),
+        rules_parser=rules_parser if rules_parser is not None else MarkdownRulesParser(),
         job_rules=job_rules,
         finding_context=finding_context,
     )
@@ -204,6 +208,7 @@ def create_app(
     app.include_router(github_setup_router)
     app.include_router(github_webhook_router)
     app.include_router(jobs_router)
+    app.include_router(playground_router)
     app.include_router(internal_alerts_router)
     metrics.init_api_metrics(_route_methods(app.routes), webhook_providers=(PROVIDER_NAME,))
     return app

@@ -1,7 +1,11 @@
 """Repository review rules (`.review/rules.md`): parsing, sanitizing and limits.
 
-Interim format until the tech lead's RULES_FORMAT_SPEC.md (#31): a `#`/`##` heading names a
-section, every list item under it is one rule, and everything outside list items is ignored.
+docs/RULES_FORMAT_SPEC.md §2: a heading of any level names a section, every list item
+under it is one rule, and everything outside list items is ignored. Recognised section
+titles give their rules a category (§2.2); items under `# Ignore` are directives (§2.3),
+validated here and never sent to a model. Applying them (the diff filter and the
+category mute) is not wired yet. Every rule and directive keeps the lines it came from,
+and every dropped item gets a diagnostic, for the rules editor in the console.
 """
 
 import dataclasses
@@ -10,11 +14,22 @@ import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from domain.repository_rules import ParsedRules, PreviewRule
+from domain.models import Category
+from domain.repository_rules import (
+    IgnoreDirective,
+    IgnoreKind,
+    ParsedRules,
+    PreviewRule,
+    RulesDiagnostic,
+    RulesDiagnosticCode,
+    is_ignore_section,
+    section_category,
+)
 
 # Limits on what a repository may feed into the prompt; everything over them is dropped.
 RULES_MAX = 50
 RULES_MAX_CHARS = 8000
+IGNORE_MAX = 100
 DEFAULT_SECTION = "General"
 
 # Rules that look like attempts to steer the model are dropped whole. This is a second line
@@ -45,6 +60,8 @@ _HTML_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
 _HEADING = re.compile(r"^ {0,3}#{1,6}\s+(?P<title>.*?)\s*#*\s*$")
 _LIST_ITEM = re.compile(r"^ {0,3}(?:[-*+]|\d{1,9}[.)])\s+(?P<text>.*)$")
 _WHITESPACE = re.compile(r"\s+")
+_DIRECTIVE = re.compile(r"^(?P<kind>path|category)\s*:\s*(?P<value>.*)$", re.IGNORECASE)
+_CATEGORY_VALUES = frozenset(category.value for category in Category)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +69,11 @@ class Rule:
     id: str
     section: str
     text: str
+    # The category of a recognised section (RULES_FORMAT_SPEC.md §2.2), else None.
+    category: Category | None = None
+    # The list item's lines in the file, 1-based and inclusive; 0 when not from a file.
+    line_start: int = 0
+    line_end: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +81,9 @@ class RuleSet:
     rules: tuple[Rule, ...] = ()
     dropped_suspicious: int = 0
     dropped_over_limit: int = 0
+    # `# Ignore` directives (§2.3): parsed and validated, never sent to a model.
+    ignore: tuple[IgnoreDirective, ...] = ()
+    diagnostics: tuple[RulesDiagnostic, ...] = ()
 
     @property
     def ids(self) -> frozenset[str]:
@@ -85,37 +110,77 @@ def _collapse(text: str) -> str:
     return _WHITESPACE.sub(" ", text).strip()
 
 
-def _split_items(markdown: str) -> list[tuple[str, str]]:
-    """(section, text) per list item, in document order."""
-    items: list[tuple[str, str]] = []
+def _blank_comments(text: str) -> str:
+    """Drop HTML comments but keep their line breaks, so line numbers stay true."""
+    return _HTML_COMMENT.sub(lambda match: "\n" * match.group().count("\n"), text)
+
+
+@dataclass(frozen=True, slots=True)
+class _Item:
+    section: str
+    # Line of the heading that opened the section; 0 for the default section.
+    section_line: int
+    text: str
+    line_start: int
+    line_end: int
+
+
+def _split_items(markdown: str) -> list[_Item]:
+    """One entry per list item, in document order, with its section and lines."""
+    items: list[_Item] = []
     section = DEFAULT_SECTION
+    section_line = 0
     current: list[str] | None = None
+    start = end = 0
 
     def close() -> None:
         nonlocal current
         if current is not None:
             text = _collapse(" ".join(current))
             if text:
-                items.append((section, text))
+                items.append(_Item(section, section_line, text, start, end))
         current = None
 
-    for line in markdown.split("\n"):
+    for number, line in enumerate(markdown.split("\n"), start=1):
         heading = _HEADING.match(line)
         item = _LIST_ITEM.match(line)
         if heading:
             close()
             section = _collapse(heading.group("title")) or DEFAULT_SECTION
+            section_line = number
         elif item:
             close()
             current = [item.group("text")]
+            start = end = number
         elif not line.strip():
             continue
         elif current is not None and line[:1] in (" ", "\t"):
             current.append(line)
+            end = number
         else:
             close()
     close()
     return items
+
+
+def _parse_directive(text: str) -> tuple[IgnoreKind, str] | RulesDiagnosticCode:
+    """`path: <glob>` or `category: <name>`, or the reason the item is invalid."""
+    match = _DIRECTIVE.match(text)
+    if match is None:
+        return RulesDiagnosticCode.IGNORE_INVALID
+    kind = IgnoreKind(match.group("kind").casefold())
+    value = match.group("value").strip().strip("`").strip()
+    if kind is IgnoreKind.PATH:
+        # No negation (§2.3), and a glob is one token.
+        if not value or value.startswith("!") or _WHITESPACE.search(value):
+            return RulesDiagnosticCode.IGNORE_INVALID
+        return kind, value
+    name = value.casefold()
+    if name == Category.SECURITY:
+        return RulesDiagnosticCode.IGNORE_SECURITY
+    if name not in _CATEGORY_VALUES:
+        return RulesDiagnosticCode.IGNORE_UNKNOWN_CATEGORY
+    return kind, name
 
 
 def rule_id(index: int) -> str:
@@ -130,25 +195,67 @@ def renumber_rules(rules: Sequence[Rule]) -> tuple[Rule, ...]:
 
 
 def parse_rules(markdown: str | None) -> RuleSet:
-    """Turn rules.md into numbered rules, enforcing the heuristic filter and the limits."""
+    """Turn rules.md into numbered rules and ignore directives, enforcing the heuristic
+    filter and the limits, and say why each dropped item was dropped."""
     if not markdown or not markdown.strip():
         return RuleSet()
-    text = _HTML_COMMENT.sub("", sanitize_rules_text(markdown))
+    text = _blank_comments(sanitize_rules_text(markdown))
 
     kept: list[Rule] = []
+    ignore: list[IgnoreDirective] = []
+    diagnostics: list[RulesDiagnostic] = []
+    noted_sections: set[int] = set()
     suspicious = 0
     over_limit = 0
     total_chars = 0
-    for section, rule_text in _split_items(text):
-        if is_suspicious_rule(rule_text) or is_suspicious_rule(section):
+
+    def note(code: RulesDiagnosticCode, start: int, end: int) -> None:
+        diagnostics.append(RulesDiagnostic(code=code, line_start=start, line_end=end))
+
+    for item in _split_items(text):
+        if is_ignore_section(item.section):
+            # Directives skip the pattern filter: they never reach a model (§6).
+            if len(ignore) >= IGNORE_MAX:
+                note(RulesDiagnosticCode.IGNORE_OVER_LIMIT, item.line_start, item.line_end)
+                continue
+            directive = _parse_directive(item.text)
+            if isinstance(directive, RulesDiagnosticCode):
+                note(directive, item.line_start, item.line_end)
+                continue
+            kind, value = directive
+            ignore.append(IgnoreDirective(kind, value, item.line_start, item.line_end))
+            continue
+
+        category = section_category(item.section)
+        if category is None and item.section_line and item.section_line not in noted_sections:
+            noted_sections.add(item.section_line)
+            note(RulesDiagnosticCode.SECTION_OTHER, item.section_line, item.section_line)
+        if is_suspicious_rule(item.text) or is_suspicious_rule(item.section):
             suspicious += 1
+            note(RulesDiagnosticCode.RULE_SUSPICIOUS, item.line_start, item.line_end)
             continue
-        if len(kept) >= RULES_MAX or total_chars + len(rule_text) > RULES_MAX_CHARS:
+        if len(kept) >= RULES_MAX or total_chars + len(item.text) > RULES_MAX_CHARS:
             over_limit += 1
+            note(RulesDiagnosticCode.RULE_OVER_LIMIT, item.line_start, item.line_end)
             continue
-        total_chars += len(rule_text)
-        kept.append(Rule(id=rule_id(len(kept) + 1), section=section, text=rule_text))
-    return RuleSet(rules=tuple(kept), dropped_suspicious=suspicious, dropped_over_limit=over_limit)
+        total_chars += len(item.text)
+        kept.append(
+            Rule(
+                id=rule_id(len(kept) + 1),
+                section=item.section,
+                text=item.text,
+                category=category,
+                line_start=item.line_start,
+                line_end=item.line_end,
+            )
+        )
+    return RuleSet(
+        rules=tuple(kept),
+        dropped_suspicious=suspicious,
+        dropped_over_limit=over_limit,
+        ignore=tuple(ignore),
+        diagnostics=tuple(diagnostics),
+    )
 
 
 class MarkdownRulesParser:
@@ -158,9 +265,18 @@ class MarkdownRulesParser:
         rule_set = parse_rules(markdown)
         return ParsedRules(
             rules=tuple(
-                PreviewRule(id=rule.id, section=rule.section, text=rule.text)
+                PreviewRule(
+                    id=rule.id,
+                    section=rule.section,
+                    text=rule.text,
+                    category=rule.category,
+                    line_start=rule.line_start,
+                    line_end=rule.line_end,
+                )
                 for rule in rule_set.rules
             ),
             dropped_suspicious=rule_set.dropped_suspicious,
             dropped_over_limit=rule_set.dropped_over_limit,
+            ignore=rule_set.ignore,
+            diagnostics=rule_set.diagnostics,
         )

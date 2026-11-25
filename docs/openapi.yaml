@@ -35,6 +35,8 @@ tags:
     description: Repositories connected through the forge installation
   - name: jobs
     description: Review jobs, their findings and the diff context behind them
+  - name: playground
+    description: Trying review rules on code before committing them (issue #53)
   - name: billing
     description: Plans, subscription and usage against quota
   - name: config
@@ -306,6 +308,47 @@ paths:
           $ref: "#/components/responses/NotFound"
         "502":
           description: The forge could not be reached (`forge_unavailable`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /playground/rules/parse:
+    post:
+      tags: [playground]
+      summary: Parse a draft `.review/rules.md` as a review would
+      description: |
+        The rules editor of the playground (issue #53). Parses the draft with the parser
+        reviews use, so `rules`, `ignore` and `diagnostics` are exactly what a review would
+        take from that file ([RULES_FORMAT_SPEC.md §2, §4](./RULES_FORMAT_SPEC.md)). No
+        model is called and nothing is stored; the text is returned to the caller and never
+        logged. The rule screen of §6 layer 3 is not run, so a rule it would drop is still
+        listed. Lines are 1-based and inclusive, counted as an editor counts them (`\n`,
+        `\r\n` and a lone `\r` each end a line). Needs `X-Requested-With: fetch` and the
+        app's `Origin` like every unsafe method.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rules_markdown]
+              properties:
+                rules_markdown: { type: string, description: "At most 64 KB as UTF-8." }
+      responses:
+        "200":
+          description: The parsed draft.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ParsedRules" }
+        "400":
+          description: The body is not JSON with a string `rules_markdown` (`invalid_body`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          description: The draft is over the 64 KB a review accepts (`rules_too_large`).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1201,6 +1244,81 @@ components:
           format: uri
           description: Stripe-hosted page to redirect to; short-lived.
 
+    ParsedRules:
+      type: object
+      required: [rules, ignore, diagnostics, dropped_suspicious, dropped_over_limit, limits]
+      properties:
+        rules:
+          type: array
+          items:
+            type: object
+            required: [id, section, category, text, line_start, line_end]
+            properties:
+              id: { type: string, description: "R1, R2, ... after filtering" }
+              section: { type: string }
+              category:
+                type: [string, "null"]
+                enum: [security, correctness, concurrency, performance, maintainability, null]
+                description: |
+                  The category of a recognised section (`Style` is `maintainability`);
+                  null for "other guidance" and the default section `General`.
+              text: { type: string, description: The rule as the model reads it. }
+              line_start: { type: integer, minimum: 1 }
+              line_end: { type: integer, minimum: 1 }
+        ignore:
+          type: array
+          description: "`# Ignore` directives; never sent to a model."
+          items:
+            type: object
+            required: [kind, value, line_start, line_end]
+            properties:
+              kind: { type: string, enum: [path, category] }
+              value:
+                type: string
+                description: A gitignore-style glob, or a category other than security.
+              line_start: { type: integer, minimum: 1 }
+              line_end: { type: integer, minimum: 1 }
+        diagnostics:
+          type: array
+          description: In file order. Codes only; the console words them.
+          items:
+            type: object
+            required: [code, dropped, line_start, line_end]
+            properties:
+              code:
+                type: string
+                enum:
+                  - section_other
+                  - rule_suspicious
+                  - rule_over_limit
+                  - ignore_invalid
+                  - ignore_unknown_category
+                  - ignore_security
+                  - ignore_over_limit
+                description: |
+                  `section_other`: an unrecognised section title, on its heading line;
+                  its rules are "other guidance". `rule_suspicious`: the rule or its
+                  section title looks like an instruction to the model (§6 layer 2).
+                  `rule_over_limit`: past 50 rules or 8000 characters (§4).
+                  `ignore_invalid`: neither `path: <glob>` nor `category: <name>`, an
+                  empty glob, a glob with spaces or a `!` negation.
+                  `ignore_unknown_category`, `ignore_security` (security cannot be
+                  muted), `ignore_over_limit`: past 100 directives.
+              dropped:
+                type: boolean
+                description: Whether the item is left out of the review.
+              line_start: { type: integer, minimum: 1 }
+              line_end: { type: integer, minimum: 1 }
+        dropped_suspicious: { type: integer, minimum: 0 }
+        dropped_over_limit: { type: integer, minimum: 0 }
+        limits:
+          type: object
+          required: [bytes, rules, rule_chars, ignore]
+          properties:
+            bytes: { type: integer, description: Largest file, in UTF-8 bytes. }
+            rules: { type: integer }
+            rule_chars: { type: integer, description: Total rule text, in characters. }
+            ignore: { type: integer }
     RulesPreview:
       type: object
       required:
