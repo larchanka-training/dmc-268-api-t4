@@ -18,6 +18,7 @@ Target layout: [docs/BACKEND_ARCHITECTURE.md § Planned code layout](docs/BACKEN
 | `worker/` | exists (`process.py` processes one job; `loop.py` claim/LISTEN/poll, `run_worker`; `listener.py` LISTEN; `periodic.py` advisory-lock leader + lease reaper; `config.py`, `__main__.py`) | remaining periodic tasks planned: usage rollover, credential health, retention purge, grace expiry |
 | `ops/` | exists (`bootstrap.sh`, `publish_smoke.py`, `observability/`) | `observability/`: Grafana dashboards (`dashboards/build.py` generates the JSON), alert rules with `promtool` tests, the synthetic check and `sync.py`, which pushes them (docs/observability.md, docs/runbooks.md); `replay.py` planned |
 | `evals/`, `test-prs-dataset/` | exists | LLM eval harness (`python -m evals validate\|run`) and the 30-case gold dataset; see [test-prs-dataset/README.md](test-prs-dataset/README.md) |
+| `examples/rules/` | exists | ready `.review/rules.md` templates per stack (Python/FastAPI, TypeScript/React, Go, security baseline); the user guide is [docs/RULES_GUIDE.md](docs/RULES_GUIDE.md); `tests/test_rules_examples.py` parses them |
 | `alembic/` | exists (`0001` review jobs + steps, `0002` published findings, `0003` pg_stat_statements, `0004` jobs' trace_context, `0005` periodic_task_runs) | migrations; tenancy/billing tables later |
 
 ## Commands
