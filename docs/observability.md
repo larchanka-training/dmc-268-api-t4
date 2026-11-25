@@ -194,6 +194,8 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `job.retrying` | info | A retryable failure; the job waits for its next attempt | `job_id`, `provider`, `repo`, `pr_number`, `error_kind`, `attempt`, `next_attempt_at`, `duration_ms` |
 | `job.store.failed` | error | A store call failed while recording the outcome | `job_id`, `provider`, `repo`, `pr_number`, `stage` (`complete`, `fail`, `get`), `error_kind`, `error_type`, `duration_ms` |
 | `job.skipped_check_run` | info when published; warning when posting failed | The PR is over the input budget: the "skipped" check run says why no review appears | `job_id`, `provider`, `repo`, `pr_number`, `input_tokens` (the estimate), `max_input_tokens`, `outcome` (`published`, `failed`); `error_type` when failed |
+| `job.check_run.start_failed` | warning | The "in progress" check run could not be shown; the review goes on | `job_id`, `provider`, `repo`, `pr_number`, `error_type` |
+| `job.check_run.close_failed` | warning | The job failed for good and its in-progress check run could not be closed | `job_id`, `provider`, `repo`, `pr_number`, `error_type` |
 | `job.step_record.failed` | error | Writing a `pr_review_steps` row failed; the job goes on | `job_id`, `step`, `error_type` |
 | `step.finished` | info | A pipeline step ended (the `Observer`, `adapters/observability/observer.py`), with its row, span and `review_step_duration_seconds` | `job_id`, `step`, `outcome` (`OK`, `FAILED`), `duration_ms`; `error_kind` when failed |
 | `job.lease.renew_failed` | warning | The lease heartbeat could not reach Postgres; it tries again next tick (every 60 s), and the reaper takes the job only after ten misses | `job_id`, `provider`, `repo`, `pr_number`, `error_type` |
@@ -230,6 +232,8 @@ the code disagree (`tests/adapters/test_observability_logging.py`).
 | `llm.summary.finished` | info | Per-file review: the summary agent answered | `provider`, `model`, `duration_ms`, `files`, `risk`, `checklist`, `risk_invalid`, `checklist_invalid`, `checklist_trimmed` |
 | `llm.provider.fallback` | warning | A provider failed; the next one is tried | `provider`, `next_provider`, `reason` |
 | `llm.call.failed` | warning | Every provider failed (`AllProvidersFailedError`); the job is retried | `reason`: each provider and its reason, never a response body |
+| `resilience.retrying` | warning | An external call failed and is repeated after a backoff (GitHub, LLM) | `provider`, `attempt`, `delay_seconds` |
+| `resilience.circuit_open` | warning | The circuit breaker is open: the call was not sent | `provider` |
 | `llm.key.rate_limited` | warning | A key got 429 and cools down | `provider`, `key_masked`, `cooldown_seconds` |
 | `llm.key.rejected` | warning | A key got 401 or 403 and is disabled until restart | `provider`, `key_masked`, `http.status` |
 | `llm.verifier.skipped` | warning | The verifier input is over budget; the first pass is kept | `input_tokens`, `max_input_tokens` |

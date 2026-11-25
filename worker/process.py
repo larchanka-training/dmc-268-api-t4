@@ -41,6 +41,7 @@ from domain.findings import NewPublishedFinding, published_findings
 from domain.jobs import LEASE_SECONDS, JobStep
 from domain.ports import (
     ClaimedJob,
+    ExistingCheckRun,
     GitProvider,
     JobRepository,
     JobStats,
@@ -75,6 +76,9 @@ class ReviewStage:
     # Where published findings are kept, and what tells a re-review which ones the
     # pull request already has. Without it every review posts every finding again.
     comments: ReviewCommentStore | None = None
+    # The console's origin: the check run links to `<origin>/runs/<job id>` for the full
+    # report. Without it the check run has no details link.
+    console_url: str | None = None
 
 
 #: The lease is the job's `locked_until`: "this worker holds the job until then". When
@@ -191,6 +195,9 @@ async def _process(
     started = time.monotonic()
     job_id = claimed.job_id
     payload = claimed.payload
+    check: ExistingCheckRun | None = None
+    target: PullRequestTarget | None = None
+    details_url = _details_url(review.console_url if review else None, job_id)
 
     try:
         async with observer.step(JobStep.CLAIMED) as step:
@@ -254,6 +261,7 @@ async def _process(
             if not await _extend_lease(jobs, claimed):
                 return False
             target = _pull_request_target(claimed, context.head_sha)
+            check = await _start_check(review.publisher, target, details_url, claimed, log)
             async with observer.step(JobStep.LLM_CALL) as step:
                 try:
                     result = await review.gateway.review(
@@ -267,8 +275,16 @@ async def _process(
                     # The job still fails as skip_diff_too_large below; the check run
                     # only tells the author why nothing else appears.
                     await _publish_skipped(
-                        review.publisher, target, too_large, len(filtered.kept), claimed, log
+                        review.publisher,
+                        target,
+                        too_large,
+                        len(filtered.kept),
+                        claimed,
+                        log,
+                        check=check,
+                        details_url=details_url,
                     )
+                    check = None
                     raise
                 step.set(
                     provider=result.provider, model=result.model, findings=len(result.findings)
@@ -295,9 +311,11 @@ async def _process(
                 )
                 step.set(findings_total=len(result.findings), already_posted=len(posted))
             if not await _extend_lease(jobs, claimed):
+                await _close_if_superseded(jobs, review.publisher, target, check, claimed, log)
                 return False
             async with observer.step(JobStep.POST_FEEDBACK) as step:
-                outcome = await review.publisher.publish(target, plan)
+                outcome = await review.publisher.publish(target, plan, check, details_url)
+                check = None
                 step.set(
                     comments_posted=len(outcome.comments), inline_fallback=outcome.inline_fallback
                 )
@@ -309,7 +327,7 @@ async def _process(
                     await _keep_findings(review.comments, claimed, published, log)
     except Exception as err:
         error_kind, retryable = classify(err)
-        return await _record_failure(
+        status = await _record_failure(
             jobs,
             claimed,
             log,
@@ -318,6 +336,11 @@ async def _process(
             retryable=retryable,
             error=err,
         )
+        if review is not None:
+            await _close_after_failure(
+                jobs, review.publisher, status, target, check, details_url, claimed, log
+            )
+        return False
 
     try:
         with metrics.timed_db("complete"):
@@ -391,6 +414,131 @@ def _pull_request_target(claimed: ClaimedJob, head_sha: str) -> PullRequestTarge
     )
 
 
+def _details_url(console_url: str | None, job_id: str) -> str | None:
+    return None if console_url is None else f"{console_url.rstrip('/')}/runs/{job_id}"
+
+
+async def _start_check(
+    publisher: ReviewPublisher,
+    target: PullRequestTarget,
+    details_url: str | None,
+    claimed: ClaimedJob,
+    log: logging.Logger,
+) -> ExistingCheckRun | None:
+    """Show the check as in progress. Best effort: a review without the early status is
+    still a review, so a failure is logged (class only) and the job goes on."""
+    try:
+        existing = await publisher.find_check_run(target)
+        return await publisher.start_check(target, existing, details_url)
+    except Exception as err:
+        log.warning(
+            "job.check_run.start_failed",
+            extra={**_job_fields(claimed), "error_type": type(err).__name__},
+        )
+        return None
+
+
+async def _close_after_failure(
+    jobs: JobRepository,
+    publisher: ReviewPublisher,
+    status: ReviewJobStatus | None,
+    target: PullRequestTarget | None,
+    check: ExistingCheckRun | None,
+    details_url: str | None,
+    claimed: ClaimedJob,
+    log: logging.Logger,
+) -> None:
+    """Do not leave an "in progress" check behind once no attempt will complete it.
+
+    Decided on the status the store returned, not on the error kind: a retryable error
+    on the last attempt still ends the job. When this attempt failed before showing its
+    own check (say, the fetch), an earlier attempt's check may still be in progress on
+    the webhook's head SHA, so it is looked up there.
+    """
+    if status is None:
+        if target is not None:
+            await _close_if_superseded(jobs, publisher, target, check, claimed, log)
+        return
+    if status is not ReviewJobStatus.FAILED:
+        return
+    if check is None or target is None:
+        target = _pull_request_target(claimed, claimed.payload.head_sha)
+        try:
+            check = await publisher.find_check_run(target, in_progress_only=True)
+        except Exception as err:
+            log.warning(
+                "job.check_run.close_failed",
+                extra={**_job_fields(claimed), "error_type": type(err).__name__},
+            )
+            return
+        if check is None:
+            return
+    await _fail_check(publisher, target, check, details_url, claimed, log)
+
+
+async def _close_if_superseded(
+    jobs: JobRepository,
+    publisher: ReviewPublisher,
+    target: PullRequestTarget,
+    check: ExistingCheckRun | None,
+    claimed: ClaimedJob,
+    log: logging.Logger,
+) -> None:
+    """The lease was lost. Close this attempt's check as cancelled only when a newer
+    delivery superseded the job; a reaped job is retried and reuses the check.
+
+    A newer job on the same head SHA reuses the same check run. A run it already
+    completed is left alone (re-read just before closing; this narrows the race, it does
+    not remove it). If it reopened the run before this close lands, the run reads
+    "cancelled" until that job completes it.
+    """
+    if check is None:
+        return
+    try:
+        job = await jobs.get(claimed.job_id)
+        if job is None or job.status is not ReviewJobStatus.SUPERSEDED:
+            return
+        # A newer job on the same SHA reuses this run; if it already completed it, the
+        # run is no longer in progress and its result must stay.
+        current = await publisher.find_check_run(target, in_progress_only=True)
+        if current is None or current.id != check.id:
+            return
+        await publisher.fail_check(
+            target,
+            check,
+            "A newer push or re-run replaced this review.",
+            conclusion="cancelled",
+        )
+    except Exception as err:
+        log.warning(
+            "job.check_run.close_failed",
+            extra={**_job_fields(claimed), "error_type": type(err).__name__},
+        )
+
+
+async def _fail_check(
+    publisher: ReviewPublisher,
+    target: PullRequestTarget,
+    check: ExistingCheckRun,
+    details_url: str | None,
+    claimed: ClaimedJob,
+    log: logging.Logger,
+) -> None:
+    """The job failed for good: do not leave the check "in progress" on the pull request."""
+    try:
+        await publisher.fail_check(
+            target,
+            check,
+            "The review could not be completed. See the run for details.",
+            details_url,
+        )
+    except Exception as err:
+        log.warning(
+            "job.check_run.close_failed",
+            extra={**_job_fields(claimed), "error_type": type(err).__name__},
+        )
+
+
 async def _publish_skipped(
     publisher: ReviewPublisher,
     target: PullRequestTarget,
@@ -398,6 +546,9 @@ async def _publish_skipped(
     reviewable_files: int,
     claimed: ClaimedJob,
     log: logging.Logger,
+    *,
+    check: ExistingCheckRun | None = None,
+    details_url: str | None = None,
 ) -> None:
     """Post the "skipped" check run, updating the one an earlier run left on this SHA.
 
@@ -415,8 +566,8 @@ async def _publish_skipped(
         "max_input_tokens": too_large.limit,
     }
     try:
-        existing = await publisher.find_check_run(target)
-        await publisher.publish(target, plan, existing)
+        existing = check if check is not None else await publisher.find_check_run(target)
+        await publisher.publish(target, plan, existing, details_url)
     except Exception as err:
         log.warning(
             "job.skipped_check_run",
@@ -492,8 +643,9 @@ async def _record_failure(
     error_kind: str,
     retryable: bool,
     error: Exception,
-) -> bool:
+) -> ReviewJobStatus | None:
     """Record RETRYING or FAILED with the store, then log which one it was.
+    Returns the status the store set, or None when the store raised or the lease was lost.
 
     FAILED is logged at error with the exception: one Sentry event per failed
     job, its message replaced by the error_kind in production
@@ -501,7 +653,7 @@ async def _record_failure(
     frames. RETRYING stays at info and is never an event. The store calls are
     guarded: raising while handling a failure would lose the log-and-stop
     contract, so a store error is logged (error_type only) and the function
-    still returns False. A None status means the lease was lost; nothing is
+    still returns None. A None status means the lease was lost; nothing is
     logged because the job's new owner logs its own run."""
     try:
         with metrics.timed_db("fail"):
@@ -522,11 +674,11 @@ async def _record_failure(
                 "duration_ms": _elapsed_ms(started),
             },
         )
-        return False
+        return None
     if status is ReviewJobStatus.RETRYING:
         metrics.record_job(status, error_kind, review_seconds=None)
         await _log_retrying(jobs, claimed, log, started, error_kind=error_kind)
-        return False
+        return status
     if status is ReviewJobStatus.FAILED:
         metrics.record_job(status, error_kind, review_seconds=_review_seconds(claimed, started))
         log.error(
@@ -540,7 +692,7 @@ async def _record_failure(
                 "duration_ms": _elapsed_ms(started),
             },
         )
-    return False
+    return status
 
 
 async def _log_retrying(

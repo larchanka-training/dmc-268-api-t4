@@ -201,7 +201,26 @@ summary и напечатает ссылки. Полный путь провер
 - `PublishPolicy` одна на все репозитории, значения по умолчанию.
 - Исходящий текст не проходит редакцию секретов: `redact` по умолчанию возвращает текст как есть.
 - Очередь публикаций в репозиторий действует только внутри одного процесса.
-- Воркер не передаёт существующий Check Run, поэтому каждый прогон создаёт новый.
+- Воркер находит Check Run на head SHA (`find_check_run`) и обновляет его на месте, но `external_check_id` в БД пока не пишется.
 - `GET /jobs/{job_id}` отдаёт пустые `findings`, а `summary`, `error_log` и
   `external_check_url` равны `null`: эти данные пока не сохраняются.
 - GitLab не поддерживается.
+
+## Check run status and call resilience (issue #56)
+
+- Before the LLM call the worker shows the `AI review` check as `in_progress` (`start_check`,
+  reusing the run of the same head SHA). `publish` then completes that run in place with the
+  conclusion (`success`, `neutral`, `failure`, `skipped`). A job that fails for good closes it
+  as `neutral` (`fail_check`); a retryable failure leaves it for the retry.
+- With `APP_ORIGIN` set on the worker the check run carries `details_url` = `<APP_ORIGIN>/runs/<job id>`.
+- Webhook duplicates are dropped by the unique `(provider, delivery_id)` on `pr_review_jobs`
+  (`X-GitHub-Delivery`); the endpoint answers `202 {"status": "duplicate"}`.
+- GitHub and LLM calls in the worker retry in-call (3 attempts, 0.5 s / 1 s backoff with jitter,
+  `Retry-After` honoured up to 8 s) and share a circuit breaker per service: 5 consecutive failures
+  open it for 30 s, then one probe call is let through. While it is open the call fails at once
+  with the usual retryable error, so the job-level backoff (docs/PIPELINE_SPEC.md §4.3) takes over
+  and the LLM gateway moves to the fallback provider. A GitHub `POST` is repeated only after a
+  throttle, never after a timeout, so a review is not posted twice. A GitHub 429 is retried but does
+  not count towards the breaker (it is per installation). LLM timeouts are not repeated in-call: each
+  costs `LLM_TIMEOUT_SECONDS`, and repeating them could outlast the job lease; only 5xx and dropped
+  connections are.

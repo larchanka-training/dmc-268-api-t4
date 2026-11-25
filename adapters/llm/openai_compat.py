@@ -9,6 +9,7 @@ import sentry_sdk
 from adapters.llm.keys import DEFAULT_COOLDOWN_SECONDS, KeyPool, mask_key
 from adapters.llm.prompt import ChatMessage
 from adapters.observability import metrics
+from adapters.resilience import Resilience
 from domain.errors import ProviderUnavailableError
 
 logger = logging.getLogger("adapters.llm")
@@ -27,6 +28,27 @@ def parse_retry_after(value: str | None) -> float:
         return DEFAULT_COOLDOWN_SECONDS
 
 
+_TRANSIENT_REASONS = ("connection error", "HTTP 5")
+
+
+def _is_transient(error: Exception) -> bool:
+    """A dropped connection or a 5xx: fails fast, so worth repeating after a short wait.
+
+    Not a timeout: each costs LLM_TIMEOUT_SECONDS, and repeating it would push one call past
+    the job lease (LEASE_SECONDS); the gateway falls back to the next provider instead.
+    """
+    return isinstance(error, ProviderUnavailableError) and error.reason.startswith(
+        _TRANSIENT_REASONS
+    )
+
+
+def _is_overload(error: Exception) -> bool:
+    """The provider is unhealthy (feeds the breaker); a 4xx other than 429 is our own fault."""
+    return isinstance(error, ProviderUnavailableError) and not (
+        error.reason.startswith("HTTP 4") and not error.reason.startswith("HTTP 429")
+    )
+
+
 class OpenAICompatibleProvider:
     """POST {base_url}/chat/completions; serves both Eurouter and Ollama's /v1 API."""
 
@@ -43,7 +65,9 @@ class OpenAICompatibleProvider:
         max_tokens: int,
         provider_order: tuple[str, ...] = (),
         transport: httpx.AsyncBaseTransport | None = None,
+        resilience: Resilience | None = None,
     ) -> None:
+        self._resilience = resilience
         self._name = name
         self._url = f"{base_url.rstrip('/')}/chat/completions"
         self._model = model
@@ -66,6 +90,18 @@ class OpenAICompatibleProvider:
     async def complete(self, messages: Sequence[ChatMessage], *, purpose: str = "review") -> str:
         """The reply text. ``purpose`` (review, correction, summary) labels the request's
         metrics and span (docs/observability.md § Review pipeline)."""
+        if self._resilience is None:
+            return await self._complete_once(messages, purpose)
+        return await self._resilience.call(
+            lambda: self._complete_once(messages, purpose),
+            is_failure=_is_overload,
+            can_retry=_is_transient,
+            open_error=lambda retry_in: ProviderUnavailableError(
+                self._name, f"circuit open, next probe in {retry_in:.0f}s"
+            ),
+        )
+
+    async def _complete_once(self, messages: Sequence[ChatMessage], purpose: str) -> str:
         body = self._request_body(messages)
         async with httpx.AsyncClient(
             transport=self._transport, timeout=httpx.Timeout(self._timeout_seconds)

@@ -22,7 +22,7 @@ from tests.worker.test_process import (
     make_context,
     make_payload,
 )
-from tests.worker.test_review_stage import FakeGateway, finding
+from tests.worker.test_review_stage import CheckStubs, FakeGateway, finding
 from worker.loop import claim_and_process_once
 from worker.process import RECORDED_STEPS, ReviewStage, process_claimed_job
 
@@ -41,7 +41,7 @@ def posted(severity: str) -> float:
     return value or 0.0
 
 
-class AcceptingPublisher:
+class AcceptingPublisher(CheckStubs):
     """The forge took every planned comment."""
 
     async def publish(
@@ -49,6 +49,7 @@ class AcceptingPublisher:
         target: PullRequestTarget,
         plan: PublishPlan,
         existing_check: ExistingCheckRun | None = None,
+        details_url: str | None = None,
     ) -> PublishOutcome:
         return PublishOutcome(
             check_run_id=1,
